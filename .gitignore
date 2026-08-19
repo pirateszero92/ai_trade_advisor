@@ -1,0 +1,45 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+.env.local
+
+# Secrets
+*.key
+*.pem
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# DB
+*.db
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Flutter
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.pub-cache/
+mobile/.pub/
+mobile/build/
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/key.properties
+
+# Test
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Docker
+*.override.yml

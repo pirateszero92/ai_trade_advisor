@@ -1,0 +1,134 @@
+﻿"""
+Trades API
+Manage paper / live trade orders and open position tracking.
+"""
+
+from __future__ import annotations
+
+from typing import Literal, Optional
+from uuid import uuid4
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from app.core.security import verify_api_key
+from app.engines.execution_engine import ExecutionEngine
+
+router = APIRouter()
+_execution = ExecutionEngine()
+
+# In-memory trade store (replace with DB in production)
+_trades: dict[str, dict] = {}
+
+
+class PlaceOrderRequest(BaseModel):
+    symbol: str
+    direction: Literal["long", "short"]
+    entry: float
+    stop_loss: float
+    take_profit: float
+    position_size: float
+    exchange: str = "binance"
+    mode: Optional[Literal["paper", "live"]] = None
+    notes: str = ""
+
+
+class UpdateTradeRequest(BaseModel):
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    notes: Optional[str] = None
+    status: Optional[Literal["open", "closed", "cancelled"]] = None
+    close_price: Optional[float] = None
+
+
+@router.post("/place")
+async def place_order(
+    req: PlaceOrderRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Place a new paper or live trade order."""
+    result = await _execution.place_order(
+        symbol=req.symbol,
+        direction=req.direction,
+        entry=req.entry,
+        stop_loss=req.stop_loss,
+        take_profit=req.take_profit,
+        position_size=req.position_size,
+        exchange=req.exchange,
+        mode=req.mode,
+    )
+    trade_id = str(uuid4())
+    trade = {
+        "id": trade_id,
+        "opened_at": datetime.now(timezone.utc).isoformat(),
+        "status": "open",
+        "notes": req.notes,
+        **result,
+    }
+    _trades[trade_id] = trade
+    return trade
+
+
+@router.get("/")
+async def list_trades(
+    status: Optional[str] = None,
+    _key: str = Depends(verify_api_key),
+):
+    """List all trades, optionally filtered by status."""
+    trades = list(_trades.values())
+    if status:
+        trades = [t for t in trades if t.get("status") == status]
+    return {"total": len(trades), "trades": trades}
+
+
+@router.get("/{trade_id}")
+async def get_trade(
+    trade_id: str,
+    _key: str = Depends(verify_api_key),
+):
+    """Get a single trade by ID."""
+    trade = _trades.get(trade_id)
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    return trade
+
+
+@router.patch("/{trade_id}")
+async def update_trade(
+    trade_id: str,
+    req: UpdateTradeRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Update SL, TP, notes, or close a trade."""
+    trade = _trades.get(trade_id)
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    if req.stop_loss is not None:
+        trade["stop_loss"] = req.stop_loss
+    if req.take_profit is not None:
+        trade["take_profit"] = req.take_profit
+    if req.notes is not None:
+        trade["notes"] = req.notes
+    if req.status is not None:
+        trade["status"] = req.status
+        if req.status == "closed":
+            trade["closed_at"] = datetime.now(timezone.utc).isoformat()
+            trade["close_price"] = req.close_price
+
+    _trades[trade_id] = trade
+    return trade
+
+
+@router.delete("/{trade_id}")
+async def cancel_trade(
+    trade_id: str,
+    _key: str = Depends(verify_api_key),
+):
+    """Cancel an open trade."""
+    trade = _trades.get(trade_id)
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    trade["status"] = "cancelled"
+    return {"message": "Trade cancelled", "trade_id": trade_id}

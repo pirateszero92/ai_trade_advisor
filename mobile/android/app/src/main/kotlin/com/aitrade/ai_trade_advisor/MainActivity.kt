@@ -1,0 +1,5 @@
+package com.aitrade.ai_trade_advisor
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()

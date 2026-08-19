@@ -1,0 +1,39 @@
+﻿# LLM Providers Configuration
+# Edit model names and parameters here without code changes.
+
+providers:
+  local:
+    enabled: true
+    endpoint: "${LOCAL_LLM_ENDPOINT}"
+    model: "${LOCAL_LLM_MODEL}"
+    timeout: 60
+    max_tokens: 1500
+    temperature: 0.3
+    description: "Local LM Studio / Ollama OpenAI-compatible endpoint"
+
+  gemini:
+    enabled: true
+    model: "${GEMINI_MODEL}"
+    timeout: 60
+    max_tokens: 1500
+    temperature: 0.3
+    description: "Google Gemini — cloud fallback #1"
+
+  openrouter:
+    enabled: true
+    model: "${OPENROUTER_MODEL}"
+    timeout: 60
+    max_tokens: 1500
+    temperature: 0.3
+    description: "OpenRouter multi-model — cloud fallback #2"
+
+# Fallback order: first available provider wins
+fallback_chain:
+  - local
+  - gemini
+  - openrouter
+
+# Chat history settings
+chat:
+  max_history_turns: 10
+  system_prompt_file: "advisor_v1.md"
