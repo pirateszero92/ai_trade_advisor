@@ -82,11 +82,83 @@ class MarketMonitor:
         while self.running:
             try:
                 await self.scan_all()
+                await self._check_open_positions_tp_sl()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in proactive scan loop: {e}")
             await asyncio.sleep(self.interval)
+
+    async def _check_open_positions_tp_sl(self):
+        """Auto-monitor open positions and execute TP/SL exits automatically."""
+        try:
+            from app.api.trades import _trades
+            open_trades = [t for t in _trades.values() if t.get("status") == "open"]
+            if not open_trades:
+                return
+
+            for trade in open_trades:
+                sym = trade["symbol"]
+                dir_ = trade.get("direction", "long").lower()
+                entry = trade.get("entry", 0.0)
+                sl = trade.get("stop_loss", 0.0)
+                tp = trade.get("take_profit", 0.0)
+                trade_id = trade.get("id")
+
+                # Get latest live price
+                df = await self.market_data.get_ohlcv(sym, "1m", "crypto" if "/" in sym else "stock", limit=5)
+                if df.empty:
+                    continue
+                current_price = float(df["close"].iloc[-1])
+
+                # Check TP / SL hit
+                hit_reason = None
+                if dir_ == "long":
+                    if tp > 0 and current_price >= tp:
+                        hit_reason = "Take Profit (TP Hit) 🎯"
+                    elif sl > 0 and current_price <= sl:
+                        hit_reason = "Stop Loss (SL Hit) 🛑"
+                else:
+                    if tp > 0 and current_price <= tp:
+                        hit_reason = "Take Profit (TP Hit) 🎯"
+                    elif sl > 0 and current_price >= sl:
+                        hit_reason = "Stop Loss (SL Hit) 🛑"
+
+                if hit_reason:
+                    # Calculate realized PnL
+                    size = trade.get("position_size", trade.get("size", 1.0))
+                    if dir_ == "long":
+                        pnl = (current_price - entry) * size
+                        pnl_pct = ((current_price - entry) / entry) * 100
+                    else:
+                        pnl = (entry - current_price) * size
+                        pnl_pct = ((entry - current_price) / entry) * 100
+
+                    trade["status"] = "closed"
+                    trade["closed_at"] = datetime.now(timezone.utc).isoformat()
+                    trade["close_price"] = current_price
+                    trade["close_reason"] = hit_reason
+                    trade["pnl"] = round(pnl, 2)
+                    trade["pnl_pct"] = round(pnl_pct, 2)
+
+                    logger.info(f"⚡ AUTO EXIT: {sym} {trade.get('tag', trade_id)} closed by {hit_reason} at ${current_price:.2f} (PnL: ${pnl:.2f})")
+
+                    # Broadcast update to WebSocket
+                    await broadcast({"type": "trade_closed", "data": trade})
+
+                    # Dispatch Alert to Telegram / LINE
+                    await self.notifier.send_signal_alert(
+                        symbol=sym,
+                        timeframe="1M",
+                        direction="closed",
+                        message=f"[{hit_reason}] Position {trade.get('tag', sym)} ปิดสถานะอัตโนมัติที่ราคา ${current_price:.2f} | Realized PnL: ${pnl:+.2f} ({pnl_pct:+.2f}%)",
+                        confluence_score=100,
+                        entry=entry,
+                        sl=sl,
+                        tp=tp,
+                    )
+        except Exception as e:
+            logger.error(f"Error checking open positions TP/SL: {e}")
 
     async def scan_all(self) -> list[dict]:
         """Scan all watchlist symbols and return newly detected signals."""
