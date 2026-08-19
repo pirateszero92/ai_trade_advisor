@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
 import '../../app/theme.dart';
+import '../../core/api/api_client.dart';
 
 class SignalsScreen extends StatefulWidget {
   const SignalsScreen({super.key});
@@ -51,7 +52,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
     setState(() => _isLoading = true);
     try {
       final dio = Dio();
-      final resp = await dio.get('http://127.0.0.1:8000/api/v1/signals/');
+      final resp = await dio.get(AppApi.url('/api/v1/signals/'));
       final List<dynamic> list = resp.data['signals'] ?? [];
       setState(() {
         _signals = list.map((e) {
@@ -69,7 +70,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
   Future<void> _fetchPositions() async {
     try {
       final dio = Dio();
-      final resp = await dio.get('http://127.0.0.1:8000/api/v1/trades/');
+      final resp = await dio.get(AppApi.url('/api/v1/trades/'));
       final List<dynamic> list = resp.data['trades'] ?? [];
       setState(() {
         _positions = list
@@ -84,7 +85,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
     setState(() => _isScanning = true);
     try {
       final dio = Dio();
-      final resp = await dio.post('http://127.0.0.1:8000/api/v1/signals/scan');
+      final resp = await dio.post(AppApi.url('/api/v1/signals/scan'));
       final List<dynamic> list = resp.data['signals'] ?? [];
       setState(() {
         _signals = list.map((e) {
@@ -200,7 +201,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
         final dio = Dio();
         final size = double.tryParse(sizeCtrl.text) ?? 1.0;
         await dio.post(
-          'http://127.0.0.1:8000/api/v1/trades/place',
+          AppApi.url('/api/v1/trades/place'),
           data: {
             'symbol': sym,
             'direction': dir,
@@ -235,7 +236,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
   Future<void> _closePosition(int tradeId, String tag) async {
     try {
       final dio = Dio();
-      await dio.post('http://127.0.0.1:8000/api/v1/trades/$tradeId/close');
+      await dio.post(AppApi.url('/api/v1/trades/$tradeId/close'));
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(

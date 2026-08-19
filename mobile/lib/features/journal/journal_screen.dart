@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
 import '../../app/theme.dart';
+import '../../core/api/api_client.dart';
 
 class JournalScreen extends StatefulWidget {
   const JournalScreen({super.key});
@@ -56,7 +57,7 @@ class _JournalScreenState extends State<JournalScreen> {
   Future<void> _fetchTrades() async {
     try {
       final dio = Dio();
-      final resp = await dio.get('http://127.0.0.1:8000/api/v1/trades/');
+      final resp = await dio.get(AppApi.url('/api/v1/trades/'));
       final List<dynamic> list = resp.data['trades'] ?? [];
       setState(() {
         _trades = list.map((e) {
@@ -81,7 +82,7 @@ class _JournalScreenState extends State<JournalScreen> {
       final closePrice = (t['live_price'] as num?)?.toDouble() ?? (t['entry'] as num?)?.toDouble() ?? 100.0;
 
       await dio.post(
-        'http://127.0.0.1:8000/api/v1/trades/$tradeId/close',
+        AppApi.url('/api/v1/trades/$tradeId/close'),
         data: {
           'close_price': closePrice,
           'reason': 'Manual Close from Journal',

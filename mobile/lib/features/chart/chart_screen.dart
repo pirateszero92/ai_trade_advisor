@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:candlesticks/candlesticks.dart';
 import 'package:dio/dio.dart';
 import '../../app/theme.dart';
+import '../../core/api/api_client.dart';
 import 'smc_interactive_chart.dart';
 
 class ChartScreen extends ConsumerStatefulWidget {
@@ -87,7 +88,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     try {
       final dio = Dio();
       final resp = await dio.get(
-        'http://127.0.0.1:8000/api/v1/chart/ticker',
+        AppApi.url('/api/v1/chart/ticker'),
         queryParameters: {
           'symbol': _selectedSymbol,
           'market_type': _selectedMarket,
@@ -178,11 +179,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
     try {
       final dio = Dio();
-      const baseUrl = 'http://127.0.0.1:8000';
+      final baseUrl = AppApi.baseUrl;
 
       // 1. Fetch OHLCV candles
       final ohlcvResp = await dio.get(
-        '$baseUrl/api/v1/chart/ohlcv',
+        AppApi.url('/api/v1/chart/ohlcv'),
         queryParameters: {
           'symbol': _selectedSymbol,
           'timeframe': _selectedTimeframe,
@@ -219,7 +220,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
       // 2. Fetch SMC Overlay
       final overlayResp = await dio.get(
-        '$baseUrl/api/v1/chart/overlay',
+        AppApi.url('/api/v1/chart/overlay'),
         queryParameters: {
           'symbol': _selectedSymbol,
           'timeframe': _selectedTimeframe,
@@ -244,7 +245,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   Future<void> _fetchOpenPositions() async {
     try {
       final dio = Dio();
-      final resp = await dio.get('http://127.0.0.1:8000/api/v1/trades/', queryParameters: {'status': 'open'});
+      final resp = await dio.get(AppApi.url('/api/v1/trades/'), queryParameters: {'status': 'open'});
       final List<dynamic> list = resp.data['trades'] ?? [];
       setState(() {
         _openPositions = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
@@ -263,7 +264,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     try {
       final dio = Dio();
       await dio.post(
-        'http://127.0.0.1:8000/api/v1/trades/place',
+        AppApi.url('/api/v1/trades/place'),
         data: {
           'symbol': _selectedSymbol,
           'direction': direction,
@@ -305,7 +306,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       final closePrice = _getMarkPriceForSymbol(sym, entry);
 
       final resp = await dio.post(
-        'http://127.0.0.1:8000/api/v1/trades/$tradeId/close',
+        AppApi.url('/api/v1/trades/$tradeId/close'),
         data: {
           'close_price': closePrice,
           'reason': 'Manual Close',
@@ -817,7 +818,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           .toList();
 
       final resp = await dio.post(
-        'http://127.0.0.1:8000/api/v1/settings/llm/chat',
+        AppApi.url('/api/v1/settings/llm/chat'),
         data: {
           'messages': chatHistory,
           'context': {

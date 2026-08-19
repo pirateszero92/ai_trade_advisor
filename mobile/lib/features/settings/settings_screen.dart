@@ -4,6 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:dio/dio.dart';
 import '../../app/theme.dart';
+import '../../core/api/api_client.dart';
 
 // ---------------------------------------------------------------------------
 // Settings state
@@ -195,7 +196,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   Future<void> _fetchWatchlist() async {
     try {
       final dio = Dio();
-      final resp = await dio.get('http://127.0.0.1:8000/api/v1/settings/watchlist');
+      final resp = await dio.get(AppApi.url('/api/v1/settings/watchlist'));
       final List<dynamic> list = resp.data['watchlist'] ?? [];
       setState(() {
         _watchlist = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
@@ -207,7 +208,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     try {
       final dio = Dio();
       await dio.post(
-        'http://127.0.0.1:8000/api/v1/settings/watchlist',
+        AppApi.url('/api/v1/settings/watchlist'),
         data: {
           'symbol': symbol.trim().toUpperCase(),
           'market_type': marketType.toLowerCase(),
@@ -237,7 +238,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   Future<void> _removeWatchlistItem(String symbol) async {
     try {
       final dio = Dio();
-      await dio.delete('http://127.0.0.1:8000/api/v1/settings/watchlist/$symbol');
+      await dio.delete(AppApi.url('/api/v1/settings/watchlist/$symbol'));
       _fetchWatchlist();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -394,7 +395,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     try {
       final dio = Dio();
       await dio.post(
-        'http://127.0.0.1:8000/api/v1/settings/llm/config',
+        AppApi.url('/api/v1/settings/llm/config'),
         data: {
           'provider': selectedProvider,
           'local_endpoint': _lmEndpointCtrl.text.trim(),
@@ -434,7 +435,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     try {
       final dio = Dio();
       if (isApi) {
-        final resp = await dio.get('http://127.0.0.1:8000/health');
+        final resp = await dio.get(AppApi.url('/health'));
         final ok = resp.data['status'] == 'ok';
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -466,7 +467,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         }
 
         final resp = await dio.post(
-          'http://127.0.0.1:8000/api/v1/settings/llm/test',
+          AppApi.url('/api/v1/settings/llm/test'),
           data: {
             'provider': provider,
             'endpoint': endpoint,
@@ -496,7 +497,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         }
       } else {
         final resp = await dio.post(
-          'http://127.0.0.1:8000/api/v1/settings/notifications/test',
+          AppApi.url('/api/v1/settings/notifications/test'),
           data: {
             'telegram_bot_token': _telegramTokenCtrl.text.trim(),
             'telegram_chat_id': _telegramChatIdCtrl.text.trim(),

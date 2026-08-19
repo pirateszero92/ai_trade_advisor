@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
 import '../../app/theme.dart';
+import '../../core/api/api_client.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({super.key});
@@ -116,7 +117,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           .toList();
 
       final resp = await dio.post(
-        'http://127.0.0.1:8000/api/v1/settings/llm/chat',
+        AppApi.url('/api/v1/settings/llm/chat'),
         data: {'messages': chatMessages},
       );
 
