@@ -374,9 +374,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     final notifier = ref.read(settingsProvider.notifier);
     final current = ref.read(settingsProvider);
     final providers = ['lmstudio', 'gemini', 'openrouter'];
+    final selectedProvider = providers[_aiTabController.index];
+
     await notifier.save(current.copyWith(
       apiBaseUrl: _apiUrlCtrl.text.trim(),
-      aiProvider: providers[_aiTabController.index],
+      aiProvider: selectedProvider,
       lmStudioEndpoint: _lmEndpointCtrl.text.trim(),
       lmStudioModel: _lmModelCtrl.text.trim(),
       geminiKey: _geminiKeyCtrl.text.trim(),
@@ -387,10 +389,28 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       telegramChatId: _telegramChatIdCtrl.text.trim(),
       lineToken: _lineTokenCtrl.text.trim(),
     ));
+
+    // Synchronize active LLM configurations with FastAPI Backend runtime & .env
+    try {
+      final dio = Dio();
+      await dio.post(
+        'http://127.0.0.1:8000/api/v1/settings/llm/config',
+        data: {
+          'provider': selectedProvider,
+          'local_endpoint': _lmEndpointCtrl.text.trim(),
+          'local_model': _lmModelCtrl.text.trim(),
+          'gemini_key': _geminiKeyCtrl.text.trim(),
+          'gemini_model': _geminiModelCtrl.text.trim(),
+          'openrouter_key': _openRouterKeyCtrl.text.trim(),
+          'openrouter_model': _openRouterModelCtrl.text.trim(),
+        },
+      );
+    } catch (_) {}
+
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Settings saved ✓'),
+          content: Text('Settings saved & synced with AI Engine ✓'),
           backgroundColor: AppColors.bullish,
           duration: Duration(seconds: 2),
         ),
@@ -399,6 +419,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   }
 
   Future<void> _testConnection(String label) async {
+    final isTg = label.toLowerCase().contains('telegram');
+    final isLine = label.toLowerCase().contains('line');
+    final isApi = label.toLowerCase().contains('backend') || label.toLowerCase().contains('api');
+    final isLLM = !isTg && !isLine && !isApi;
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('Testing $label connection...'),
@@ -408,32 +433,93 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
     try {
       final dio = Dio();
-      final resp = await dio.post(
-        'http://127.0.0.1:8000/api/v1/settings/notifications/test',
-        data: {
-          'telegram_bot_token': _telegramTokenCtrl.text.trim(),
-          'telegram_chat_id': _telegramChatIdCtrl.text.trim(),
-          'line_notify_token': _lineTokenCtrl.text.trim(),
-        },
-      );
-
-      final results = resp.data['results'] as Map<String, dynamic>? ?? {};
-      final isTg = label.toLowerCase().contains('telegram');
-      final isLine = label.toLowerCase().contains('line');
-      final ok = isTg ? (results['telegram'] == true) : (isLine ? (results['line'] == true) : true);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: ok ? AppColors.bullish : AppColors.bearish,
-            content: Text(
-              ok
-                  ? '✅ $label test alert sent successfully!'
-                  : '⚠️ $label test failed. Please check your token/chat ID.',
-              style: TextStyle(color: ok ? Colors.black : Colors.white, fontWeight: FontWeight.bold),
+      if (isApi) {
+        final resp = await dio.get('http://127.0.0.1:8000/health');
+        final ok = resp.data['status'] == 'ok';
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              backgroundColor: ok ? AppColors.bullish : AppColors.bearish,
+              content: Text(
+                ok ? '✅ Backend API Connected! (v${resp.data['version']})' : '⚠️ Connection failed',
+                style: TextStyle(color: ok ? Colors.black : Colors.white, fontWeight: FontWeight.bold),
+              ),
             ),
-          ),
+          );
+        }
+      } else if (isLLM) {
+        String provider = 'local';
+        String? endpoint = _lmEndpointCtrl.text.trim();
+        String? model = _lmModelCtrl.text.trim();
+        String? apiKey;
+
+        if (label.toLowerCase().contains('gemini')) {
+          provider = 'gemini';
+          endpoint = null;
+          model = _geminiModelCtrl.text.trim();
+          apiKey = _geminiKeyCtrl.text.trim();
+        } else if (label.toLowerCase().contains('openrouter')) {
+          provider = 'openrouter';
+          endpoint = null;
+          model = _openRouterModelCtrl.text.trim();
+          apiKey = _openRouterKeyCtrl.text.trim();
+        }
+
+        final resp = await dio.post(
+          'http://127.0.0.1:8000/api/v1/settings/llm/test',
+          data: {
+            'provider': provider,
+            'endpoint': endpoint,
+            'model': model,
+            'api_key': apiKey,
+          },
         );
+
+        final ok = resp.data['ok'] == true;
+        final latency = resp.data['latency_ms'] ?? 0;
+        final error = resp.data['error'] ?? 'Connection failed';
+        final usedModel = resp.data['model'] ?? model;
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              backgroundColor: ok ? AppColors.bullish : AppColors.bearish,
+              content: Text(
+                ok
+                    ? '✅ $label Connected! Model: $usedModel (${latency}ms)'
+                    : '⚠️ $label Test Failed: $error',
+                style: TextStyle(color: ok ? Colors.black : Colors.white, fontWeight: FontWeight.bold),
+              ),
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        }
+      } else {
+        final resp = await dio.post(
+          'http://127.0.0.1:8000/api/v1/settings/notifications/test',
+          data: {
+            'telegram_bot_token': _telegramTokenCtrl.text.trim(),
+            'telegram_chat_id': _telegramChatIdCtrl.text.trim(),
+            'line_notify_token': _lineTokenCtrl.text.trim(),
+          },
+        );
+
+        final results = resp.data['results'] as Map<String, dynamic>? ?? {};
+        final ok = isTg ? (results['telegram'] == true) : (isLine ? (results['line'] == true) : true);
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              backgroundColor: ok ? AppColors.bullish : AppColors.bearish,
+              content: Text(
+                ok
+                    ? '✅ $label test alert sent successfully!'
+                    : '⚠️ $label test failed. Please check your token/chat ID.',
+                style: TextStyle(color: ok ? Colors.black : Colors.white, fontWeight: FontWeight.bold),
+              ),
+            ),
+          );
+        }
       }
     } catch (e) {
       if (mounted) {
