@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:dio/dio.dart';
 import '../../app/theme.dart';
 
 // ---------------------------------------------------------------------------
@@ -251,14 +252,50 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     }
   }
 
-  void _testConnection(String label) {
+  Future<void> _testConnection(String label) async {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('Testing $label connection...'),
         duration: const Duration(seconds: 2),
       ),
     );
-    // TODO: implement actual connection test
+
+    try {
+      final dio = Dio();
+      final resp = await dio.post(
+        'http://127.0.0.1:8000/api/v1/settings/notifications/test',
+        data: {
+          'telegram_bot_token': _telegramTokenCtrl.text.trim(),
+          'telegram_chat_id': _telegramChatIdCtrl.text.trim(),
+          'line_notify_token': _lineTokenCtrl.text.trim(),
+        },
+      );
+
+      final results = resp.data['results'] as Map<String, dynamic>? ?? {};
+      final isTg = label.toLowerCase().contains('telegram');
+      final isLine = label.toLowerCase().contains('line');
+      final ok = isTg ? (results['telegram'] == true) : (isLine ? (results['line'] == true) : true);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: ok ? AppColors.bullish : AppColors.bearish,
+            content: Text(
+              ok
+                  ? '✅ $label test alert sent successfully!'
+                  : '⚠️ $label test failed. Please check your token/chat ID.',
+              style: TextStyle(color: ok ? Colors.black : Colors.white, fontWeight: FontWeight.bold),
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(backgroundColor: AppColors.bearish, content: Text('Test request failed: $e')),
+        );
+      }
+    }
   }
 
   @override

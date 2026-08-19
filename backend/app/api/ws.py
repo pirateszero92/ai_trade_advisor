@@ -1,4 +1,4 @@
-﻿"""
+"""
 WebSocket API
 Real-time signal streaming and chat endpoint.
 """
@@ -36,7 +36,8 @@ async def broadcast(message: dict) -> None:
             await ws.send_text(data)
         except Exception:
             dead.add(ws)
-    _connections -= dead
+    if dead:
+        _connections.difference_update(dead)
 
 
 @router.websocket("/signals")

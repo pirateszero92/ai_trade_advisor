@@ -1,4 +1,4 @@
-﻿"""
+"""
 AI Engine
 Multi-provider LLM integration with automatic fallback chain.
 Providers: Local (LM Studio / OpenAI-compat) -> Gemini -> OpenRouter
@@ -36,7 +36,9 @@ class AIAnalysis:
     key_points: list[str] = field(default_factory=list)
     risk_notes: str = ""
     market_context: str = ""
-    raw_response: str = ""
+    @property
+    def message(self) -> str:
+        return self.reasoning or self.risk_notes or "โครงสร้างตลาดได้รับการยืนยันตามระบบ SMC"
 
     def to_dict(self) -> dict:
         return {

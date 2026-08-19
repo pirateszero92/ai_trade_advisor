@@ -1,4 +1,4 @@
-﻿from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
@@ -11,7 +11,11 @@ from app.core.config import get_settings
 async def lifespan(app: FastAPI):
     cfg = get_settings()
     logger.info(f"Starting AI Trade Advisor [{cfg.app_env}]")
+    from app.services.event_trigger import MarketMonitor
+    monitor = MarketMonitor.get_instance()
+    await monitor.start()
     yield
+    monitor.stop()
     logger.info("Shutting down.")
 
 

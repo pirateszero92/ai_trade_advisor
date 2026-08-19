@@ -1,4 +1,4 @@
-﻿"""
+"""
 Settings API
 Manage LLM provider settings, system prompt, and strategy configuration.
 """
@@ -136,3 +136,46 @@ async def reload_strategy(_key: str = Depends(verify_api_key)):
     """Reload strategy rules from config/strategy.yaml."""
     _strategy.reload()
     return {"message": "Strategy reloaded", "name": _strategy._strategy.get("name")}
+
+
+# ------------------------------------------------------------------
+# Notifications Test
+# ------------------------------------------------------------------
+
+class TestNotificationRequest(BaseModel):
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    line_notify_token: str = ""
+
+
+@router.post("/notifications/test")
+async def test_notifications(
+    req: TestNotificationRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Send a test signal alert to configured Telegram and LINE channels."""
+    from app.services.notification import NotificationService
+    from app.core.config import get_settings
+    cfg = get_settings()
+
+    # Override temporary tokens if provided in request
+    if req.telegram_bot_token:
+        cfg.telegram_bot_token = req.telegram_bot_token
+    if req.telegram_chat_id:
+        cfg.telegram_chat_id = req.telegram_chat_id
+    if req.line_notify_token:
+        cfg.line_notify_token = req.line_notify_token
+
+    notifier = NotificationService()
+    results = await notifier.send_signal_alert(
+        symbol="BTC/USDT",
+        timeframe="1H",
+        direction="long",
+        message="[TEST ALERT] Apex AI Trade Advisor เชื่อมต่อระบบแจ้งเตือนสำเร็จแล้ว! พร้อมส่งสัญญาณ SMC แบบ Real-time",
+        confluence_score=85,
+        entry=64500.0,
+        sl=63800.0,
+        tp=66200.0,
+        rr=2.4,
+    )
+    return {"message": "Test notification executed", "results": results}

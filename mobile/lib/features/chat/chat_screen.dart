@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:dio/dio.dart';
 import '../../app/theme.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
@@ -97,15 +98,53 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 
-  void _sendMessage() {
+  Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
+
     setState(() {
       _messages.add({'role': 'user', 'content': text});
-      _messages.add({'role': 'assistant', 'content': 'กำลังวิเคราะห์...'});
+      _messages.add({'role': 'assistant', 'content': 'กำลังวิเคราะห์โครงสร้างตลาด...'});
     });
     _controller.clear();
-    // TODO: Call API
+
+    try {
+      final dio = Dio();
+      final chatMessages = _messages
+          .where((m) => m['content'] != 'กำลังวิเคราะห์โครงสร้างตลาด...')
+          .map((m) => {'role': m['role'], 'content': m['content']})
+          .toList();
+
+      final resp = await dio.post(
+        'http://127.0.0.1:8000/api/v1/settings/llm/chat',
+        data: {'messages': chatMessages},
+      );
+
+      final reply = resp.data['response'] as String? ?? 'ขออภัยครับ เกิดข้อผิดพลาดในการประมวลผลคำตอบ';
+
+      setState(() {
+        _messages.removeLast();
+        _messages.add({'role': 'assistant', 'content': reply});
+      });
+    } catch (e) {
+      setState(() {
+        _messages.removeLast();
+        _messages.add({
+          'role': 'assistant',
+          'content': '⚠️ ไม่สามารถเชื่อมต่อกับ AI Engine ได้: $e\nกรุณาตรวจสอบการตั้งค่า Provider ในหน้า Settings',
+        });
+      });
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 }
 

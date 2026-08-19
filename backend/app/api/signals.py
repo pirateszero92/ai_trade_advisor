@@ -1,4 +1,4 @@
-﻿"""
+"""
 Signals API
 Triggers full SMC + AI analysis for a given symbol and timeframe.
 """
@@ -119,3 +119,41 @@ async def quick_signal(
         raise HTTPException(status_code=502, detail="Failed to fetch market data")
     signal = _smc.analyze(df, symbol, timeframe, htf_bias)
     return signal.to_dict()
+
+
+@router.get("/")
+async def list_signals(
+    limit: int = Query(20, le=50),
+    _key: str = Depends(verify_api_key),
+):
+    """List recent high-confluence SMC signals detected by proactive monitor."""
+    from app.services.event_trigger import MarketMonitor
+    monitor = MarketMonitor.get_instance()
+    signals = monitor.recent_signals[:limit]
+
+    # If empty, run an initial scan to populate
+    if not signals:
+        signals = await monitor.scan_all()
+
+    return {
+        "total": len(signals),
+        "last_scan": monitor.last_scan_time,
+        "running": monitor.running,
+        "signals": signals,
+    }
+
+
+@router.post("/scan")
+async def trigger_scan(
+    _key: str = Depends(verify_api_key),
+):
+    """Trigger an immediate proactive scan across all watchlist markets."""
+    from app.services.event_trigger import MarketMonitor
+    monitor = MarketMonitor.get_instance()
+    new_signals = await monitor.scan_all()
+    return {
+        "message": f"Scan complete. {len(new_signals)} new setups detected.",
+        "new_count": len(new_signals),
+        "total_signals": len(monitor.recent_signals),
+        "signals": monitor.recent_signals,
+    }

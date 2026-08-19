@@ -87,6 +87,10 @@ class SMCSignal:
     swing_highs: list[SwingPoint] = field(default_factory=list, repr=False)
     swing_lows: list[SwingPoint] = field(default_factory=list, repr=False)
 
+    @property
+    def confluence_score(self) -> int:
+        return self.confluence * 10 if self.confluence <= 10 else self.confluence
+
     def to_dict(self) -> dict:
         """Serialise to a JSON-safe dict (excludes raw swings)."""
         return {
