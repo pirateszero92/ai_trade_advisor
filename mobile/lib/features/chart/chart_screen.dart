@@ -29,6 +29,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   List<Candle> _candles = [];
   Map<String, dynamic>? _smcOverlayData;
+  List<Map<String, dynamic>> _openPositions = [];
 
   // Realtime Stats
   double _lastPrice = 0.0;
@@ -52,6 +53,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   void initState() {
     super.initState();
     _fetchChartData();
+    _fetchOpenPositions();
   }
 
   Future<void> _fetchChartData() async {
@@ -129,21 +131,93 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     }
   }
 
-  void _executePaperOrder(String direction) {
-    final entry = _lastPrice;
-    final sl = direction == 'long' ? entry * 0.99 : entry * 101;
-    final tp = direction == 'long' ? entry * 1.025 : entry * 0.975;
+  Future<void> _fetchOpenPositions() async {
+    try {
+      final dio = Dio();
+      final resp = await dio.get('http://127.0.0.1:8000/api/v1/trades/', queryParameters: {'status': 'open'});
+      final List<dynamic> list = resp.data['trades'] ?? [];
+      setState(() {
+        _openPositions = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      });
+    } catch (e) {
+      // ignore
+    }
+  }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        backgroundColor: direction == 'long' ? AppColors.bullish : AppColors.bearish,
-        content: Text(
-          '⚡ Paper Order Placed: ${direction.toUpperCase()} $_selectedSymbol @ \$$entry\nSL: \$$sl | TP: \$$tp (2.5R)',
-          style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+  Future<void> _executePaperOrder(String direction) async {
+    final entry = _lastPrice > 0 ? _lastPrice : 64000.0;
+    final sl = direction == 'long' ? entry * 0.992 : entry * 1.008;
+    final tp = direction == 'long' ? entry * 1.025 : entry * 0.975;
+    const size = 0.15;
+
+    try {
+      final dio = Dio();
+      await dio.post(
+        'http://127.0.0.1:8000/api/v1/trades/place',
+        data: {
+          'symbol': _selectedSymbol,
+          'direction': direction,
+          'entry': entry,
+          'stop_loss': sl,
+          'take_profit': tp,
+          'position_size': size,
+          'exchange': _selectedExchange,
+          'mode': 'paper',
+          'notes': 'Executed from Apex AI Terminal',
+        },
+      );
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: direction == 'long' ? AppColors.bullish : AppColors.bearish,
+          content: Text(
+            '⚡ Position Opened: ${direction.toUpperCase()} $_selectedSymbol @ \$$entry\nSL: \$${sl.toStringAsFixed(2)} | TP: \$${tp.toStringAsFixed(2)}',
+            style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+          ),
+          duration: const Duration(seconds: 4),
         ),
-        duration: const Duration(seconds: 4),
-      ),
-    );
+      );
+
+      await _fetchOpenPositions();
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(backgroundColor: AppColors.bearish, content: Text('Failed to place order: $e')),
+      );
+    }
+  }
+
+  Future<void> _closePosition(String tradeId) async {
+    try {
+      final dio = Dio();
+      final closePrice = _lastPrice > 0 ? _lastPrice : 64000.0;
+      final resp = await dio.post(
+        'http://127.0.0.1:8000/api/v1/trades/$tradeId/close',
+        data: {
+          'close_price': closePrice,
+          'reason': 'Manual Close',
+        },
+      );
+
+      final pnl = resp.data['pnl'] ?? 0.0;
+      final isProfit = (pnl as num) >= 0;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: isProfit ? AppColors.bullish : AppColors.bearish,
+          content: Text(
+            '✅ Position Closed @ \$$closePrice | Realized PnL: ${isProfit ? '+' : ''}\$$pnl',
+            style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+          ),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+
+      await _fetchOpenPositions();
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(backgroundColor: AppColors.bearish, content: Text('Error closing position: $e')),
+      );
+    }
   }
 
   @override
@@ -161,24 +235,31 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             Expanded(
               child: LayoutBuilder(
                 builder: (context, constraints) {
-                  // Responsive split view for Desktop/Web vs Mobile
                   if (constraints.maxWidth > 900) {
                     return Row(
                       children: [
-                        // Left/Center: Chart (68%)
-                        Expanded(flex: 68, child: _buildChartArea()),
+                        Expanded(
+                          flex: 68,
+                          child: Column(
+                            children: [
+                              Expanded(flex: 70, child: _buildChartArea()),
+                              const Divider(),
+                              Expanded(flex: 30, child: _buildPositionsDock()),
+                            ],
+                          ),
+                        ),
                         const VerticalDivider(width: 1, color: AppColors.border),
-                        // Right: Apex AI Terminal & Execution Panel (32%)
                         Expanded(flex: 32, child: _buildApexAIPanel()),
                       ],
                     );
                   } else {
-                    // Mobile vertical view
                     return Column(
                       children: [
-                        Expanded(flex: 60, child: _buildChartArea()),
+                        Expanded(flex: 50, child: _buildChartArea()),
                         const Divider(),
-                        Expanded(flex: 40, child: _buildApexAIPanel()),
+                        Expanded(flex: 25, child: _buildPositionsDock()),
+                        const Divider(),
+                        Expanded(flex: 25, child: _buildApexAIPanel()),
                       ],
                     );
                   }
@@ -598,6 +679,173 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   }
 
   // --------------------------------------------------------------------------
+  // Open Positions Dock (Exchange Style Table)
+  // --------------------------------------------------------------------------
+  Widget _buildPositionsDock() {
+    return Container(
+      color: AppColors.surface,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Positions Header Bar
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            color: const Color(0xFF121620),
+            child: Row(
+              children: [
+                const Icon(Icons.account_balance_wallet_outlined, size: 16, color: AppColors.bullish),
+                const SizedBox(width: 8),
+                Text(
+                  'OPEN POSITIONS (${_openPositions.length})',
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 0.8),
+                ),
+                const Spacer(),
+                if (_openPositions.isNotEmpty)
+                  TextButton.icon(
+                    onPressed: _fetchOpenPositions,
+                    icon: const Icon(Icons.refresh, size: 14),
+                    label: const Text('Refresh', style: TextStyle(fontSize: 11)),
+                    style: TextButton.styleFrom(padding: EdgeInsets.zero),
+                  ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: _openPositions.isEmpty
+                ? const Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.hourglass_empty, size: 28, color: AppColors.textMuted),
+                        SizedBox(height: 8),
+                        Text(
+                          'No open positions.',
+                          style: TextStyle(fontSize: 12, color: AppColors.textMuted),
+                        ),
+                        SizedBox(height: 4),
+                        Text(
+                          'Click [BUY / LONG] or [SELL / SHORT] on the right to open a paper trade.',
+                          style: TextStyle(fontSize: 11, color: Colors.white38),
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView.separated(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    itemCount: _openPositions.length,
+                    separatorBuilder: (_, __) => const Divider(color: AppColors.border),
+                    itemBuilder: (context, index) {
+                      final pos = _openPositions[index];
+                      final tradeId = pos['id']?.toString() ?? '';
+                      final sym = pos['symbol']?.toString() ?? 'BTC/USDT';
+                      final dir = (pos['direction']?.toString() ?? 'long').toLowerCase();
+                      final isLong = dir == 'long';
+                      final color = isLong ? AppColors.bullish : AppColors.bearish;
+
+                      final entry = (pos['entry'] as num?)?.toDouble() ?? _lastPrice;
+                      final size = (pos['size'] as num?)?.toDouble() ?? 0.15;
+
+                      // Live Unrealized PnL
+                      final markPrice = _lastPrice > 0 ? _lastPrice : entry;
+                      final pnlPct = isLong
+                          ? ((markPrice - entry) / entry) * 100
+                          : ((entry - markPrice) / entry) * 100;
+                      final pnlVal = isLong ? (markPrice - entry) * size : (entry - markPrice) * size;
+                      final isProfit = pnlVal >= 0;
+
+                      return Row(
+                        children: [
+                          // Side Badge
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: color.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: color),
+                            ),
+                            child: Text(
+                              dir.toUpperCase(),
+                              style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          // Symbol
+                          Text(sym, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                          const SizedBox(width: 16),
+                          // Size
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Size', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                              Text('$size', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                            ],
+                          ),
+                          const SizedBox(width: 16),
+                          // Entry
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Entry Price', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                              Text('\$${entry.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
+                            ],
+                          ),
+                          const SizedBox(width: 16),
+                          // Mark Price
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Mark Price', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                              Text('\$${markPrice.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
+                            ],
+                          ),
+                          const Spacer(),
+                          // PnL
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(
+                                '${isProfit ? '+' : ''}\$${pnlVal.toStringAsFixed(2)}',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                  color: isProfit ? AppColors.bullish : AppColors.bearish,
+                                  fontFamily: 'monospace',
+                                ),
+                              ),
+                              Text(
+                                '(${isProfit ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: isProfit ? AppColors.bullish : AppColors.bearish,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(width: 16),
+                          // Close Button
+                          ElevatedButton(
+                            onPressed: () => _closePosition(tradeId),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF232A38),
+                              foregroundColor: Colors.white70,
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                              minimumSize: Size.zero,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                            ),
+                            child: const Text('Close ✕', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // --------------------------------------------------------------------------
   // Right Panel: Apex AI Institutional Advisor & Quick Execution
   // --------------------------------------------------------------------------
   Widget _buildApexAIPanel() {
@@ -842,32 +1090,6 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             style: const TextStyle(fontSize: 11, color: AppColors.textMuted),
           ),
         ],
-      ),
-    );
-  }
-
-  void _showSymbolPicker() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: AppColors.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
-      ),
-      builder: (_) => ListView(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        children: _symbols
-            .map((s) => ListTile(
-                  title: Text(s, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
-                  selected: s == _selectedSymbol,
-                  selectedColor: AppColors.bullish,
-                  trailing: s == _selectedSymbol ? const Icon(Icons.check, color: AppColors.bullish) : null,
-                  onTap: () {
-                    setState(() => _selectedSymbol = s);
-                    Navigator.pop(context);
-                    _fetchChartData();
-                  },
-                ))
-            .toList(),
       ),
     );
   }

@@ -18,7 +18,6 @@ from app.engines.execution_engine import ExecutionEngine
 router = APIRouter()
 _execution = ExecutionEngine()
 
-# In-memory trade store (replace with DB in production)
 _trades: dict[str, dict] = {}
 
 
@@ -32,6 +31,11 @@ class PlaceOrderRequest(BaseModel):
     exchange: str = "binance"
     mode: Optional[Literal["paper", "live"]] = None
     notes: str = ""
+
+
+class CloseTradeRequest(BaseModel):
+    close_price: float
+    reason: Optional[str] = "manual"
 
 
 class UpdateTradeRequest(BaseModel):
@@ -60,11 +64,13 @@ async def place_order(
     )
     trade_id = str(uuid4())
     trade = {
+        **result,
         "id": trade_id,
         "opened_at": datetime.now(timezone.utc).isoformat(),
         "status": "open",
         "notes": req.notes,
-        **result,
+        "pnl": 0.0,
+        "pnl_pct": 0.0,
     }
     _trades[trade_id] = trade
     return trade
@@ -82,42 +88,47 @@ async def list_trades(
     return {"total": len(trades), "trades": trades}
 
 
+@router.post("/{trade_id}/close")
+async def close_trade(
+    trade_id: str,
+    req: CloseTradeRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Close an open position and record realized PnL."""
+    trade = _trades.get(trade_id)
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    entry = trade.get("entry", req.close_price)
+    direction = trade.get("direction", "long")
+    size = trade.get("size", 1.0)
+
+    if direction == "long":
+        pnl_pct = ((req.close_price - entry) / entry) * 100
+        pnl = (req.close_price - entry) * size
+    else:
+        pnl_pct = ((entry - req.close_price) / entry) * 100
+        pnl = (entry - req.close_price) * size
+
+    trade["status"] = "closed"
+    trade["closed_at"] = datetime.now(timezone.utc).isoformat()
+    trade["close_price"] = req.close_price
+    trade["close_reason"] = req.reason
+    trade["pnl"] = round(pnl, 2)
+    trade["pnl_pct"] = round(pnl_pct, 2)
+
+    _trades[trade_id] = trade
+    return trade
+
+
 @router.get("/{trade_id}")
 async def get_trade(
     trade_id: str,
     _key: str = Depends(verify_api_key),
 ):
-    """Get a single trade by ID."""
     trade = _trades.get(trade_id)
     if not trade:
         raise HTTPException(status_code=404, detail="Trade not found")
-    return trade
-
-
-@router.patch("/{trade_id}")
-async def update_trade(
-    trade_id: str,
-    req: UpdateTradeRequest,
-    _key: str = Depends(verify_api_key),
-):
-    """Update SL, TP, notes, or close a trade."""
-    trade = _trades.get(trade_id)
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-
-    if req.stop_loss is not None:
-        trade["stop_loss"] = req.stop_loss
-    if req.take_profit is not None:
-        trade["take_profit"] = req.take_profit
-    if req.notes is not None:
-        trade["notes"] = req.notes
-    if req.status is not None:
-        trade["status"] = req.status
-        if req.status == "closed":
-            trade["closed_at"] = datetime.now(timezone.utc).isoformat()
-            trade["close_price"] = req.close_price
-
-    _trades[trade_id] = trade
     return trade
 
 
@@ -126,7 +137,6 @@ async def cancel_trade(
     trade_id: str,
     _key: str = Depends(verify_api_key),
 ):
-    """Cancel an open trade."""
     trade = _trades.get(trade_id)
     if not trade:
         raise HTTPException(status_code=404, detail="Trade not found")
