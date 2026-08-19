@@ -342,33 +342,62 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             Container(width: 1, height: 24, color: AppColors.border),
             const SizedBox(width: 16),
 
-            // Timeframe Selector Chips
-            ..._timeframes.map((tf) {
-              final isSel = tf == _selectedTimeframe;
-              return Padding(
-                padding: const EdgeInsets.only(right: 4),
-                child: ChoiceChip(
-                  label: Text(
-                    tf,
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: isSel ? FontWeight.bold : FontWeight.normal,
-                      color: isSel ? Colors.black : Colors.white70,
-                    ),
+            // Compact Timeframe Dropdown
+            PopupMenuButton<String>(
+              initialValue: _selectedTimeframe,
+              tooltip: 'Select Timeframe',
+              color: const Color(0xFF1E2533),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+                side: const BorderSide(color: AppColors.border),
+              ),
+              onSelected: (tf) {
+                setState(() => _selectedTimeframe = tf);
+                _fetchChartData();
+              },
+              itemBuilder: (context) => _timeframes.map((tf) {
+                final isSel = tf == _selectedTimeframe;
+                return PopupMenuItem<String>(
+                  value: tf,
+                  height: 38,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        tf.toUpperCase(),
+                        style: TextStyle(
+                          fontWeight: isSel ? FontWeight.bold : FontWeight.normal,
+                          color: isSel ? AppColors.bullish : Colors.white,
+                          fontSize: 13,
+                        ),
+                      ),
+                      if (isSel)
+                        const Icon(Icons.check, size: 16, color: AppColors.bullish),
+                    ],
                   ),
-                  selected: isSel,
-                  selectedColor: AppColors.bullish,
-                  backgroundColor: const Color(0xFF1E2533),
-                  side: BorderSide(color: isSel ? AppColors.bullish : AppColors.border),
-                  onSelected: (_) {
-                    setState(() => _selectedTimeframe = tf);
-                    _fetchChartData();
-                  },
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                );
+              }).toList(),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E2533),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: AppColors.border),
                 ),
-              );
-            }),
+                child: Row(
+                  children: [
+                    const Icon(Icons.schedule, size: 15, color: Colors.white70),
+                    const SizedBox(width: 6),
+                    Text(
+                      _selectedTimeframe.toUpperCase(),
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                    ),
+                    const SizedBox(width: 4),
+                    const Icon(Icons.arrow_drop_down, color: Colors.white70, size: 18),
+                  ],
+                ),
+              ),
+            ),
 
             const SizedBox(width: 12),
             // SMC Overlay Toggle Button
