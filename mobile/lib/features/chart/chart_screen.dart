@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:candlesticks/candlesticks.dart';
 import 'package:dio/dio.dart';
 import '../../app/theme.dart';
+import 'smc_interactive_chart.dart';
 
 class ChartScreen extends ConsumerStatefulWidget {
   const ChartScreen({super.key});
@@ -785,28 +786,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
     return Container(
       color: AppColors.background,
-      child: Stack(
-        children: [
-          Positioned.fill(
-            child: Candlesticks(
-              candles: _candles,
-            ),
-          ),
-          if (_showSMCOverlay && _candles.isNotEmpty)
-            Positioned.fill(
-              child: IgnorePointer(
-                child: CustomPaint(
-                  painter: SMCOverlayPainter(
-                    candles: _candles,
-                    smcData: _smcOverlayData,
-                    openPositions: _openPositions,
-                    currentPrice: _lastPrice,
-                    showOverlay: _showSMCOverlay,
-                  ),
-                ),
-              ),
-            ),
-        ],
+      child: SMCInteractiveChart(
+        candles: _candles,
+        smcData: _smcOverlayData,
+        openPositions: _openPositions,
+        currentPrice: _lastPrice,
+        showOverlay: _showSMCOverlay,
+        symbol: _selectedSymbol,
       ),
     );
   }
