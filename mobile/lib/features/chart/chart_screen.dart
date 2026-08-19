@@ -34,6 +34,18 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   List<Map<String, dynamic>> _openPositions = [];
   Timer? _liveTickerTimer;
 
+  // Bottom Dock Tab & Chat State
+  int _bottomDockTab = 0; // 0: Apex AI Chat, 1: Open Positions
+  final _chatInputCtrl = TextEditingController();
+  final _chatScrollCtrl = ScrollController();
+  bool _isChatLoading = false;
+  final List<Map<String, String>> _chatMessages = [
+    {
+      'role': 'assistant',
+      'content': 'สวัสดีครับ ผม Apex AI ที่ปรึกษาการเทรดสถาบันของคุณ กำลังมอนิเตอร์โครงสร้างตลาดสด มีข้อสงสัยหรืออยากให้ช่วยวิเคราะห์จุดไหนของกราฟนี้ไหมครับ?',
+    },
+  ];
+
   // Realtime Stats
   double _lastPrice = 0.0;
   double _change24h = 0.0;
@@ -63,6 +75,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   @override
   void dispose() {
     _liveTickerTimer?.cancel();
+    _chatInputCtrl.dispose();
+    _chatScrollCtrl.dispose();
     super.dispose();
   }
 
@@ -276,9 +290,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                           flex: 68,
                           child: Column(
                             children: [
-                              Expanded(flex: 70, child: _buildChartArea()),
+                              Expanded(flex: 62, child: _buildChartArea()),
                               const Divider(),
-                              Expanded(flex: 30, child: _buildPositionsDock()),
+                              Expanded(flex: 38, child: _buildBottomDock()),
                             ],
                           ),
                         ),
@@ -289,11 +303,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   } else {
                     return Column(
                       children: [
-                        Expanded(flex: 50, child: _buildChartArea()),
+                        Expanded(flex: 48, child: _buildChartArea()),
                         const Divider(),
-                        Expanded(flex: 25, child: _buildPositionsDock()),
+                        Expanded(flex: 30, child: _buildBottomDock()),
                         const Divider(),
-                        Expanded(flex: 25, child: _buildApexAIPanel()),
+                        Expanded(flex: 22, child: _buildApexAIPanel()),
                       ],
                     );
                   }
@@ -733,169 +747,583 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   }
 
   // --------------------------------------------------------------------------
-  // Open Positions Dock (Exchange Style Table)
+  // Apex AI Chat Messaging & Context Injection
   // --------------------------------------------------------------------------
-  Widget _buildPositionsDock() {
-    return Container(
-      color: AppColors.surface,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Positions Header Bar
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            color: const Color(0xFF121620),
-            child: Row(
-              children: [
-                const Icon(Icons.account_balance_wallet_outlined, size: 16, color: AppColors.bullish),
-                const SizedBox(width: 8),
-                Text(
-                  'OPEN POSITIONS (${_openPositions.length})',
-                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 0.8),
-                ),
-                const Spacer(),
-                if (_openPositions.isNotEmpty)
-                  TextButton.icon(
-                    onPressed: _fetchOpenPositions,
-                    icon: const Icon(Icons.refresh, size: 14),
-                    label: const Text('Refresh', style: TextStyle(fontSize: 11)),
-                    style: TextButton.styleFrom(padding: EdgeInsets.zero),
-                  ),
-              ],
+  Future<void> _sendChatMessage([String? customText, TextEditingController? sourceCtrl, ScrollController? scrollCtrl]) async {
+    final ctrl = sourceCtrl ?? _chatInputCtrl;
+    final text = (customText ?? ctrl.text).trim();
+    if (text.isEmpty) return;
+
+    if (customText == null) ctrl.clear();
+
+    setState(() {
+      _chatMessages.add({'role': 'user', 'content': text});
+      _chatMessages.add({'role': 'assistant', 'content': 'Apex กำลังวิเคราะห์โครงสร้าง SMC ของ $_selectedSymbol...'});
+      _isChatLoading = true;
+    });
+
+    try {
+      final dio = Dio();
+      final chatHistory = _chatMessages
+          .where((m) => !m['content']!.startsWith('Apex กำลังวิเคราะห์'))
+          .map((m) => {'role': m['role'], 'content': m['content']})
+          .toList();
+
+      final resp = await dio.post(
+        'http://127.0.0.1:8000/api/v1/settings/llm/chat',
+        data: {
+          'messages': chatHistory,
+          'context': {
+            'symbol': _selectedSymbol,
+            'timeframe': _selectedTimeframe,
+            'price': _lastPrice,
+            'bias': _smcOverlayData?['bias'] ?? 'neutral',
+            'confluence': _smcOverlayData?['confluence'] ?? 0,
+            'open_positions': _openPositions.length,
+          }
+        },
+      );
+
+      final reply = resp.data['response'] as String? ?? 'ขออภัยครับ เกิดข้อผิดพลาดในการประมวลผล';
+
+      setState(() {
+        _chatMessages.removeLast();
+        _chatMessages.add({'role': 'assistant', 'content': reply});
+        _isChatLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _chatMessages.removeLast();
+        _chatMessages.add({
+          'role': 'assistant',
+          'content': '⚠️ ไม่สามารถเชื่อมต่อกับ AI Advisor ได้: $e\nกรุณาตรวจสอบการตั้งค่า Provider ในหน้า Settings',
+        });
+        _isChatLoading = false;
+      });
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final s = scrollCtrl ?? _chatScrollCtrl;
+      if (s.hasClients) {
+        s.animateTo(
+          s.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // Pop-up Expanded Chat Modal
+  // --------------------------------------------------------------------------
+  void _showExpandedChatModal() {
+    final modalTextCtrl = TextEditingController();
+    final modalScrollCtrl = ScrollController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) {
+          return Dialog(
+            backgroundColor: const Color(0xFF141923),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: const BorderSide(color: Color(0xFF2E82FE), width: 1.2),
             ),
-          ),
-          Expanded(
-            child: _openPositions.isEmpty
-                ? const Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
+            insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+            child: SizedBox(
+              width: 900,
+              height: 680,
+              child: Column(
+                children: [
+                  // Modal Header
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF1B2333),
+                      borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                    ),
+                    child: Row(
                       children: [
-                        Icon(Icons.hourglass_empty, size: 28, color: AppColors.textMuted),
-                        SizedBox(height: 8),
-                        Text(
-                          'No open positions.',
-                          style: TextStyle(fontSize: 12, color: AppColors.textMuted),
+                        CircleAvatar(
+                          backgroundColor: AppColors.bullish.withOpacity(0.2),
+                          radius: 16,
+                          child: const Text('A', style: TextStyle(color: AppColors.bullish, fontWeight: FontWeight.bold)),
                         ),
-                        SizedBox(height: 4),
-                        Text(
-                          'Click [BUY / LONG] or [SELL / SHORT] on the right to open a paper trade.',
-                          style: TextStyle(fontSize: 11, color: Colors.white38),
+                        const SizedBox(width: 12),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('Apex AI Institutional Advisor', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
+                            Text('Interactive Live Terminal • $_selectedSymbol ($_selectedTimeframe) \$${_lastPrice.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                          ],
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          icon: const Icon(Icons.close, color: Colors.white70),
+                          tooltip: 'ย่อหน้าต่างกลับสู่กราฟ',
+                          onPressed: () => Navigator.pop(ctx),
                         ),
                       ],
                     ),
-                  )
-                : ListView.separated(
+                  ),
+
+                  // Prompt quick chips
+                  Container(
+                    color: const Color(0xFF10141D),
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    itemCount: _openPositions.length,
-                    separatorBuilder: (_, __) => const Divider(color: AppColors.border),
-                    itemBuilder: (context, index) {
-                      final pos = _openPositions[index];
-                      final tradeId = pos['id']?.toString() ?? '';
-                      final sym = pos['symbol']?.toString() ?? 'BTC/USDT';
-                      final dir = (pos['direction']?.toString() ?? 'long').toLowerCase();
-                      final isLong = dir == 'long';
-                      final color = isLong ? AppColors.bullish : AppColors.bearish;
-
-                      final entry = (pos['entry'] as num?)?.toDouble() ?? _lastPrice;
-                      final size = (pos['size'] as num?)?.toDouble() ?? 0.15;
-
-                      // Live Unrealized PnL
-                      final markPrice = _lastPrice > 0 ? _lastPrice : entry;
-                      final pnlPct = isLong
-                          ? ((markPrice - entry) / entry) * 100
-                          : ((entry - markPrice) / entry) * 100;
-                      final pnlVal = isLong ? (markPrice - entry) * size : (entry - markPrice) * size;
-                      final isProfit = pnlVal >= 0;
-
-                      return Row(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
                         children: [
-                          // Side Badge
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          _modalQuickChip('📊 สรุปโครงสร้าง SMC', () async {
+                            await _sendChatMessage('ช่วยสรุปโครงสร้าง SMC และ Invalidation ของ $_selectedSymbol ให้หน่อย', modalTextCtrl, modalScrollCtrl);
+                            setModalState(() {});
+                          }),
+                          const SizedBox(width: 8),
+                          _modalQuickChip('🎯 แนวต้าน & Take Profit', () async {
+                            await _sendChatMessage('$_selectedSymbol มีแนวต้านสำคัญหรือเป้า TP ตรงไหนบ้าง', modalTextCtrl, modalScrollCtrl);
+                            setModalState(() {});
+                          }),
+                          const SizedBox(width: 8),
+                          _modalQuickChip('🛑 จุด Stop Loss ที่ปลอดภัย', () async {
+                            await _sendChatMessage('ถ้าจะเปิดไม้ $_selectedSymbol ตอนนี้ ควรวาง Stop Loss ที่จุดไหนตามโครงสร้าง', modalTextCtrl, modalScrollCtrl);
+                            setModalState(() {});
+                          }),
+                          const SizedBox(width: 8),
+                          _modalQuickChip('⚖️ ประเมิน R:R & Risk', () async {
+                            await _sendChatMessage('ช่วยประเมินความคุ้มค่า Risk/Reward และความเสี่ยงของ $_selectedSymbol ในจังหวะนี้', modalTextCtrl, modalScrollCtrl);
+                            setModalState(() {});
+                          }),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  // Message List
+                  Expanded(
+                    child: ListView.builder(
+                      controller: modalScrollCtrl,
+                      padding: const EdgeInsets.all(16),
+                      itemCount: _chatMessages.length,
+                      itemBuilder: (ctx, i) {
+                        final msg = _chatMessages[i];
+                        final isUser = msg['role'] == 'user';
+                        return Align(
+                          alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                          child: Container(
+                            margin: const EdgeInsets.only(bottom: 12),
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                            constraints: const BoxConstraints(maxWidth: 650),
                             decoration: BoxDecoration(
-                              color: color.withOpacity(0.15),
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: color),
+                              color: isUser ? const Color(0xFF2E82FE).withOpacity(0.2) : const Color(0xFF1E2533),
+                              borderRadius: BorderRadius.circular(10),
+                              border: isUser ? Border.all(color: const Color(0xFF2E82FE).withOpacity(0.5)) : Border.all(color: AppColors.border),
                             ),
                             child: Text(
-                              dir.toUpperCase(),
-                              style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold),
+                              msg['content'] ?? '',
+                              style: TextStyle(
+                                color: isUser ? Colors.white : const Color(0xFFE2E8F0),
+                                fontSize: 13,
+                                height: 1.5,
+                              ),
                             ),
                           ),
-                          const SizedBox(width: 8),
-                          // Symbol
-                          Text(sym, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                          const SizedBox(width: 16),
-                          // Size
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text('Size', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
-                              Text('$size', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                            ],
-                          ),
-                          const SizedBox(width: 16),
-                          // Entry
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text('Entry Price', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
-                              Text('\$${entry.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
-                            ],
-                          ),
-                          const SizedBox(width: 16),
-                          // Mark Price
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text('Mark Price', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
-                              Text('\$${markPrice.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
-                            ],
-                          ),
-                          const Spacer(),
-                          // PnL
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.end,
-                            children: [
-                              Text(
-                                '${isProfit ? '+' : ''}\$${pnlVal.toStringAsFixed(2)}',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.bold,
-                                  color: isProfit ? AppColors.bullish : AppColors.bearish,
-                                  fontFamily: 'monospace',
-                                ),
-                              ),
-                              Text(
-                                '(${isProfit ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: isProfit ? AppColors.bullish : AppColors.bearish,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(width: 16),
-                          // Close Button
-                          ElevatedButton(
-                            onPressed: () => _closePosition(tradeId),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF232A38),
-                              foregroundColor: Colors.white70,
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                              minimumSize: Size.zero,
-                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-                            ),
-                            child: const Text('Close ✕', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                          ),
-                        ],
-                      );
-                    },
+                        );
+                      },
+                    ),
                   ),
+
+                  // Modal Input Row
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF1B2333),
+                      borderRadius: BorderRadius.vertical(bottom: Radius.circular(16)),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: modalTextCtrl,
+                            style: const TextStyle(color: Colors.white, fontSize: 14),
+                            decoration: InputDecoration(
+                              hintText: 'ถาม Apex เกี่ยวกับ $_selectedSymbol ณ ราคา \$${_lastPrice.toStringAsFixed(2)}...',
+                              hintStyle: const TextStyle(color: Colors.white38),
+                              border: InputBorder.none,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                            ),
+                            onSubmitted: (_) async {
+                              await _sendChatMessage(null, modalTextCtrl, modalScrollCtrl);
+                              setModalState(() {});
+                            },
+                          ),
+                        ),
+                        IconButton(
+                          icon: _isChatLoading
+                              ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.bullish))
+                              : const Icon(Icons.send, color: AppColors.bullish),
+                          onPressed: () async {
+                            await _sendChatMessage(null, modalTextCtrl, modalScrollCtrl);
+                            setModalState(() {});
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _modalQuickChip(String title, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1E2533),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: const Color(0xFF2E82FE).withOpacity(0.4)),
+        ),
+        child: Text(title, style: const TextStyle(fontSize: 11, color: Color(0xFF93C5FD), fontWeight: FontWeight.w500)),
+      ),
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // Unified Bottom Dock: Apex AI Chat + Open Positions Table + Expand Pop-up
+  // --------------------------------------------------------------------------
+  Widget _buildBottomDock() {
+    return Container(
+      color: AppColors.surface,
+      child: Column(
+        children: [
+          // Dock Tab Bar Header
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            color: const Color(0xFF121620),
+            child: Row(
+              children: [
+                // Tab 1: Apex AI Chat
+                _dockTabButton(
+                  title: '💬 APEX AI ADVISOR CHAT',
+                  isSelected: _bottomDockTab == 0,
+                  badgeColor: AppColors.bullish,
+                  onTap: () => setState(() => _bottomDockTab = 0),
+                ),
+                const SizedBox(width: 8),
+                // Tab 2: Open Positions
+                _dockTabButton(
+                  title: '📌 OPEN POSITIONS (${_openPositions.length})',
+                  isSelected: _bottomDockTab == 1,
+                  badgeColor: const Color(0xFF00E5FF),
+                  onTap: () => setState(() => _bottomDockTab = 1),
+                ),
+                const Spacer(),
+                // Expand / Pop-up Full Dialog Button
+                ElevatedButton.icon(
+                  onPressed: _showExpandedChatModal,
+                  icon: const Icon(Icons.open_in_full, size: 13, color: Colors.white),
+                  label: const Text('Pop-up ขยายแชท', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF2E82FE).withOpacity(0.3),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 16, color: Colors.white70),
+                  tooltip: 'Refresh',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  onPressed: () {
+                    _fetchOpenPositions();
+                    _fetchChartData();
+                  },
+                ),
+              ],
+            ),
+          ),
+          const Divider(),
+          // Dock Content
+          Expanded(
+            child: _bottomDockTab == 0 ? _buildApexChatDock() : _buildPositionsTable(),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _dockTabButton({
+    required String title,
+    required bool isSelected,
+    required Color badgeColor,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: isSelected ? badgeColor.withOpacity(0.18) : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: isSelected ? badgeColor : Colors.transparent),
+        ),
+        child: Text(
+          title,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
+            color: isSelected ? Colors.white : AppColors.textMuted,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // Tab 1: Apex AI Embedded Chat Dock
+  // --------------------------------------------------------------------------
+  Widget _buildApexChatDock() {
+    return Column(
+      children: [
+        // Quick suggestions row
+        Container(
+          color: const Color(0xFF10141D),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                _dockQuickPrompt('📊 สรุป SMC $_selectedSymbol', 'ช่วยสรุปโครงสร้าง SMC และ Invalidation ของ $_selectedSymbol ให้หน่อย'),
+                const SizedBox(width: 6),
+                _dockQuickPrompt('🎯 เป้า Take Profit', '$_selectedSymbol มีเป้าทำกำไร TP ตามโครงสร้างตรงไหนบ้าง'),
+                const SizedBox(width: 6),
+                _dockQuickPrompt('🛑 วาง Stop Loss', 'จุด Stop Loss ที่ปลอดภัยตามโครงสร้าง SMC ของ $_selectedSymbol อยู่ตรงไหน'),
+                const SizedBox(width: 6),
+                _dockQuickPrompt('⚖️ ประเมิน R:R', 'ช่วยประเมินความคุ้มค่า Risk/Reward ของ $_selectedSymbol'),
+              ],
+            ),
+          ),
+        ),
+
+        // Scrollable Chat Messages
+        Expanded(
+          child: ListView.builder(
+            controller: _chatScrollCtrl,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            itemCount: _chatMessages.length,
+            itemBuilder: (ctx, i) {
+              final msg = _chatMessages[i];
+              final isUser = msg['role'] == 'user';
+              return Align(
+                alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                child: Container(
+                  margin: const EdgeInsets.only(bottom: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.55),
+                  decoration: BoxDecoration(
+                    color: isUser ? const Color(0xFF2E82FE).withOpacity(0.2) : const Color(0xFF1E2533),
+                    borderRadius: BorderRadius.circular(8),
+                    border: isUser ? Border.all(color: const Color(0xFF2E82FE).withOpacity(0.4)) : null,
+                  ),
+                  child: Text(
+                    msg['content'] ?? '',
+                    style: TextStyle(
+                      color: isUser ? Colors.white : const Color(0xFFE2E8F0),
+                      fontSize: 12,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+
+        // Bottom Chat Input Bar
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          color: const Color(0xFF121620),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _chatInputCtrl,
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                  decoration: InputDecoration(
+                    hintText: 'ถาม Apex AI เกี่ยวกับ $_selectedSymbol (\$${_lastPrice.toStringAsFixed(2)})...',
+                    hintStyle: const TextStyle(color: Colors.white30, fontSize: 12),
+                    border: InputBorder.none,
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  ),
+                  onSubmitted: (_) => _sendChatMessage(),
+                ),
+              ),
+              IconButton(
+                icon: _isChatLoading
+                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.bullish))
+                    : const Icon(Icons.send, size: 16, color: AppColors.bullish),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                onPressed: () => _sendChatMessage(),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _dockQuickPrompt(String label, String prompt) {
+    return GestureDetector(
+      onTap: () => _sendChatMessage(prompt),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1E2533),
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: const Color(0xFF2E82FE).withOpacity(0.3)),
+        ),
+        child: Text(label, style: const TextStyle(fontSize: 10, color: Color(0xFF93C5FD))),
+      ),
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // Tab 2: Open Positions Table
+  // --------------------------------------------------------------------------
+  Widget _buildPositionsTable() {
+    if (_openPositions.isEmpty) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.hourglass_empty, size: 24, color: AppColors.textMuted),
+            SizedBox(height: 6),
+            Text('No open positions.', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
+            SizedBox(height: 2),
+            Text('Click [BUY / LONG] or [SELL / SHORT] on the right to open a paper trade.', style: TextStyle(fontSize: 11, color: Colors.white38)),
+          ],
+        ),
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      itemCount: _openPositions.length,
+      separatorBuilder: (_, __) => const Divider(color: AppColors.border),
+      itemBuilder: (context, index) {
+        final pos = _openPositions[index];
+        final tradeId = pos['id']?.toString() ?? '';
+        final sym = pos['symbol']?.toString() ?? 'BTC/USDT';
+        final dir = (pos['direction']?.toString() ?? 'long').toLowerCase();
+        final isLong = dir == 'long';
+        final color = isLong ? AppColors.bullish : AppColors.bearish;
+
+        final entry = (pos['entry'] as num?)?.toDouble() ?? _lastPrice;
+        final size = (pos['size'] as num?)?.toDouble() ?? 0.15;
+
+        // Live Unrealized PnL
+        final markPrice = _lastPrice > 0 ? _lastPrice : entry;
+        final pnlPct = isLong ? ((markPrice - entry) / entry) * 100 : ((entry - markPrice) / entry) * 100;
+        final pnlVal = isLong ? (markPrice - entry) * size : (entry - markPrice) * size;
+        final isProfit = pnlVal >= 0;
+
+        return Row(
+          children: [
+            // Side Badge
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: color),
+              ),
+              child: Text(
+                dir.toUpperCase(),
+                style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold),
+              ),
+            ),
+            const SizedBox(width: 8),
+            // Symbol
+            Text(sym, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+            const SizedBox(width: 16),
+            // Size
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Size', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                Text('$size', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+              ],
+            ),
+            const SizedBox(width: 16),
+            // Entry
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Entry Price', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                Text('\$${entry.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
+              ],
+            ),
+            const SizedBox(width: 16),
+            // Mark Price
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Mark Price', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                Text('\$${markPrice.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
+              ],
+            ),
+            const Spacer(),
+            // PnL
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  '${isProfit ? '+' : ''}\$${pnlVal.toStringAsFixed(2)}',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: isProfit ? AppColors.bullish : AppColors.bearish,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+                Text(
+                  '(${isProfit ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: isProfit ? AppColors.bullish : AppColors.bearish,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(width: 16),
+            // Close Button
+            ElevatedButton(
+              onPressed: () => _closePosition(tradeId),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF232A38),
+                foregroundColor: Colors.white70,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+              ),
+              child: const Text('Close ✕', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+            ),
+          ],
+        );
+      },
     );
   }
 
