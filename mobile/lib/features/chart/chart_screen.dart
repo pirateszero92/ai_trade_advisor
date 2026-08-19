@@ -80,6 +80,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     super.dispose();
   }
 
+  Map<String, double> _symbolLivePrices = {};
+
   void _startLiveTicker() {
     _liveTickerTimer?.cancel();
     _liveTickerTimer = Timer.periodic(const Duration(milliseconds: 1200), (_) {
@@ -92,6 +94,18 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
       setState(() {
         _lastPrice = double.parse(newPrice.toStringAsFixed(2));
+        _symbolLivePrices[_selectedSymbol] = _lastPrice;
+
+        // Update live tick for all open positions' symbols independently
+        for (var pos in _openPositions) {
+          final sym = pos['symbol']?.toString() ?? '';
+          if (sym.isNotEmpty && sym != _selectedSymbol) {
+            final cur = _symbolLivePrices[sym] ?? (pos['entry'] as num?)?.toDouble() ?? 100.0;
+            final tick = (rnd.nextDouble() - 0.49) * (cur * 0.0004);
+            _symbolLivePrices[sym] = double.parse((cur + tick).toStringAsFixed(2));
+          }
+        }
+
         _candles[0] = Candle(
           date: lastCandle.date,
           open: lastCandle.open,
@@ -102,6 +116,31 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         );
       });
     });
+  }
+
+  double _getMarkPriceForSymbol(String symbol, double entry) {
+    if (symbol == _selectedSymbol && _lastPrice > 0) {
+      _symbolLivePrices[symbol] = _lastPrice;
+      return _lastPrice;
+    }
+    if (_symbolLivePrices.containsKey(symbol) && _symbolLivePrices[symbol]! > 0) {
+      return _symbolLivePrices[symbol]!;
+    }
+    return entry > 0 ? entry : 100.0;
+  }
+
+  void _switchToSymbol(String symbol) {
+    String targetMarket = 'crypto';
+    if (_forexSymbols.contains(symbol)) {
+      targetMarket = 'forex';
+    } else if (_stockSymbols.contains(symbol)) {
+      targetMarket = 'stock';
+    }
+    setState(() {
+      _selectedMarket = targetMarket;
+      _selectedSymbol = symbol;
+    });
+    _fetchChartData();
   }
 
   Future<void> _fetchChartData() async {
@@ -237,7 +276,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   Future<void> _closePosition(String tradeId) async {
     try {
       final dio = Dio();
-      final closePrice = _lastPrice > 0 ? _lastPrice : 64000.0;
+      final pos = _openPositions.firstWhere((p) => p['id']?.toString() == tradeId, orElse: () => {});
+      final sym = pos['symbol']?.toString() ?? _selectedSymbol;
+      final entry = (pos['entry'] as num?)?.toDouble() ?? 100.0;
+      final closePrice = _getMarkPriceForSymbol(sym, entry);
+
       final resp = await dio.post(
         'http://127.0.0.1:8000/api/v1/trades/$tradeId/close',
         data: {
@@ -253,7 +296,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         SnackBar(
           backgroundColor: isProfit ? AppColors.bullish : AppColors.bearish,
           content: Text(
-            '✅ Position Closed @ \$$closePrice | Realized PnL: ${isProfit ? '+' : ''}\$$pnl',
+            '✅ Closed $sym @ \$$closePrice | Realized PnL: ${isProfit ? '+' : ''}\$$pnl',
             style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
           ),
           duration: const Duration(seconds: 4),
@@ -1230,11 +1273,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         final isLong = dir == 'long';
         final color = isLong ? AppColors.bullish : AppColors.bearish;
 
-        final entry = (pos['entry'] as num?)?.toDouble() ?? _lastPrice;
-        final size = (pos['size'] as num?)?.toDouble() ?? 0.15;
+        final entry = (pos['entry'] as num?)?.toDouble() ?? 100.0;
+        final size = (pos['size'] as num?)?.toDouble() ?? (pos['position_size'] as num?)?.toDouble() ?? 1.0;
 
-        // Live Unrealized PnL
-        final markPrice = _lastPrice > 0 ? _lastPrice : entry;
+        // Correct symbol-specific live Mark Price (not the currently viewed chart symbol)
+        final markPrice = _getMarkPriceForSymbol(sym, entry);
         final pnlPct = isLong ? ((markPrice - entry) / entry) * 100 : ((entry - markPrice) / entry) * 100;
         final pnlVal = isLong ? (markPrice - entry) * size : (entry - markPrice) * size;
         final isProfit = pnlVal >= 0;
@@ -1255,8 +1298,24 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               ),
             ),
             const SizedBox(width: 8),
-            // Symbol
-            Text(sym, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+            // Symbol (Clickable to switch chart to this symbol)
+            GestureDetector(
+              onTap: () => _switchToSymbol(sym),
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      sym,
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF93C5FD), decoration: TextDecoration.underline),
+                    ),
+                    const SizedBox(width: 3),
+                    const Icon(Icons.arrow_outward, size: 11, color: Color(0xFF93C5FD)),
+                  ],
+                ),
+              ),
+            ),
             const SizedBox(width: 16),
             // Size
             Column(
