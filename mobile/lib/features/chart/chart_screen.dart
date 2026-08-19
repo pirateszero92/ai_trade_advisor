@@ -279,9 +279,41 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
-            // Symbol Picker Button
-            GestureDetector(
-              onTap: _showSymbolPicker,
+            // Symbol Dropdown (Matching Timeframe Dropdown style)
+            PopupMenuButton<String>(
+              initialValue: _selectedSymbol,
+              tooltip: 'Select Pair / Symbol',
+              color: const Color(0xFF1E2533),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+                side: const BorderSide(color: AppColors.border),
+              ),
+              onSelected: (s) {
+                setState(() => _selectedSymbol = s);
+                _fetchChartData();
+              },
+              itemBuilder: (context) => _symbols.map((s) {
+                final isSel = s == _selectedSymbol;
+                return PopupMenuItem<String>(
+                  value: s,
+                  height: 40,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        s,
+                        style: TextStyle(
+                          fontWeight: isSel ? FontWeight.bold : FontWeight.w600,
+                          color: isSel ? AppColors.bullish : Colors.white,
+                          fontSize: 14,
+                        ),
+                      ),
+                      if (isSel)
+                        const Icon(Icons.check, size: 16, color: AppColors.bullish),
+                    ],
+                  ),
+                );
+              }).toList(),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
