@@ -1,4 +1,4 @@
-﻿"""
+"""
 Chart API
 Returns OHLCV candle data and SMC overlay data for the mobile chart widget.
 """
@@ -102,4 +102,39 @@ async def get_smc_overlay(
         "liquidity_swept": signal.liquidity_swept,
         "sweep_direction": signal.sweep_direction,
         "sweep_price": signal.sweep_price,
+    }
+
+
+@router.get("/quote")
+async def get_quote(
+    symbol: str = Query("BTC/USDT"),
+    market_type: Literal["crypto", "forex", "stock"] = Query("crypto"),
+    exchange: str = Query("binance"),
+    _key: str = Depends(verify_api_key),
+):
+    """Return fast live price quote for realtime ticker."""
+    df = await _market.get_ohlcv(
+        symbol=symbol,
+        timeframe="1m",
+        market_type=market_type,
+        exchange=exchange,
+        limit=5,
+    )
+    if df.empty:
+        raise HTTPException(status_code=502, detail="No market data available")
+
+    last_row = df.iloc[-1]
+    first_row = df.iloc[0]
+    last_price = float(last_row["close"])
+    open_price = float(first_row["open"])
+    change_pct = ((last_price - open_price) / open_price) * 100 if open_price > 0 else 0.0
+
+    return {
+        "symbol": symbol,
+        "price": last_price,
+        "change_24h": round(change_pct, 2),
+        "high": float(df["high"].max()),
+        "low": float(df["low"].min()),
+        "volume": float(df["volume"].sum()),
+        "timestamp": df.index[-1].isoformat(),
     }

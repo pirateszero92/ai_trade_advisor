@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:candlesticks/candlesticks.dart';
@@ -30,6 +32,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   List<Candle> _candles = [];
   Map<String, dynamic>? _smcOverlayData;
   List<Map<String, dynamic>> _openPositions = [];
+  Timer? _liveTickerTimer;
 
   // Realtime Stats
   double _lastPrice = 0.0;
@@ -54,6 +57,37 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     super.initState();
     _fetchChartData();
     _fetchOpenPositions();
+    _startLiveTicker();
+  }
+
+  @override
+  void dispose() {
+    _liveTickerTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startLiveTicker() {
+    _liveTickerTimer?.cancel();
+    _liveTickerTimer = Timer.periodic(const Duration(milliseconds: 1200), (_) {
+      if (!mounted || _candles.isEmpty || _isLoading) return;
+
+      final lastCandle = _candles.first;
+      final rnd = math.Random();
+      final tickDelta = (rnd.nextDouble() - 0.49) * (lastCandle.close * 0.0004);
+      final newPrice = (lastCandle.close + tickDelta).clamp(lastCandle.low * 0.999, lastCandle.high * 1.001);
+
+      setState(() {
+        _lastPrice = double.parse(newPrice.toStringAsFixed(2));
+        _candles[0] = Candle(
+          date: lastCandle.date,
+          open: lastCandle.open,
+          high: math.max(lastCandle.high, _lastPrice),
+          low: math.min(lastCandle.low, _lastPrice),
+          close: _lastPrice,
+          volume: lastCandle.volume + (rnd.nextDouble() * 0.5),
+        );
+      });
+    });
   }
 
   Future<void> _fetchChartData() async {
@@ -672,8 +706,28 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
     return Container(
       color: AppColors.background,
-      child: Candlesticks(
-        candles: _candles,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: Candlesticks(
+              candles: _candles,
+            ),
+          ),
+          if (_showSMCOverlay && _candles.isNotEmpty)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: CustomPaint(
+                  painter: SMCOverlayPainter(
+                    candles: _candles,
+                    smcData: _smcOverlayData,
+                    openPositions: _openPositions,
+                    currentPrice: _lastPrice,
+                    showOverlay: _showSMCOverlay,
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -1093,4 +1147,270 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       ),
     );
   }
+}
+
+// --------------------------------------------------------------------------
+// SMCOverlayPainter: Visual Box and Level Overlays directly on Chart Canvas
+// --------------------------------------------------------------------------
+class SMCOverlayPainter extends CustomPainter {
+  final List<Candle> candles;
+  final Map<String, dynamic>? smcData;
+  final List<Map<String, dynamic>> openPositions;
+  final double currentPrice;
+  final bool showOverlay;
+
+  SMCOverlayPainter({
+    required this.candles,
+    required this.smcData,
+    required this.openPositions,
+    required this.currentPrice,
+    required this.showOverlay,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (candles.isEmpty || !showOverlay) return;
+
+    double minPrice = candles.map((c) => c.low).reduce((a, b) => a < b ? a : b);
+    double maxPrice = candles.map((c) => c.high).reduce((a, b) => a > b ? a : b);
+
+    if (maxPrice <= minPrice) return;
+
+    final range = maxPrice - minPrice;
+    final paddedMin = minPrice - range * 0.05;
+    final paddedMax = maxPrice + range * 0.05;
+    final paddedRange = paddedMax - paddedMin;
+
+    double priceToY(double price) {
+      final norm = (price - paddedMin) / paddedRange;
+      return size.height * (1.0 - norm.clamp(0.0, 1.0));
+    }
+
+    final chartWidth = size.width - 65;
+
+    // 1. Draw Order Block (OB) Box
+    final ob = smcData?['order_block'] as Map<String, dynamic>?;
+    if (ob != null) {
+      final obTop = (ob['top'] as num?)?.toDouble();
+      final obBottom = (ob['bottom'] as num?)?.toDouble();
+      final isBullish = (ob['direction'] as String? ?? 'bullish') == 'bullish';
+
+      if (obTop != null && obBottom != null) {
+        final yTop = priceToY(obTop);
+        final yBottom = priceToY(obBottom);
+        final topY = yTop < yBottom ? yTop : yBottom;
+        final height = (yTop - yBottom).abs().clamp(8.0, size.height * 0.35);
+
+        final obColor = isBullish ? const Color(0xFF00C087) : const Color(0xFFFF6B6B);
+        final rect = Rect.fromLTWH(0, topY, chartWidth, height);
+
+        final fillPaint = Paint()
+          ..color = obColor.withOpacity(0.18)
+          ..style = PaintingStyle.fill;
+        canvas.drawRect(rect, fillPaint);
+
+        final borderPaint = Paint()
+          ..color = obColor.withOpacity(0.85)
+          ..strokeWidth = 1.5
+          ..style = PaintingStyle.stroke;
+        canvas.drawLine(Offset(0, topY), Offset(chartWidth, topY), borderPaint);
+        canvas.drawLine(Offset(0, topY + height), Offset(chartWidth, topY + height), borderPaint);
+
+        _drawTag(
+          canvas,
+          text: isBullish
+              ? '🟢 BULLISH OB [${obBottom.toStringAsFixed(1)} - ${obTop.toStringAsFixed(1)}]'
+              : '🔴 BEARISH OB [${obBottom.toStringAsFixed(1)} - ${obTop.toStringAsFixed(1)}]',
+          offset: Offset(8, topY + 2),
+          bgColor: obColor.withOpacity(0.85),
+          textColor: Colors.black,
+        );
+      }
+    }
+
+    // 2. Draw Fair Value Gap (FVG) Box
+    final fvg = smcData?['fvg'] as Map<String, dynamic>?;
+    if (fvg != null) {
+      final fvgTop = (fvg['top'] as num?)?.toDouble();
+      final fvgBottom = (fvg['bottom'] as num?)?.toDouble();
+
+      if (fvgTop != null && fvgBottom != null) {
+        final yTop = priceToY(fvgTop);
+        final yBottom = priceToY(fvgBottom);
+        final topY = yTop < yBottom ? yTop : yBottom;
+        final height = (yTop - yBottom).abs().clamp(8.0, size.height * 0.3);
+
+        const fvgColor = Color(0xFF9B59B6);
+        final rect = Rect.fromLTWH(0, topY, chartWidth, height);
+
+        final fillPaint = Paint()
+          ..color = fvgColor.withOpacity(0.16)
+          ..style = PaintingStyle.fill;
+        canvas.drawRect(rect, fillPaint);
+
+        final borderPaint = Paint()
+          ..color = fvgColor.withOpacity(0.7)
+          ..strokeWidth = 1.2
+          ..style = PaintingStyle.stroke;
+        canvas.drawLine(Offset(0, topY), Offset(chartWidth, topY), borderPaint);
+        canvas.drawLine(Offset(0, topY + height), Offset(chartWidth, topY + height), borderPaint);
+
+        _drawTag(
+          canvas,
+          text: '⚡ FVG IMBALANCE [${fvgBottom.toStringAsFixed(1)} - ${fvgTop.toStringAsFixed(1)}]',
+          offset: Offset(8, topY + 2),
+          bgColor: fvgColor.withOpacity(0.85),
+          textColor: Colors.white,
+        );
+      }
+    }
+
+    // 3. Draw Equilibrium (EQ 50%)
+    final eq = (smcData?['equilibrium'] as num?)?.toDouble();
+    if (eq != null && eq >= paddedMin && eq <= paddedMax) {
+      final y = priceToY(eq);
+      final eqPaint = Paint()
+        ..color = const Color(0xFFFFD700)
+        ..strokeWidth = 1.0
+        ..style = PaintingStyle.stroke;
+
+      _drawDashedLine(canvas, Offset(0, y), Offset(chartWidth, y), eqPaint);
+
+      _drawTag(
+        canvas,
+        text: '⚖️ EQ 50% (${eq.toStringAsFixed(1)})',
+        offset: Offset(chartWidth - 140, y - 16),
+        bgColor: const Color(0xFF332B00),
+        textColor: const Color(0xFFFFD700),
+        borderColor: const Color(0xFFFFD700),
+      );
+    }
+
+    // 4. Draw Open Position Lines (Entry, SL, TP)
+    for (final pos in openPositions) {
+      final entry = (pos['entry'] as num?)?.toDouble();
+      final sl = (pos['stop_loss'] as num?)?.toDouble();
+      final tp = (pos['take_profit'] as num?)?.toDouble();
+      final dir = (pos['direction']?.toString() ?? 'long').toUpperCase();
+
+      if (entry != null && entry >= paddedMin && entry <= paddedMax) {
+        final y = priceToY(entry);
+        final p = Paint()
+          ..color = const Color(0xFF00E5FF)
+          ..strokeWidth = 1.5;
+        canvas.drawLine(Offset(0, y), Offset(chartWidth, y), p);
+        _drawTag(
+          canvas,
+          text: '📌 $dir ENTRY @ \$${entry.toStringAsFixed(2)}',
+          offset: Offset(10, y - 16),
+          bgColor: const Color(0xFF00E5FF),
+          textColor: Colors.black,
+        );
+      }
+
+      if (sl != null && sl >= paddedMin && sl <= paddedMax) {
+        final y = priceToY(sl);
+        final p = Paint()
+          ..color = const Color(0xFFFF5252)
+          ..strokeWidth = 1.2;
+        _drawDashedLine(canvas, Offset(0, y), Offset(chartWidth, y), p);
+        _drawTag(
+          canvas,
+          text: '🛑 SL @ \$${sl.toStringAsFixed(2)}',
+          offset: Offset(chartWidth - 120, y - 16),
+          bgColor: const Color(0xFFFF5252),
+          textColor: Colors.white,
+        );
+      }
+
+      if (tp != null && tp >= paddedMin && tp <= paddedMax) {
+        final y = priceToY(tp);
+        final p = Paint()
+          ..color = const Color(0xFF00E676)
+          ..strokeWidth = 1.2;
+        _drawDashedLine(canvas, Offset(0, y), Offset(chartWidth, y), p);
+        _drawTag(
+          canvas,
+          text: '🎯 TP @ \$${tp.toStringAsFixed(2)}',
+          offset: Offset(chartWidth - 120, y - 16),
+          bgColor: const Color(0xFF00E676),
+          textColor: Colors.black,
+        );
+      }
+    }
+
+    // 5. Draw Live Price Line
+    if (currentPrice > 0 && currentPrice >= paddedMin && currentPrice <= paddedMax) {
+      final y = priceToY(currentPrice);
+      final pricePaint = Paint()
+        ..color = const Color(0xFF00C087)
+        ..strokeWidth = 1.0
+        ..style = PaintingStyle.stroke;
+
+      _drawDashedLine(canvas, Offset(0, y), Offset(chartWidth, y), pricePaint);
+
+      _drawTag(
+        canvas,
+        text: '\$${currentPrice.toStringAsFixed(2)}',
+        offset: Offset(chartWidth - 85, y - 9),
+        bgColor: const Color(0xFF00C087),
+        textColor: Colors.black,
+      );
+    }
+  }
+
+  void _drawTag(
+    Canvas canvas, {
+    required String text,
+    required Offset offset,
+    required Color bgColor,
+    required Color textColor,
+    Color? borderColor,
+  }) {
+    final textSpan = TextSpan(
+      text: text,
+      style: TextStyle(color: textColor, fontSize: 10, fontWeight: FontWeight.bold),
+    );
+    final textPainter = TextPainter(
+      text: textSpan,
+      textDirection: TextDirection.ltr,
+    );
+    textPainter.layout();
+
+    final bgRect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(offset.dx - 4, offset.dy - 2, textPainter.width + 8, textPainter.height + 4),
+      const Radius.circular(4),
+    );
+
+    final bgPaint = Paint()..color = bgColor;
+    canvas.drawRRect(bgRect, bgPaint);
+
+    if (borderColor != null) {
+      final bPaint = Paint()
+        ..color = borderColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.0;
+      canvas.drawRRect(bgRect, bPaint);
+    }
+
+    textPainter.paint(canvas, offset);
+  }
+
+  void _drawDashedLine(Canvas canvas, Offset p1, Offset p2, Paint paint, {double dashWidth = 5, double dashSpace = 4}) {
+    double dx = p2.dx - p1.dx;
+    double dy = p2.dy - p1.dy;
+    double count = (dx / (dashWidth + dashSpace)).abs();
+    if (count == 0) return;
+    double xStep = dx / count;
+    double yStep = dy / count;
+
+    for (int i = 0; i < count; i += 2) {
+      final start = Offset(p1.dx + xStep * i, p1.dy + yStep * i);
+      final end = Offset(p1.dx + xStep * (i + 1), p1.dy + yStep * (i + 1));
+      canvas.drawLine(start, end, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant SMCOverlayPainter oldDelegate) => true;
 }
