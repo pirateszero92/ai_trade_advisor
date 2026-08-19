@@ -341,21 +341,20 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            _buildProHeader(),
+            _buildProUnifiedHeader(),
             const Divider(),
-            _buildProToolbar(),
-            const Divider(),
-            if (_showSMCOverlay && _smcOverlayData != null) _buildSMCLayerIndicator(),
             Expanded(
               child: LayoutBuilder(
                 builder: (context, constraints) {
                   if (constraints.maxWidth > 900) {
                     return Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         Expanded(
-                          flex: 68,
+                          flex: 70,
                           child: Column(
                             children: [
+                              if (_showSMCOverlay && _smcOverlayData != null) _buildSMCLayerIndicator(),
                               Expanded(flex: 62, child: _buildChartArea()),
                               const Divider(),
                               Expanded(flex: 38, child: _buildBottomDock()),
@@ -363,12 +362,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                           ),
                         ),
                         const VerticalDivider(width: 1, color: AppColors.border),
-                        Expanded(flex: 32, child: _buildApexAIPanel()),
+                        Expanded(flex: 30, child: _buildApexAIPanel()),
                       ],
                     );
                   } else {
                     return Column(
                       children: [
+                        if (_showSMCOverlay && _smcOverlayData != null) _buildSMCLayerIndicator(),
                         Expanded(flex: 48, child: _buildChartArea()),
                         const Divider(),
                         Expanded(flex: 30, child: _buildBottomDock()),
@@ -389,40 +389,239 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   }
 
   // --------------------------------------------------------------------------
-  // Header: 24h Ticker & Market Switcher
+  // Unified Header: Market Switcher, Symbol Dropdown, 24h Ticker & Timeframe
   // --------------------------------------------------------------------------
-  Widget _buildProHeader() {
+  Widget _buildProUnifiedHeader() {
+    final isPos = _change24h >= 0;
+    final changeColor = isPos ? AppColors.bullish : AppColors.bearish;
+
     return Container(
       color: AppColors.surface,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       child: Row(
         children: [
-          // Market Category Chips
+          // Market Switcher Chips
           _marketTypeBadge('CRYPTO', 'crypto'),
-          const SizedBox(width: 6),
+          const SizedBox(width: 4),
           _marketTypeBadge('FOREX & GOLD', 'forex'),
-          const SizedBox(width: 6),
+          const SizedBox(width: 4),
           _marketTypeBadge('STOCKS', 'stock'),
+
+          const SizedBox(width: 12),
+          Container(width: 1, height: 20, color: AppColors.border),
+          const SizedBox(width: 12),
+
+          // Symbol Selector Dropdown
+          PopupMenuButton<String>(
+            initialValue: _selectedSymbol,
+            tooltip: 'Select Pair / Symbol',
+            color: const Color(0xFF1E2533),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+              side: const BorderSide(color: AppColors.border),
+            ),
+            onSelected: (s) {
+              setState(() => _selectedSymbol = s);
+              _fetchChartData();
+            },
+            itemBuilder: (context) => _symbols.map((s) {
+              final isSel = s == _selectedSymbol;
+              return PopupMenuItem<String>(
+                value: s,
+                height: 38,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      s,
+                      style: TextStyle(
+                        fontWeight: isSel ? FontWeight.bold : FontWeight.w600,
+                        color: isSel ? AppColors.bullish : Colors.white,
+                        fontSize: 13,
+                      ),
+                    ),
+                    if (isSel)
+                      const Icon(Icons.check, size: 16, color: AppColors.bullish),
+                  ],
+                ),
+              );
+            }).toList(),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E2533),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _selectedSymbol,
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
+                  ),
+                  const SizedBox(width: 4),
+                  const Icon(Icons.arrow_drop_down, color: Colors.white70, size: 18),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(width: 12),
+
+          // Live Price
+          Text(
+            _lastPrice > 0
+                ? (_lastPrice < 10 ? _lastPrice.toStringAsFixed(4) : _lastPrice.toStringAsFixed(2))
+                : '---',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: changeColor,
+              fontFamily: 'monospace',
+            ),
+          ),
+          const SizedBox(width: 6),
+
+          // 24h Change Badge
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: changeColor.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              '${isPos ? '+' : ''}${_change24h.toStringAsFixed(2)}%',
+              style: TextStyle(color: changeColor, fontSize: 11, fontWeight: FontWeight.bold),
+            ),
+          ),
+
+          const SizedBox(width: 14),
+
+          // 24h High / Low / Volume Stats
+          _tickerStat('24h High', _high24h.toStringAsFixed(2)),
+          const SizedBox(width: 12),
+          _tickerStat('24h Low', _low24h.toStringAsFixed(2)),
+          const SizedBox(width: 12),
+          _tickerStat('24h Vol', _formatVolume(_vol24h)),
+
+          const SizedBox(width: 14),
+          Container(width: 1, height: 20, color: AppColors.border),
+          const SizedBox(width: 14),
+
+          // Timeframe Dropdown
+          PopupMenuButton<String>(
+            initialValue: _selectedTimeframe,
+            tooltip: 'Select Timeframe',
+            color: const Color(0xFF1E2533),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+              side: const BorderSide(color: AppColors.border),
+            ),
+            onSelected: (tf) {
+              setState(() => _selectedTimeframe = tf);
+              _fetchChartData();
+            },
+            itemBuilder: (context) => _timeframes.map((tf) {
+              final isSel = tf == _selectedTimeframe;
+              return PopupMenuItem<String>(
+                value: tf,
+                height: 36,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      tf.toUpperCase(),
+                      style: TextStyle(
+                        fontWeight: isSel ? FontWeight.bold : FontWeight.normal,
+                        color: isSel ? AppColors.bullish : Colors.white,
+                        fontSize: 13,
+                      ),
+                    ),
+                    if (isSel)
+                      const Icon(Icons.check, size: 16, color: AppColors.bullish),
+                  ],
+                ),
+              );
+            }).toList(),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E2533),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.schedule, size: 14, color: Colors.white70),
+                  const SizedBox(width: 4),
+                  Text(
+                    _selectedTimeframe.toUpperCase(),
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.white),
+                  ),
+                  const SizedBox(width: 2),
+                  const Icon(Icons.arrow_drop_down, color: Colors.white70, size: 16),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(width: 8),
+
+          // LuxAlgo SMC Toggle
+          GestureDetector(
+            onTap: () => setState(() => _showSMCOverlay = !_showSMCOverlay),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              decoration: BoxDecoration(
+                color: _showSMCOverlay ? const Color(0xFF2E82FE).withOpacity(0.15) : const Color(0xFF1E2533),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: _showSMCOverlay ? const Color(0xFF2E82FE) : AppColors.border),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    _showSMCOverlay ? Icons.visibility : Icons.visibility_off,
+                    size: 14,
+                    color: _showSMCOverlay ? const Color(0xFF2E82FE) : AppColors.textMuted,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    'LuxAlgo SMC',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: _showSMCOverlay ? Colors.white : AppColors.textMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
 
           const Spacer(),
 
           // Live Pulse Dot
           Container(
-            width: 8,
-            height: 8,
+            width: 7,
+            height: 7,
             decoration: const BoxDecoration(
               color: AppColors.bullish,
               shape: BoxShape.circle,
             ),
           ),
-          const SizedBox(width: 6),
-          const Text('LIVE', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.bullish)),
+          const SizedBox(width: 5),
+          const Text('LIVE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: AppColors.bullish)),
 
-          const SizedBox(width: 16),
+          const SizedBox(width: 10),
           IconButton(
-            icon: const Icon(Icons.refresh, size: 20, color: Colors.white70),
+            icon: const Icon(Icons.refresh, size: 18, color: Colors.white70),
             tooltip: 'Reload Data',
             onPressed: _fetchChartData,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
           ),
         ],
       ),
@@ -440,7 +639,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         _fetchChartData();
       },
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
           color: isSelected ? const Color(0xFF2E82FE).withOpacity(0.2) : Colors.transparent,
           borderRadius: BorderRadius.circular(4),
@@ -451,213 +650,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         child: Text(
           title,
           style: TextStyle(
-            fontSize: 11,
+            fontSize: 10,
             fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
             color: isSelected ? Colors.white : AppColors.textMuted,
           ),
-        ),
-      ),
-    );
-  }
-
-  // --------------------------------------------------------------------------
-  // Toolbar: Symbol, Price, 24h Stats, Timeframe Selector
-  // --------------------------------------------------------------------------
-  Widget _buildProToolbar() {
-    final isPos = _change24h >= 0;
-    final changeColor = isPos ? AppColors.bullish : AppColors.bearish;
-
-    return Container(
-      color: AppColors.surface,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            // Symbol Dropdown (Matching Timeframe Dropdown style)
-            PopupMenuButton<String>(
-              initialValue: _selectedSymbol,
-              tooltip: 'Select Pair / Symbol',
-              color: const Color(0xFF1E2533),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
-                side: const BorderSide(color: AppColors.border),
-              ),
-              onSelected: (s) {
-                setState(() => _selectedSymbol = s);
-                _fetchChartData();
-              },
-              itemBuilder: (context) => _symbols.map((s) {
-                final isSel = s == _selectedSymbol;
-                return PopupMenuItem<String>(
-                  value: s,
-                  height: 40,
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        s,
-                        style: TextStyle(
-                          fontWeight: isSel ? FontWeight.bold : FontWeight.w600,
-                          color: isSel ? AppColors.bullish : Colors.white,
-                          fontSize: 14,
-                        ),
-                      ),
-                      if (isSel)
-                        const Icon(Icons.check, size: 16, color: AppColors.bullish),
-                    ],
-                  ),
-                );
-              }).toList(),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E2533),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: AppColors.border),
-                ),
-                child: Row(
-                  children: [
-                    Text(
-                      _selectedSymbol,
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white),
-                    ),
-                    const SizedBox(width: 4),
-                    const Icon(Icons.arrow_drop_down, color: Colors.white70, size: 20),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(width: 16),
-
-            // Big Live Price
-            Text(
-              _lastPrice > 0
-                  ? (_lastPrice < 10 ? _lastPrice.toStringAsFixed(4) : _lastPrice.toStringAsFixed(2))
-                  : '---',
-              style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-                color: changeColor,
-                fontFamily: 'monospace',
-              ),
-            ),
-            const SizedBox(width: 8),
-
-            // 24h % Badge
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: changeColor.withOpacity(0.15),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                '${isPos ? '+' : ''}${_change24h.toStringAsFixed(2)}%',
-                style: TextStyle(color: changeColor, fontSize: 12, fontWeight: FontWeight.bold),
-              ),
-            ),
-            const SizedBox(width: 24),
-
-            // 24h High / Low / Vol
-            _tickerStat('24h High', _high24h.toStringAsFixed(2)),
-            const SizedBox(width: 16),
-            _tickerStat('24h Low', _low24h.toStringAsFixed(2)),
-            const SizedBox(width: 16),
-            _tickerStat('24h Vol', _formatVolume(_vol24h)),
-
-            const SizedBox(width: 24),
-            Container(width: 1, height: 24, color: AppColors.border),
-            const SizedBox(width: 16),
-
-            // Compact Timeframe Dropdown
-            PopupMenuButton<String>(
-              initialValue: _selectedTimeframe,
-              tooltip: 'Select Timeframe',
-              color: const Color(0xFF1E2533),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
-                side: const BorderSide(color: AppColors.border),
-              ),
-              onSelected: (tf) {
-                setState(() => _selectedTimeframe = tf);
-                _fetchChartData();
-              },
-              itemBuilder: (context) => _timeframes.map((tf) {
-                final isSel = tf == _selectedTimeframe;
-                return PopupMenuItem<String>(
-                  value: tf,
-                  height: 38,
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        tf.toUpperCase(),
-                        style: TextStyle(
-                          fontWeight: isSel ? FontWeight.bold : FontWeight.normal,
-                          color: isSel ? AppColors.bullish : Colors.white,
-                          fontSize: 13,
-                        ),
-                      ),
-                      if (isSel)
-                        const Icon(Icons.check, size: 16, color: AppColors.bullish),
-                    ],
-                  ),
-                );
-              }).toList(),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E2533),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: AppColors.border),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.schedule, size: 15, color: Colors.white70),
-                    const SizedBox(width: 6),
-                    Text(
-                      _selectedTimeframe.toUpperCase(),
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
-                    ),
-                    const SizedBox(width: 4),
-                    const Icon(Icons.arrow_drop_down, color: Colors.white70, size: 18),
-                  ],
-                ),
-              ),
-            ),
-
-            const SizedBox(width: 12),
-            // SMC Overlay Toggle Button
-            GestureDetector(
-              onTap: () => setState(() => _showSMCOverlay = !_showSMCOverlay),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(
-                  color: _showSMCOverlay ? const Color(0xFF2E82FE).withOpacity(0.15) : const Color(0xFF1E2533),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: _showSMCOverlay ? const Color(0xFF2E82FE) : AppColors.border),
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      _showSMCOverlay ? Icons.visibility : Icons.visibility_off,
-                      size: 16,
-                      color: _showSMCOverlay ? const Color(0xFF2E82FE) : AppColors.textMuted,
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      'LuxAlgo SMC',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: _showSMCOverlay ? Colors.white : AppColors.textMuted,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
         ),
       ),
     );
@@ -1415,8 +1411,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
     return Container(
       color: AppColors.panel,
+      height: double.infinity,
       child: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1451,7 +1448,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 ),
               ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
 
             // Confluence Score Gauge
             Container(
@@ -1493,11 +1490,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 ],
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
 
             // Trade Execution Levels (Entry / SL / TP)
             const Text('EXECUTION BLUEPRINT', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.textMuted)),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -1517,7 +1514,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 ],
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
 
             // AI Assessment Note
             Container(
@@ -1543,7 +1540,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 ],
               ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 14),
 
             // Quick Execution Action Buttons
             Row(
@@ -1574,6 +1571,59 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 14),
+
+            // Risk Sizing & Auto-Monitor Status
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF131722),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.shield_outlined, size: 14, color: Color(0xFF00E5FF)),
+                      SizedBox(width: 6),
+                      Text('INSTITUTIONAL RISK CONTROL', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('Risk / Trade Limit:', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                      Text('1.0% (\$100.00)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  const Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('Max Daily Drawdown:', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                      Text('3.0% (\$300.00)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.neutral)),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Auto TP/SL Monitor:', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                      Row(
+                        children: [
+                          Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.bullish, shape: BoxShape.circle)),
+                          const SizedBox(width: 4),
+                          const Text('24/7 ACTIVE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: AppColors.bullish)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -1642,270 +1692,4 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       ),
     );
   }
-}
-
-// --------------------------------------------------------------------------
-// SMCOverlayPainter: Visual Box and Level Overlays directly on Chart Canvas
-// --------------------------------------------------------------------------
-class SMCOverlayPainter extends CustomPainter {
-  final List<Candle> candles;
-  final Map<String, dynamic>? smcData;
-  final List<Map<String, dynamic>> openPositions;
-  final double currentPrice;
-  final bool showOverlay;
-
-  SMCOverlayPainter({
-    required this.candles,
-    required this.smcData,
-    required this.openPositions,
-    required this.currentPrice,
-    required this.showOverlay,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (candles.isEmpty || !showOverlay) return;
-
-    double minPrice = candles.map((c) => c.low).reduce((a, b) => a < b ? a : b);
-    double maxPrice = candles.map((c) => c.high).reduce((a, b) => a > b ? a : b);
-
-    if (maxPrice <= minPrice) return;
-
-    final range = maxPrice - minPrice;
-    final paddedMin = minPrice - range * 0.05;
-    final paddedMax = maxPrice + range * 0.05;
-    final paddedRange = paddedMax - paddedMin;
-
-    double priceToY(double price) {
-      final norm = (price - paddedMin) / paddedRange;
-      return size.height * (1.0 - norm.clamp(0.0, 1.0));
-    }
-
-    final chartWidth = size.width - 65;
-
-    // 1. Draw Order Block (OB) Box
-    final ob = smcData?['order_block'] as Map<String, dynamic>?;
-    if (ob != null) {
-      final obTop = (ob['top'] as num?)?.toDouble();
-      final obBottom = (ob['bottom'] as num?)?.toDouble();
-      final isBullish = (ob['direction'] as String? ?? 'bullish') == 'bullish';
-
-      if (obTop != null && obBottom != null) {
-        final yTop = priceToY(obTop);
-        final yBottom = priceToY(obBottom);
-        final topY = yTop < yBottom ? yTop : yBottom;
-        final height = (yTop - yBottom).abs().clamp(8.0, size.height * 0.35);
-
-        final obColor = isBullish ? const Color(0xFF00C087) : const Color(0xFFFF6B6B);
-        final rect = Rect.fromLTWH(0, topY, chartWidth, height);
-
-        final fillPaint = Paint()
-          ..color = obColor.withOpacity(0.18)
-          ..style = PaintingStyle.fill;
-        canvas.drawRect(rect, fillPaint);
-
-        final borderPaint = Paint()
-          ..color = obColor.withOpacity(0.85)
-          ..strokeWidth = 1.5
-          ..style = PaintingStyle.stroke;
-        canvas.drawLine(Offset(0, topY), Offset(chartWidth, topY), borderPaint);
-        canvas.drawLine(Offset(0, topY + height), Offset(chartWidth, topY + height), borderPaint);
-
-        _drawTag(
-          canvas,
-          text: isBullish
-              ? '🟢 BULLISH OB [${obBottom.toStringAsFixed(1)} - ${obTop.toStringAsFixed(1)}]'
-              : '🔴 BEARISH OB [${obBottom.toStringAsFixed(1)} - ${obTop.toStringAsFixed(1)}]',
-          offset: Offset(8, topY + 2),
-          bgColor: obColor.withOpacity(0.85),
-          textColor: Colors.black,
-        );
-      }
-    }
-
-    // 2. Draw Fair Value Gap (FVG) Box
-    final fvg = smcData?['fvg'] as Map<String, dynamic>?;
-    if (fvg != null) {
-      final fvgTop = (fvg['top'] as num?)?.toDouble();
-      final fvgBottom = (fvg['bottom'] as num?)?.toDouble();
-
-      if (fvgTop != null && fvgBottom != null) {
-        final yTop = priceToY(fvgTop);
-        final yBottom = priceToY(fvgBottom);
-        final topY = yTop < yBottom ? yTop : yBottom;
-        final height = (yTop - yBottom).abs().clamp(8.0, size.height * 0.3);
-
-        const fvgColor = Color(0xFF9B59B6);
-        final rect = Rect.fromLTWH(0, topY, chartWidth, height);
-
-        final fillPaint = Paint()
-          ..color = fvgColor.withOpacity(0.16)
-          ..style = PaintingStyle.fill;
-        canvas.drawRect(rect, fillPaint);
-
-        final borderPaint = Paint()
-          ..color = fvgColor.withOpacity(0.7)
-          ..strokeWidth = 1.2
-          ..style = PaintingStyle.stroke;
-        canvas.drawLine(Offset(0, topY), Offset(chartWidth, topY), borderPaint);
-        canvas.drawLine(Offset(0, topY + height), Offset(chartWidth, topY + height), borderPaint);
-
-        _drawTag(
-          canvas,
-          text: '⚡ FVG IMBALANCE [${fvgBottom.toStringAsFixed(1)} - ${fvgTop.toStringAsFixed(1)}]',
-          offset: Offset(8, topY + 2),
-          bgColor: fvgColor.withOpacity(0.85),
-          textColor: Colors.white,
-        );
-      }
-    }
-
-    // 3. Draw Equilibrium (EQ 50%)
-    final eq = (smcData?['equilibrium'] as num?)?.toDouble();
-    if (eq != null && eq >= paddedMin && eq <= paddedMax) {
-      final y = priceToY(eq);
-      final eqPaint = Paint()
-        ..color = const Color(0xFFFFD700)
-        ..strokeWidth = 1.0
-        ..style = PaintingStyle.stroke;
-
-      _drawDashedLine(canvas, Offset(0, y), Offset(chartWidth, y), eqPaint);
-
-      _drawTag(
-        canvas,
-        text: '⚖️ EQ 50% (${eq.toStringAsFixed(1)})',
-        offset: Offset(chartWidth - 140, y - 16),
-        bgColor: const Color(0xFF332B00),
-        textColor: const Color(0xFFFFD700),
-        borderColor: const Color(0xFFFFD700),
-      );
-    }
-
-    // 4. Draw Open Position Lines (Entry, SL, TP)
-    for (final pos in openPositions) {
-      final entry = (pos['entry'] as num?)?.toDouble();
-      final sl = (pos['stop_loss'] as num?)?.toDouble();
-      final tp = (pos['take_profit'] as num?)?.toDouble();
-      final dir = (pos['direction']?.toString() ?? 'long').toUpperCase();
-
-      if (entry != null && entry >= paddedMin && entry <= paddedMax) {
-        final y = priceToY(entry);
-        final p = Paint()
-          ..color = const Color(0xFF00E5FF)
-          ..strokeWidth = 1.5;
-        canvas.drawLine(Offset(0, y), Offset(chartWidth, y), p);
-        _drawTag(
-          canvas,
-          text: '📌 $dir ENTRY @ \$${entry.toStringAsFixed(2)}',
-          offset: Offset(10, y - 16),
-          bgColor: const Color(0xFF00E5FF),
-          textColor: Colors.black,
-        );
-      }
-
-      if (sl != null && sl >= paddedMin && sl <= paddedMax) {
-        final y = priceToY(sl);
-        final p = Paint()
-          ..color = const Color(0xFFFF5252)
-          ..strokeWidth = 1.2;
-        _drawDashedLine(canvas, Offset(0, y), Offset(chartWidth, y), p);
-        _drawTag(
-          canvas,
-          text: '🛑 SL @ \$${sl.toStringAsFixed(2)}',
-          offset: Offset(chartWidth - 120, y - 16),
-          bgColor: const Color(0xFFFF5252),
-          textColor: Colors.white,
-        );
-      }
-
-      if (tp != null && tp >= paddedMin && tp <= paddedMax) {
-        final y = priceToY(tp);
-        final p = Paint()
-          ..color = const Color(0xFF00E676)
-          ..strokeWidth = 1.2;
-        _drawDashedLine(canvas, Offset(0, y), Offset(chartWidth, y), p);
-        _drawTag(
-          canvas,
-          text: '🎯 TP @ \$${tp.toStringAsFixed(2)}',
-          offset: Offset(chartWidth - 120, y - 16),
-          bgColor: const Color(0xFF00E676),
-          textColor: Colors.black,
-        );
-      }
-    }
-
-    // 5. Draw Live Price Line
-    if (currentPrice > 0 && currentPrice >= paddedMin && currentPrice <= paddedMax) {
-      final y = priceToY(currentPrice);
-      final pricePaint = Paint()
-        ..color = const Color(0xFF00C087)
-        ..strokeWidth = 1.0
-        ..style = PaintingStyle.stroke;
-
-      _drawDashedLine(canvas, Offset(0, y), Offset(chartWidth, y), pricePaint);
-
-      _drawTag(
-        canvas,
-        text: '\$${currentPrice.toStringAsFixed(2)}',
-        offset: Offset(chartWidth - 85, y - 9),
-        bgColor: const Color(0xFF00C087),
-        textColor: Colors.black,
-      );
-    }
-  }
-
-  void _drawTag(
-    Canvas canvas, {
-    required String text,
-    required Offset offset,
-    required Color bgColor,
-    required Color textColor,
-    Color? borderColor,
-  }) {
-    final textSpan = TextSpan(
-      text: text,
-      style: TextStyle(color: textColor, fontSize: 10, fontWeight: FontWeight.bold),
-    );
-    final textPainter = TextPainter(
-      text: textSpan,
-      textDirection: TextDirection.ltr,
-    );
-    textPainter.layout();
-
-    final bgRect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(offset.dx - 4, offset.dy - 2, textPainter.width + 8, textPainter.height + 4),
-      const Radius.circular(4),
-    );
-
-    final bgPaint = Paint()..color = bgColor;
-    canvas.drawRRect(bgRect, bgPaint);
-
-    if (borderColor != null) {
-      final bPaint = Paint()
-        ..color = borderColor
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.0;
-      canvas.drawRRect(bgRect, bPaint);
-    }
-
-    textPainter.paint(canvas, offset);
-  }
-
-  void _drawDashedLine(Canvas canvas, Offset p1, Offset p2, Paint paint, {double dashWidth = 5, double dashSpace = 4}) {
-    double dx = p2.dx - p1.dx;
-    double dy = p2.dy - p1.dy;
-    double count = (dx / (dashWidth + dashSpace)).abs();
-    if (count == 0) return;
-    double xStep = dx / count;
-    double yStep = dy / count;
-
-    for (int i = 0; i < count; i += 2) {
-      final start = Offset(p1.dx + xStep * i, p1.dy + yStep * i);
-      final end = Offset(p1.dx + xStep * (i + 1), p1.dy + yStep * (i + 1));
-      canvas.drawLine(start, end, paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant SMCOverlayPainter oldDelegate) => true;
 }
