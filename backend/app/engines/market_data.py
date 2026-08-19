@@ -1,4 +1,4 @@
-﻿"""Market Data Engine with multi-source fallback (CCXT, MT5, yfinance)."""
+"""Market Data Engine with multi-source fallback (CCXT, MT5, yfinance)."""
 
 from __future__ import annotations
 
@@ -84,28 +84,135 @@ class MarketDataEngine:
         logger.warning(f"[MarketData] Generating synthetic fallback candles for {symbol}")
         return self._generate_fallback_data(symbol, limit)
 
+    async def get_ticker_24h(
+        self,
+        symbol: str,
+        market_type: str = "crypto",
+    ) -> dict:
+        """Fetch exact 24h ticker: lastPrice, priceChangePercent, highPrice, lowPrice, volume."""
+        import httpx
+        clean_sym = symbol.replace("/", "").replace("-", "").upper()
+
+        if market_type == "crypto":
+            binance_hosts = [
+                "https://data-api.binance.vision",
+                "https://api1.binance.com",
+                "https://api.binance.com",
+                "https://api2.binance.com",
+            ]
+            for host in binance_hosts:
+                try:
+                    async with httpx.AsyncClient(timeout=3.0) as client:
+                        resp = await client.get(f"{host}/api/v3/ticker/24hr", params={"symbol": clean_sym})
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            return {
+                                "symbol": symbol,
+                                "price": float(data["lastPrice"]),
+                                "change_24h": float(data["priceChangePercent"]),
+                                "high_24h": float(data["highPrice"]),
+                                "low_24h": float(data["lowPrice"]),
+                                "volume_24h": float(data["volume"]),
+                            }
+                except Exception:
+                    continue
+
+        # Fallback to yfinance ticker if crypto direct or stocks/forex
+        try:
+            yf_sym = normalize_yfinance_symbol(symbol, market_type)
+            t = yf.Ticker(yf_sym)
+            fi = t.fast_info
+            last_p = float(fi.last_price or fi.previous_close or 100.0)
+            prev_c = float(fi.previous_close or last_p)
+            chg = ((last_p - prev_c) / prev_c) * 100 if prev_c > 0 else 0.0
+            return {
+                "symbol": symbol,
+                "price": last_p,
+                "change_24h": round(chg, 2),
+                "high_24h": float(fi.day_high or last_p * 1.01),
+                "low_24h": float(fi.day_low or last_p * 0.99),
+                "volume_24h": float(fi.last_volume or 100000),
+            }
+        except Exception as e:
+            logger.warning(f"Ticker fallback error for {symbol}: {e}")
+            return {
+                "symbol": symbol,
+                "price": 100.0,
+                "change_24h": 0.0,
+                "high_24h": 105.0,
+                "low_24h": 95.0,
+                "volume_24h": 10000,
+            }
+
     async def _get_crypto(
         self, symbol: str, timeframe: str, exchange_name: str, limit: int
     ) -> pd.DataFrame:
-        import ccxt.async_support as ccxt_async
-
-        key = exchange_name.lower()
-        formatted_sym = symbol.replace("-", "/").upper()
-        if "/" not in formatted_sym:
-            formatted_sym = f"{formatted_sym[:-4]}/{formatted_sym[-4:]}" if formatted_sym.endswith("USDT") else f"{formatted_sym}/USDT"
-
+        import httpx
+        clean_sym = symbol.replace("/", "").replace("-", "").upper()
         tf = CCXT_TF_MAP.get(timeframe, "1h")
 
-        if key not in self._ccxt_exchanges:
-            ExchangeClass = getattr(ccxt_async, key, ccxt_async.binance)
-            self._ccxt_exchanges[key] = ExchangeClass({"enableRateLimit": True, "timeout": 5000})
+        binance_hosts = [
+            "https://data-api.binance.vision",
+            "https://api1.binance.com",
+            "https://api.binance.com",
+            "https://api2.binance.com",
+        ]
 
-        ex = self._ccxt_exchanges[key]
-        raw = await ex.fetch_ohlcv(formatted_sym, timeframe=tf, limit=limit)
-        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        df.set_index("timestamp", inplace=True)
-        return df[["open", "high", "low", "close", "volume"]]
+        for host in binance_hosts:
+            try:
+                async with httpx.AsyncClient(timeout=3.5) as client:
+                    resp = await client.get(
+                        f"{host}/api/v3/klines",
+                        params={"symbol": clean_sym, "interval": tf, "limit": limit},
+                    )
+                    if resp.status_code == 200:
+                        raw = resp.json()
+                        if raw and len(raw) >= 5:
+                            # Binance kline format: [open_time, open, high, low, close, volume, ...]
+                            df = pd.DataFrame(
+                                raw,
+                                columns=[
+                                    "timestamp", "open", "high", "low", "close", "volume",
+                                    "close_time", "qav", "trades", "tb_base", "tb_quote", "ignore"
+                                ],
+                            )
+                            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+                            df.set_index("timestamp", inplace=True)
+                            for col in ["open", "high", "low", "close", "volume"]:
+                                df[col] = pd.to_numeric(df[col], errors="coerce")
+                            return df[["open", "high", "low", "close", "volume"]].dropna()
+            except Exception as e:
+                logger.debug(f"[MarketData] Host {host} failed: {e}")
+                continue
+
+        # Try Bybit Spot API
+        try:
+            bybit_tf_map = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "1h": "60", "4h": "240", "1d": "D", "1w": "W"}
+            b_tf = bybit_tf_map.get(tf, "60")
+            async with httpx.AsyncClient(timeout=3.5) as client:
+                resp = await client.get(
+                    "https://api.bybit.com/v5/market/kline",
+                    params={"category": "spot", "symbol": clean_sym, "interval": b_tf, "limit": limit},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    klist = data.get("result", {}).get("list", [])
+                    if klist and len(klist) >= 5:
+                        # Bybit returns reverse order [start_time, open, high, low, close, volume, ...]
+                        df = pd.DataFrame(
+                            klist,
+                            columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"],
+                        )
+                        df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
+                        df.set_index("timestamp", inplace=True)
+                        for col in ["open", "high", "low", "close", "volume"]:
+                            df[col] = pd.to_numeric(df[col], errors="coerce")
+                        df.sort_index(inplace=True)
+                        return df[["open", "high", "low", "close", "volume"]].dropna()
+        except Exception as e:
+            logger.warning(f"[MarketData] Bybit fetch failed: {e}")
+
+        raise ValueError(f"All crypto data sources failed for {symbol}")
 
     async def _get_yfinance(
         self, symbol: str, timeframe: str, market_type: str, limit: int

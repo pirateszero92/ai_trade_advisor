@@ -18,6 +18,17 @@ _market = MarketDataEngine()
 _smc = SMCEngine()
 
 
+@router.get("/ticker")
+async def get_ticker(
+    symbol: str = Query("BTC/USDT"),
+    market_type: Literal["crypto", "forex", "stock"] = Query("crypto"),
+    _key: str = Depends(verify_api_key),
+):
+    """Return live 24h ticker: real-time price, change%, 24h high/low/volume."""
+    data = await _market.get_ticker_24h(symbol=symbol, market_type=market_type)
+    return data
+
+
 @router.get("/ohlcv")
 async def get_ohlcv(
     symbol: str = Query("BTC/USDT"),

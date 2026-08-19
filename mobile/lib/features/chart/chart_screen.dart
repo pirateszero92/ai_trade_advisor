@@ -82,39 +82,48 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   Map<String, double> _symbolLivePrices = {};
 
+  Future<void> _fetchLiveTicker() async {
+    try {
+      final dio = Dio();
+      final resp = await dio.get(
+        'http://127.0.0.1:8000/api/v1/chart/ticker',
+        queryParameters: {
+          'symbol': _selectedSymbol,
+          'market_type': _selectedMarket,
+        },
+      );
+      if (resp.statusCode == 200 && resp.data != null) {
+        final d = resp.data;
+        if (!mounted) return;
+        setState(() {
+          _lastPrice = (d['price'] as num?)?.toDouble() ?? _lastPrice;
+          _change24h = (d['change_24h'] as num?)?.toDouble() ?? _change24h;
+          _high24h = (d['high_24h'] as num?)?.toDouble() ?? _high24h;
+          _low24h = (d['low_24h'] as num?)?.toDouble() ?? _low24h;
+          _vol24h = (d['volume_24h'] as num?)?.toDouble() ?? _vol24h;
+          _symbolLivePrices[_selectedSymbol] = _lastPrice;
+
+          if (_candles.isNotEmpty) {
+            final lastCandle = _candles.first;
+            _candles[0] = Candle(
+              date: lastCandle.date,
+              open: lastCandle.open,
+              high: math.max(lastCandle.high, _lastPrice),
+              low: math.min(lastCandle.low, _lastPrice),
+              close: _lastPrice,
+              volume: lastCandle.volume,
+            );
+          }
+        });
+      }
+    } catch (_) {}
+  }
+
   void _startLiveTicker() {
     _liveTickerTimer?.cancel();
-    _liveTickerTimer = Timer.periodic(const Duration(milliseconds: 1200), (_) {
-      if (!mounted || _candles.isEmpty || _isLoading) return;
-
-      final lastCandle = _candles.first;
-      final rnd = math.Random();
-      final tickDelta = (rnd.nextDouble() - 0.49) * (lastCandle.close * 0.0004);
-      final newPrice = (lastCandle.close + tickDelta).clamp(lastCandle.low * 0.999, lastCandle.high * 1.001);
-
-      setState(() {
-        _lastPrice = double.parse(newPrice.toStringAsFixed(2));
-        _symbolLivePrices[_selectedSymbol] = _lastPrice;
-
-        // Update live tick for all open positions' symbols independently
-        for (var pos in _openPositions) {
-          final sym = pos['symbol']?.toString() ?? '';
-          if (sym.isNotEmpty && sym != _selectedSymbol) {
-            final cur = _symbolLivePrices[sym] ?? (pos['entry'] as num?)?.toDouble() ?? 100.0;
-            final tick = (rnd.nextDouble() - 0.49) * (cur * 0.0004);
-            _symbolLivePrices[sym] = double.parse((cur + tick).toStringAsFixed(2));
-          }
-        }
-
-        _candles[0] = Candle(
-          date: lastCandle.date,
-          open: lastCandle.open,
-          high: math.max(lastCandle.high, _lastPrice),
-          low: math.min(lastCandle.low, _lastPrice),
-          close: _lastPrice,
-          volume: lastCandle.volume + (rnd.nextDouble() * 0.5),
-        );
-      });
+    _liveTickerTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) {
+      if (!mounted) return;
+      _fetchLiveTicker();
     });
   }
 
@@ -183,16 +192,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
       parsedCandles.sort((a, b) => b.date.compareTo(a.date));
 
-      // Compute 24h stats from candles
+      // 2. Fetch live ticker stats
       if (parsedCandles.isNotEmpty) {
         _lastPrice = parsedCandles.first.close;
-        final lookback = parsedCandles.take(24).toList();
-        _high24h = lookback.map((c) => c.high).reduce((a, b) => a > b ? a : b);
-        _low24h = lookback.map((c) => c.low).reduce((a, b) => a < b ? a : b);
-        _vol24h = lookback.map((c) => c.volume).fold(0.0, (a, b) => a + b);
-        final firstOpen = lookback.last.open;
-        _change24h = firstOpen > 0 ? ((_lastPrice - firstOpen) / firstOpen) * 100 : 0.0;
+        _symbolLivePrices[_selectedSymbol] = _lastPrice;
       }
+      await _fetchLiveTicker();
 
       // 2. Fetch SMC Overlay
       final overlayResp = await dio.get(
