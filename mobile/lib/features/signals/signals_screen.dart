@@ -223,6 +223,11 @@ class _SignalCard extends StatelessWidget {
     final isLong = direction == 'LONG';
     final color = isLong ? AppColors.bullish : AppColors.bearish;
 
+    final isGradeA = confluence >= 80;
+    final isGradeB = confluence >= 65 && confluence < 80;
+    final gradeText = isGradeA ? 'GRADE A+' : (isGradeB ? 'GRADE B' : 'GRADE C (WAIT)');
+    final gradeColor = isGradeA ? AppColors.bullish : (isGradeB ? AppColors.neutral : const Color(0xFFFF9900));
+
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: Padding(
@@ -246,6 +251,19 @@ class _SignalCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
                 Text(symbol, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: gradeColor.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: gradeColor.withOpacity(0.6), width: 0.8),
+                  ),
+                  child: Text(
+                    gradeText,
+                    style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: gradeColor),
+                  ),
+                ),
                 const Spacer(),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -261,6 +279,30 @@ class _SignalCard extends StatelessWidget {
             ),
             const SizedBox(height: 10),
             Text(message, style: const TextStyle(fontSize: 13, color: Colors.white70, height: 1.4)),
+            if (!isGradeA && !isGradeB) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF332200),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: const Color(0xFFFF9900).withOpacity(0.5)),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.info_outline, color: Color(0xFFFF9900), size: 14),
+                    SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'คำแนะนำ: ยังไม่ควรเสี่ยงเข้าทันที แนะนำ "รอ (WAIT)" สัญญาณ CHoCH ยืนยันใน TF ย่อยก่อน',
+                        style: TextStyle(fontSize: 11, color: Color(0xFFFFB84D), fontWeight: FontWeight.w500),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             if (entry != null && sl != null && tp != null) ...[
               const SizedBox(height: 10),
               Container(
@@ -286,7 +328,7 @@ class _SignalCard extends StatelessWidget {
                 const Text('Institutional Confluence: ', style: TextStyle(fontSize: 12, color: Colors.white38)),
                 Text(
                   '$confluence/100',
-                  style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.bold),
+                  style: TextStyle(fontSize: 12, color: gradeColor, fontWeight: FontWeight.bold),
                 ),
                 const Spacer(),
                 const Text('Proactive Alert ✓', style: TextStyle(fontSize: 11, color: AppColors.bullish, fontWeight: FontWeight.bold)),

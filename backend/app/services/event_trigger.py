@@ -128,6 +128,17 @@ class MarketMonitor:
                     sl_dist = abs(entry - sl)
                     tp = entry + (sl_dist * 2.2) if direction == "long" else entry - (sl_dist * 2.2)
 
+                    zone_name = "Discount" if direction == "long" else "Premium"
+                    if confluence >= 80:
+                        grade = "A+"
+                        action_advice = f"[Grade A+ | Confluence {confluence}/100 🟢 HIGH CONVICTION]: เทรนด์ใหญ่สอดคล้อง + เกิดการ Sweep สภาพคล่องชัดเจน และราคาแตะ Order Block ในโซน {zone_name} แนะนำพิจารณาเข้าตามแผน Entry ${entry:.2f} SL ${sl:.2f} (ความเสี่ยง 1.0%)"
+                    elif confluence >= 65:
+                        grade = "B"
+                        action_advice = f"[Grade B | Confluence {confluence}/100 🟡 STANDARD SETUP]: โครงสร้าง {direction.upper()} แตะ Order Block ในโซน {zone_name} แต่ควรรอแท่งยืนยัน Rejection ก่อนเข้า หรือลดความเสี่ยงเหลือ 0.5%"
+                    else:
+                        grade = "C"
+                        action_advice = f"[Grade C | Confluence {confluence}/100 ⚠️ แนะนำให้ WAIT / ข้าม]: ยังไม่ควรเสี่ยงเข้าทันที แม้ราคาจะแตะ Order Block ในโซน {zone_name} แต่มีความเสี่ยงสวนเทรนด์ใหญ่หรือขาดตัวยืนยัน หากจะเข้าต้องรอแท่ง 15M/1H เบรกทำ CHoCH กลับตัวก่อนเสมอ"
+
                     # 4. Invoke Apex AI Advisor for institutional summary
                     try:
                         ai_res = await self.ai.analyze(
@@ -135,9 +146,11 @@ class MarketMonitor:
                             portfolio_state={"balance": 10000.0, "drawdown_pct": 0.0},
                         )
                         ai_message = ai_res.message
+                        if not ai_message or "neutral" in ai_message.lower():
+                            ai_message = action_advice
                     except Exception as ai_err:
                         logger.warning(f"AI generation fallback: {ai_err}")
-                        ai_message = f"โครงสร้าง {direction.upper()} Confluence {confluence}/100 เกิดการ Sweep สภาพคล่องและตอบสนองต่อ Order Block ในโซน {'Discount' if direction == 'long' else 'Premium'}"
+                        ai_message = action_advice
 
                     signal_payload = {
                         "id": f"{symbol}_{tf}_{int(datetime.now(timezone.utc).timestamp())}",
