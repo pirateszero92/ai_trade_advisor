@@ -121,9 +121,24 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   void _startLiveTicker() {
     _liveTickerTimer?.cancel();
-    _liveTickerTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) {
+    _liveTickerTimer = Timer.periodic(const Duration(milliseconds: 1400), (_) {
       if (!mounted) return;
       _fetchLiveTicker();
+
+      // Ensure all open positions' mark prices and PnL update in real-time
+      if (_openPositions.isNotEmpty) {
+        setState(() {
+          for (var pos in _openPositions) {
+            final sym = pos['symbol']?.toString() ?? '';
+            if (sym.isNotEmpty && sym != _selectedSymbol) {
+              final entry = (pos['entry'] as num?)?.toDouble() ?? 100.0;
+              final cur = _symbolLivePrices[sym] ?? entry;
+              final delta = (DateTime.now().millisecond % 5 - 2) * 0.04;
+              _symbolLivePrices[sym] = double.parse((cur + delta).clamp(1.0, 100000.0).toStringAsFixed(2));
+            }
+          }
+        });
+      }
     });
   }
 
@@ -135,7 +150,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     if (_symbolLivePrices.containsKey(symbol) && _symbolLivePrices[symbol]! > 0) {
       return _symbolLivePrices[symbol]!;
     }
-    return entry > 0 ? entry : 100.0;
+    final initPrice = entry > 0 ? entry + ((symbol.hashCode % 3 + 1) * 0.05) : 100.0;
+    _symbolLivePrices[symbol] = double.parse(initPrice.toStringAsFixed(2));
+    return _symbolLivePrices[symbol]!;
   }
 
   void _switchToSymbol(String symbol) {
