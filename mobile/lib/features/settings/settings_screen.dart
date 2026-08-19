@@ -173,6 +173,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
   bool _initialized = false;
 
+  List<Map<String, dynamic>> _watchlist = [];
+
   @override
   void initState() {
     super.initState();
@@ -187,6 +189,150 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     _telegramTokenCtrl = TextEditingController();
     _telegramChatIdCtrl = TextEditingController();
     _lineTokenCtrl = TextEditingController();
+    _fetchWatchlist();
+  }
+
+  Future<void> _fetchWatchlist() async {
+    try {
+      final dio = Dio();
+      final resp = await dio.get('http://127.0.0.1:8000/api/v1/settings/watchlist');
+      final List<dynamic> list = resp.data['watchlist'] ?? [];
+      setState(() {
+        _watchlist = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _addWatchlistItem(String symbol, String marketType, String tf) async {
+    try {
+      final dio = Dio();
+      await dio.post(
+        'http://127.0.0.1:8000/api/v1/settings/watchlist',
+        data: {
+          'symbol': symbol.trim().toUpperCase(),
+          'market_type': marketType.toLowerCase(),
+          'timeframe': tf.toLowerCase(),
+          'htf_timeframe': tf == '1d' ? '1w' : '4h',
+          'exchange': marketType == 'crypto' ? 'binance' : (marketType == 'forex' ? 'mt5' : 'alpaca'),
+        },
+      );
+      _fetchWatchlist();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.bullish,
+            content: Text('✅ Added $symbol to Proactive Scanner!', style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(backgroundColor: AppColors.bearish, content: Text('Failed to add asset: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _removeWatchlistItem(String symbol) async {
+    try {
+      final dio = Dio();
+      await dio.delete('http://127.0.0.1:8000/api/v1/settings/watchlist/$symbol');
+      _fetchWatchlist();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.bullish,
+            content: Text('🗑️ Removed $symbol from Scanner.', style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(backgroundColor: AppColors.bearish, content: Text('Failed to remove asset: $e')),
+        );
+      }
+    }
+  }
+
+  void _showAddAssetDialog() {
+    final symCtrl = TextEditingController();
+    String selectedType = 'crypto';
+    String selectedTf = '1h';
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlgState) => AlertDialog(
+          backgroundColor: AppColors.surface,
+          title: const Row(
+            children: [
+              Icon(Icons.add_chart, color: AppColors.bullish, size: 20),
+              SizedBox(width: 8),
+              Text('เพิ่มคู่เหรียญ / สินทรัพย์สแกน', style: TextStyle(color: Colors.white, fontSize: 16)),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: symCtrl,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  labelText: 'สัญลักษณ์ (เช่น BNB/USDT, GBPUSD, META)',
+                  hintText: 'SOL/USDT',
+                ),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                value: selectedType,
+                dropdownColor: AppColors.surface,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(labelText: 'ประเภทตลาด (Market Type)'),
+                items: const [
+                  DropdownMenuItem(value: 'crypto', child: Text('🪙 Crypto (Binance/Bybit)')),
+                  DropdownMenuItem(value: 'forex', child: Text('💱 Forex & Gold (MT5)')),
+                  DropdownMenuItem(value: 'stock', child: Text('📈 Stocks (US Equities)')),
+                ],
+                onChanged: (v) => setDlgState(() => selectedType = v ?? 'crypto'),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                value: selectedTf,
+                dropdownColor: AppColors.surface,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(labelText: 'Timeframe สแกน'),
+                items: const [
+                  DropdownMenuItem(value: '15m', child: Text('15 Minutes (15M)')),
+                  DropdownMenuItem(value: '1h', child: Text('1 Hour (1H)')),
+                  DropdownMenuItem(value: '4h', child: Text('4 Hours (4H)')),
+                  DropdownMenuItem(value: '1d', child: Text('1 Day (1D)')),
+                ],
+                onChanged: (v) => setDlgState(() => selectedTf = v ?? '1h'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('ยกเลิก', style: TextStyle(color: Colors.white54)),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final s = symCtrl.text.trim();
+                if (s.isNotEmpty) {
+                  _addWatchlistItem(s, selectedType, selectedTf);
+                  Navigator.pop(ctx);
+                }
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: AppColors.bullish),
+              child: const Text('บันทึกคู่เหรียญ', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _initControllers(SettingsState s) {
@@ -532,6 +678,81 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                   ],
                 ),
               ),
+          ]),
+
+          const SizedBox(height: 16),
+
+          // ---- Watchlist Management ----
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              _sectionHeader('📊 Proactive Watchlist (คู่เหรียญ/สินทรัพย์ที่เฝ้าสแกน)'),
+              IconButton(
+                icon: const Icon(Icons.add_circle, color: AppColors.bullish, size: 20),
+                tooltip: 'เพิ่มสินทรัพย์',
+                onPressed: _showAddAssetDialog,
+              ),
+            ],
+          ),
+          _card([
+            if (_watchlist.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text('กำลังโหลดรายการสินทรัพย์...', style: TextStyle(color: Colors.white38, fontSize: 12)),
+              )
+            else
+              ..._watchlist.map((item) {
+                final sym = item['symbol'] ?? '';
+                final mType = (item['market_type'] ?? 'crypto').toString().toUpperCase();
+                final tf = (item['timeframe'] ?? '1h').toString().toUpperCase();
+
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1B2333),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: const Color(0xFF2E82FE).withOpacity(0.3)),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2E82FE).withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(mType, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFF2E82FE))),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(sym, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white)),
+                      const SizedBox(width: 6),
+                      Text('• TF $tf', style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                      const Spacer(),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, size: 18, color: AppColors.bearish),
+                        tooltip: 'ลบสินทรัพย์',
+                        onPressed: () => _removeWatchlistItem(sym),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _showAddAssetDialog,
+                icon: const Icon(Icons.add, size: 16, color: Colors.black),
+                label: const Text('เพิ่มคู่เหรียญ / หุ้นสแกน (+ Add Asset)', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 12)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.bullish,
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                ),
+              ),
+            ),
           ]),
 
           const SizedBox(height: 16),

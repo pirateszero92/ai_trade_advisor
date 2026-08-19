@@ -179,3 +179,62 @@ async def test_notifications(
         rr=2.4,
     )
     return {"message": "Test notification executed", "results": results}
+
+
+# ------------------------------------------------------------------
+# Watchlist Management
+# ------------------------------------------------------------------
+
+class WatchlistItemRequest(BaseModel):
+    symbol: str
+    market_type: str = "crypto"  # crypto, forex, stock
+    timeframe: str = "1h"
+    htf_timeframe: str = "4h"
+    exchange: str = "binance"
+
+
+@router.get("/watchlist")
+async def get_watchlist(_key: str = Depends(verify_api_key)):
+    """Get the active watchlist monitored by the proactive scanner."""
+    from app.services.event_trigger import MarketMonitor
+    monitor = MarketMonitor.get_instance()
+    return {"watchlist": monitor.watchlist}
+
+
+@router.post("/watchlist")
+async def add_watchlist_item(
+    req: WatchlistItemRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Add a new symbol / market pair to the active scanner watchlist."""
+    from app.services.event_trigger import MarketMonitor
+    monitor = MarketMonitor.get_instance()
+
+    # Check if already exists
+    sym = req.symbol.strip().upper()
+    existing = [x for x in monitor.watchlist if x["symbol"].upper() == sym]
+    if existing:
+        return {"message": f"Symbol {sym} already in watchlist", "watchlist": monitor.watchlist}
+
+    item = {
+        "symbol": sym,
+        "market_type": req.market_type.lower(),
+        "timeframe": req.timeframe.lower(),
+        "htf_timeframe": req.htf_timeframe.lower(),
+        "exchange": req.exchange.lower(),
+    }
+    monitor.watchlist.append(item)
+    return {"message": f"Added {sym} to watchlist", "watchlist": monitor.watchlist}
+
+
+@router.delete("/watchlist/{symbol:path}")
+async def remove_watchlist_item(
+    symbol: str,
+    _key: str = Depends(verify_api_key),
+):
+    """Remove a symbol from the active scanner watchlist."""
+    from app.services.event_trigger import MarketMonitor
+    monitor = MarketMonitor.get_instance()
+    sym = symbol.strip().upper()
+    monitor.watchlist = [x for x in monitor.watchlist if x["symbol"].upper() != sym]
+    return {"message": f"Removed {sym} from watchlist", "watchlist": monitor.watchlist}
