@@ -244,21 +244,32 @@ async def test_notifications(
     req: TestNotificationRequest,
     _key: str = Depends(verify_api_key),
 ):
-    from app.services.notification_service import NotificationService
-    notifier = NotificationService()
-
+    import httpx
     results = {}
     if req.telegram_bot_token and req.telegram_chat_id:
-        results["telegram"] = await notifier.send_telegram(
-            message="🔔 AI Trade Advisor: Test alert successful!",
-            token=req.telegram_bot_token,
-            chat_id=req.telegram_chat_id,
-        )
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                url = f"https://api.telegram.org/bot{req.telegram_bot_token}/sendMessage"
+                payload = {
+                    "chat_id": req.telegram_chat_id,
+                    "text": "🔔 Apex AI Trade Advisor: Test Notification Alert Successful! ✅",
+                }
+                resp = await client.post(url, json=payload)
+                results["telegram"] = resp.status_code == 200
+        except Exception:
+            results["telegram"] = False
+
     if req.line_notify_token:
-        results["line"] = await notifier.send_line(
-            message="AI Trade Advisor: Test alert successful!",
-            token=req.line_notify_token,
-        )
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    "https://notify-api.line.me/api/notify",
+                    headers={"Authorization": f"Bearer {req.line_notify_token}"},
+                    data={"message": "\nApex AI Trade Advisor: Test Notification Alert Successful! ✅"},
+                )
+                results["line"] = resp.status_code == 200
+        except Exception:
+            results["line"] = False
 
     return {"status": "ok", "results": results}
 

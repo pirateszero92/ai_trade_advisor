@@ -99,7 +99,7 @@ class AIEngine:
         logger.info("[AI] LLM offline — utilizing built-in LuxAlgo SMC Rule Reasoning Engine")
         dir_name = signal.bias.upper() if signal.bias != "neutral" else "STRUCTURE"
         zone_name = "Discount" if signal.in_discount else ("Premium" if signal.in_premium else "Equilibrium")
-        conf = signal.confluence_score
+        conf = getattr(signal, "confluence_score", getattr(signal, "confluence", 0))
         fallback_msg = f"โครงสร้าง {dir_name} Confluence {conf}/100 เกิดการ Sweep สภาพคล่องและตอบสนองต่อ Order Block ในโซน {zone_name}"
         return AIAnalysis(
             provider="smc_rule_fallback",
