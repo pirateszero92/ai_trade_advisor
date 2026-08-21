@@ -48,7 +48,7 @@ class AppApi {
     if (_customBaseUrl != null && _customBaseUrl!.isNotEmpty) {
       return _customBaseUrl!;
     }
-    return 'http://192.168.251.23:8000'; // Default to PC Wi-Fi IP for direct physical phone connection
+    return 'http://192.168.22.84:8000'; // Default to Raspberry Pi Server IP
   }
 
   static String url(String path) {
