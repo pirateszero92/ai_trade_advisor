@@ -1,4 +1,4 @@
-﻿FROM nginx:alpine
+FROM nginx:alpine
 
 # Remove default nginx html
 RUN rm -rf /usr/share/nginx/html/*
@@ -7,7 +7,7 @@ RUN rm -rf /usr/share/nginx/html/*
 COPY nginx/nginx.conf /etc/nginx/nginx.conf
 
 # Copy Flutter Web build output
-COPY mobile/build/web /usr/share/nginx/html
+COPY web_dist /usr/share/nginx/html
 
 EXPOSE 80
 
