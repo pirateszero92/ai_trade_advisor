@@ -32,12 +32,17 @@ class _JournalScreenState extends State<JournalScreen> {
     super.dispose();
   }
 
+  static String _normalizeSym(String s) =>
+      s.replaceAll('/', '').replaceAll('-', '').replaceAll('_', '').toUpperCase();
+
   void _startLiveTicker() {
-    _liveTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) {
+    _liveTimer = Timer.periodic(const Duration(milliseconds: 1000), (timer) {
       if (!mounted) return;
-      _fetchTradesSilently();
-      _fetchAccountInfoSilently();
       _fetchLivePrices();
+      if (timer.tick % 5 == 0) {
+        _fetchTradesSilently();
+        _fetchAccountInfoSilently();
+      }
     });
   }
 
@@ -51,19 +56,23 @@ class _JournalScreenState extends State<JournalScreen> {
       setState(() {
         for (var t in _trades) {
           if (t['status'] == 'open') {
-            final sym = t['symbol']?.toString() ?? '';
-            if (prices.containsKey(sym)) {
-              final pData = prices[sym] as Map<String, dynamic>;
-              final p = (pData['price'] as num?)?.toDouble();
-              if (p != null && p > 0) {
-                t['live_price'] = p;
-                final entry = (t['entry'] as num?)?.toDouble() ?? p;
-                final isLong = (t['direction'] ?? 'long').toString().toLowerCase() == 'long';
-                final size = (t['position_size'] ?? t['size'] ?? 1.0) as num;
-                final livePnl = isLong ? (p - entry) * size.toDouble() : (entry - p) * size.toDouble();
-                final livePnlPct = entry > 0 ? (isLong ? (p - entry) / entry : (entry - p) / entry) * 100 : 0.0;
-                t['live_pnl'] = livePnl;
-                t['live_pnl_pct'] = livePnlPct;
+            final rawSym = t['symbol']?.toString() ?? '';
+            final normSym = _normalizeSym(rawSym);
+            for (var entry in prices.entries) {
+              if (entry.key == rawSym || _normalizeSym(entry.key) == normSym) {
+                final pData = entry.value as Map<String, dynamic>;
+                final p = (pData['price'] as num?)?.toDouble();
+                if (p != null && p > 0) {
+                  t['live_price'] = p;
+                  final entryPrice = (t['entry'] as num?)?.toDouble() ?? p;
+                  final isLong = (t['direction'] ?? 'long').toString().toLowerCase() == 'long';
+                  final size = (t['position_size'] ?? t['size'] ?? 1.0) as num;
+                  final livePnl = isLong ? (p - entryPrice) * size.toDouble() : (entryPrice - p) * size.toDouble();
+                  final livePnlPct = entryPrice > 0 ? (isLong ? (p - entryPrice) / entryPrice : (entryPrice - p) / entryPrice) * 100 : 0.0;
+                  t['live_pnl'] = livePnl;
+                  t['live_pnl_pct'] = livePnlPct;
+                }
+                break;
               }
             }
           }
@@ -109,9 +118,14 @@ class _JournalScreenState extends State<JournalScreen> {
         _trades = list.map((e) {
           final m = Map<String, dynamic>.from(e as Map);
           final entry = (m['entry'] as num?)?.toDouble() ?? 100.0;
-          m['live_price'] = (m['live_price'] as num?)?.toDouble() ?? entry;
-          m['live_pnl'] = (m['live_pnl'] as num?)?.toDouble() ?? (m['pnl'] as num?)?.toDouble() ?? 0.0;
-          m['live_pnl_pct'] = (m['live_pnl_pct'] as num?)?.toDouble() ?? (m['pnl_pct'] as num?)?.toDouble() ?? 0.0;
+          final existing = _trades.firstWhere((x) => x['id'] == m['id'], orElse: () => {});
+          final existingLive = (existing['live_price'] as num?)?.toDouble();
+          final existingPnl = (existing['live_pnl'] as num?)?.toDouble();
+          final existingPnlPct = (existing['live_pnl_pct'] as num?)?.toDouble();
+
+          m['live_price'] = (m['live_price'] as num?)?.toDouble() ?? existingLive ?? entry;
+          m['live_pnl'] = (m['live_pnl'] as num?)?.toDouble() ?? existingPnl ?? (m['pnl'] as num?)?.toDouble() ?? 0.0;
+          m['live_pnl_pct'] = (m['live_pnl_pct'] as num?)?.toDouble() ?? existingPnlPct ?? (m['pnl_pct'] as num?)?.toDouble() ?? 0.0;
           return m;
         }).toList();
         _isLoading = false;
@@ -138,9 +152,14 @@ class _JournalScreenState extends State<JournalScreen> {
           _trades = list.map((e) {
             final m = Map<String, dynamic>.from(e as Map);
             final entry = (m['entry'] as num?)?.toDouble() ?? 100.0;
-            m['live_price'] = (m['live_price'] as num?)?.toDouble() ?? entry;
-            m['live_pnl'] = (m['live_pnl'] as num?)?.toDouble() ?? (m['pnl'] as num?)?.toDouble() ?? 0.0;
-            m['live_pnl_pct'] = (m['live_pnl_pct'] as num?)?.toDouble() ?? (m['pnl_pct'] as num?)?.toDouble() ?? 0.0;
+            final existing = _trades.firstWhere((x) => x['id'] == m['id'], orElse: () => {});
+            final existingLive = (existing['live_price'] as num?)?.toDouble();
+            final existingPnl = (existing['live_pnl'] as num?)?.toDouble();
+            final existingPnlPct = (existing['live_pnl_pct'] as num?)?.toDouble();
+
+            m['live_price'] = (m['live_price'] as num?)?.toDouble() ?? existingLive ?? entry;
+            m['live_pnl'] = (m['live_pnl'] as num?)?.toDouble() ?? existingPnl ?? (m['pnl'] as num?)?.toDouble() ?? 0.0;
+            m['live_pnl_pct'] = (m['live_pnl_pct'] as num?)?.toDouble() ?? existingPnlPct ?? (m['pnl_pct'] as num?)?.toDouble() ?? 0.0;
             return m;
           }).toList();
         });

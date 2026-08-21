@@ -36,6 +36,9 @@ class _SignalsScreenState extends State<SignalsScreen> {
     super.dispose();
   }
 
+  static String _normalizeSym(String s) =>
+      s.replaceAll('/', '').replaceAll('-', '').replaceAll('_', '').toUpperCase();
+
   static String _formatPrice(double? price) {
     if (price == null) return '-';
     if (price < 5.0) {
@@ -45,10 +48,12 @@ class _SignalsScreenState extends State<SignalsScreen> {
   }
 
   void _startLiveTicker() {
-    _liveTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) {
+    _liveTimer = Timer.periodic(const Duration(milliseconds: 1000), (timer) {
       if (!mounted) return;
       _fetchLivePrices();
-      _fetchPositions();
+      if (timer.tick % 5 == 0) {
+        _fetchPositions();
+      }
     });
   }
 
@@ -61,12 +66,36 @@ class _SignalsScreenState extends State<SignalsScreen> {
 
       setState(() {
         for (var s in _signals) {
-          final sym = s['symbol']?.toString() ?? '';
-          if (prices.containsKey(sym)) {
-            final pData = prices[sym] as Map<String, dynamic>;
-            final p = (pData['price'] as num?)?.toDouble();
-            if (p != null && p > 0) {
-              s['live_price'] = p;
+          final rawSym = s['symbol']?.toString() ?? '';
+          final normSym = _normalizeSym(rawSym);
+          for (var entry in prices.entries) {
+            if (entry.key == rawSym || _normalizeSym(entry.key) == normSym) {
+              final pData = entry.value as Map<String, dynamic>;
+              final p = (pData['price'] as num?)?.toDouble();
+              if (p != null && p > 0) {
+                s['live_price'] = p;
+              }
+              break;
+            }
+          }
+        }
+
+        for (var p in _positions) {
+          final rawSym = p['symbol']?.toString() ?? '';
+          final normSym = _normalizeSym(rawSym);
+          for (var entry in prices.entries) {
+            if (entry.key == rawSym || _normalizeSym(entry.key) == normSym) {
+              final pData = entry.value as Map<String, dynamic>;
+              final price = (pData['price'] as num?)?.toDouble();
+              if (price != null && price > 0) {
+                p['live_price'] = price;
+                final entryPrice = (p['entry'] as num?)?.toDouble() ?? price;
+                final isLong = (p['direction'] ?? 'long').toString().toLowerCase() == 'long';
+                final size = (p['position_size'] ?? p['size'] ?? 1.0) as num;
+                p['live_pnl'] = isLong ? (price - entryPrice) * size.toDouble() : (entryPrice - price) * size.toDouble();
+                p['live_pnl_pct'] = entryPrice > 0 ? (isLong ? (price - entryPrice) / entryPrice : (entryPrice - price) / entryPrice) * 100 : 0.0;
+              }
+              break;
             }
           }
         }
@@ -86,7 +115,11 @@ class _SignalsScreenState extends State<SignalsScreen> {
       setState(() {
         _signals = list.map((e) {
           final m = Map<String, dynamic>.from(e as Map);
-          m['live_price'] = (m['entry'] as num?)?.toDouble() ?? 100.0;
+          final rawSym = m['symbol']?.toString() ?? '';
+          final normSym = _normalizeSym(rawSym);
+          final old = _signals.firstWhere((x) => _normalizeSym(x['symbol'] ?? '') == normSym, orElse: () => {});
+          final oldLive = (old['live_price'] as num?)?.toDouble();
+          m['live_price'] = (m['live_price'] as num?)?.toDouble() ?? oldLive ?? (m['entry'] as num?)?.toDouble() ?? 100.0;
           return m;
         }).toList();
         _isLoading = false;
@@ -111,7 +144,17 @@ class _SignalsScreenState extends State<SignalsScreen> {
       if (mounted) {
         setState(() {
           _positions = list
-              .map((e) => Map<String, dynamic>.from(e as Map))
+              .map((e) {
+                final m = Map<String, dynamic>.from(e as Map);
+                final old = _positions.firstWhere((x) => x['id'] == m['id'], orElse: () => {});
+                final oldLive = (old['live_price'] as num?)?.toDouble();
+                final oldPnl = (old['live_pnl'] as num?)?.toDouble();
+                final oldPnlPct = (old['live_pnl_pct'] as num?)?.toDouble();
+                m['live_price'] = (m['live_price'] as num?)?.toDouble() ?? oldLive ?? (m['entry'] as num?)?.toDouble() ?? 0.0;
+                m['live_pnl'] = (m['live_pnl'] as num?)?.toDouble() ?? oldPnl ?? 0.0;
+                m['live_pnl_pct'] = (m['live_pnl_pct'] as num?)?.toDouble() ?? oldPnlPct ?? 0.0;
+                return m;
+              })
               .where((p) => (p['status'] ?? 'open') == 'open')
               .toList();
         });
