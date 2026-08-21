@@ -448,12 +448,15 @@ class AIEngine:
         lines = [
             f"## Trade Signal Analysis Request",
             f"**Symbol**: {sig['symbol']} | **Timeframe**: {sig['timeframe']}",
-            f"**Current Price**: {sig['current_price']}",
+            f"**Current Price**: {sig['current_price']} | **Entry Type**: {sig.get('entry_type', 'limit')}",
             f"**HTF Bias**: {sig['htf_bias']} | **LTF Bias**: {sig['bias']}",
             f"- BOS: {'✅' if sig['bos'] else '❌'} | CHoCH: {'✅' if sig['choch'] else '❌'}",
             f"- Liquidity Swept: {'✅' if sig['liquidity_swept'] else '❌'} ({sig['sweep_direction']})",
             f"- In Premium: {sig['in_premium']} | In Discount: {sig['in_discount']}",
             f"- Equilibrium: {sig['equilibrium']}",
+            f"- Squeeze Status: {sig.get('squeeze_status', 'no_squeeze')} | Momentum: {sig.get('squeeze_momentum', 0.0)} ({sig.get('momentum_direction', '')})",
+            f"- Volume Delta: {sig.get('volume_delta', 0.0)} (Ratio: {sig.get('delta_ratio', 0.0)}) | Absorption: {'✅' if sig.get('delta_absorption') else '❌'} ({sig.get('delta_status', '')})",
+            f"- Volume Spike: {'✅' if sig.get('volume_spike') else '❌'}",
             f"- Confluence Score: {sig.get('confluence_score', sig.get('confluence', 0))}/100",
         ]
         return "\n".join(lines)
