@@ -26,13 +26,16 @@
     "stop_loss": 4657.67,
     "take_profit": 4539.38,
     "size": 10.0,
-    "status": "open",
+    "status": "closed",
     "id": "08f7b024-ca67-4f88-a34a-e8c23de59d43",
     "tag": "#XAUUSD-SHORT-101",
     "opened_at": "2026-08-21T08:03:24.102180+00:00",
     "notes": "",
-    "pnl": -385.0,
-    "pnl_pct": -0.83
+    "pnl": -335.0,
+    "pnl_pct": -0.73,
+    "closed_at": "2026-08-21T14:32:33.550944+00:00",
+    "close_price": 4653.3999,
+    "close_reason": "Structure Invalidation (Market turned Bullish) \u26a0\ufe0f"
   },
   "5303e3a5-fe30-480a-9ddd-16efdfe8fc9d": {
     "mode": "paper",

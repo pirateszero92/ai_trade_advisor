@@ -43,7 +43,7 @@ def normalize_yfinance_symbol(symbol: str, market_type: str) -> str:
 
 
 _TICKER_CACHE: dict[str, tuple[float, dict]] = {}
-CACHE_TTL_SECONDS = 2.5
+CACHE_TTL_SECONDS = 5.0
 
 
 class MarketDataEngine:
@@ -136,7 +136,35 @@ class MarketDataEngine:
                 except Exception:
                     continue
 
-        # 3. Non-blocking ThreadPool Executor for Yahoo Finance with strict 2.0s timeout
+        # 3. Fast Fallback for Forex & Gold via Binance Spot tokens (PAXGUSDT, EURUSDT, GBPUSDT)
+        if clean_sym in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "GOLD"]:
+            try:
+                if clean_sym in ["XAUUSD", "GOLD"]:
+                    spot_sym = "PAXGUSDT"
+                elif clean_sym == "EURUSD":
+                    spot_sym = "EURUSDT"
+                elif clean_sym == "GBPUSD":
+                    spot_sym = "GBPUSDT"
+                else:
+                    spot_sym = "USDCAD"
+                async with httpx.AsyncClient(timeout=1.5) as client:
+                    resp = await client.get("https://data-api.binance.vision/api/v3/ticker/24hr", params={"symbol": spot_sym})
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        res = {
+                            "symbol": symbol,
+                            "price": float(data["lastPrice"]),
+                            "change_24h": float(data["priceChangePercent"]),
+                            "high_24h": float(data["highPrice"]),
+                            "low_24h": float(data["lowPrice"]),
+                            "volume_24h": float(data["volume"]),
+                        }
+                        _TICKER_CACHE[cache_key] = (now, res)
+                        return res
+            except Exception:
+                pass
+
+        # 4. Non-blocking ThreadPool Executor for Yahoo Finance with strict 2.0s timeout
         def _get_yf_fast() -> dict:
             try:
                 yf_sym = normalize_yfinance_symbol(symbol, market_type)
@@ -194,34 +222,6 @@ class MarketDataEngine:
                 return yf_res
         except Exception as e:
             logger.debug(f"[MarketData] YF executor timeout/error for {symbol}: {e}")
-
-        # 4. Fast Fallback for Forex & Gold via Binance Spot tokens (PAXGUSDT, EURUSDT, GBPUSDT)
-        if clean_sym in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "GOLD"]:
-            try:
-                if clean_sym in ["XAUUSD", "GOLD"]:
-                    spot_sym = "PAXGUSDT"
-                elif clean_sym == "EURUSD":
-                    spot_sym = "EURUSDT"
-                elif clean_sym == "GBPUSD":
-                    spot_sym = "GBPUSDT"
-                else:
-                    spot_sym = "USDCAD"
-                async with httpx.AsyncClient(timeout=1.5) as client:
-                    resp = await client.get("https://data-api.binance.vision/api/v3/ticker/24hr", params={"symbol": spot_sym})
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        res = {
-                            "symbol": symbol,
-                            "price": float(data["lastPrice"]),
-                            "change_24h": float(data["priceChangePercent"]),
-                            "high_24h": float(data["highPrice"]),
-                            "low_24h": float(data["lowPrice"]),
-                            "volume_24h": float(data["volume"]),
-                        }
-                        _TICKER_CACHE[cache_key] = (now, res)
-                        return res
-            except Exception:
-                pass
 
         # 5. Return 0.0 on error without corrupting cache
         return {
