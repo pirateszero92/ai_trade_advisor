@@ -17,6 +17,8 @@ class _JournalScreenState extends State<JournalScreen> {
   bool _isLoading = true;
   String? _errorMessage;
   Timer? _liveTimer;
+  int _selectedTab = 0; // 0: Open Positions, 1: Trade History
+  String _historyFilter = 'all'; // 'all', 'win', 'loss'
 
   @override
   void initState() {
@@ -398,97 +400,295 @@ class _JournalScreenState extends State<JournalScreen> {
 
                       const SizedBox(height: 10),
 
-                      // Section Header for Positions & Trades
-                      Row(
-                        children: [
-                          const Icon(Icons.receipt_long, size: 15, color: Color(0xFF00E5FF)),
-                          const SizedBox(width: 6),
-                          Text(
-                            'Trading Positions & History (${_trades.length})',
-                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white),
-                          ),
-                          const Spacer(),
-                          if (openList.isNotEmpty)
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: AppColors.bullish.withValues(alpha: 0.15),
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(color: AppColors.bullish.withValues(alpha: 0.5), width: 0.8),
-                              ),
-                              child: Text(
-                                '${openList.length} OPEN POSITIONS',
-                                style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: AppColors.bullish),
-                              ),
-                            ),
-                        ],
-                      ),
+                      // Two Distinct Tabs: Open Positions vs Trade History
+                      _buildTabsHeader(openList.length, closed.length),
 
                       const SizedBox(height: 8),
 
-                      if (_trades.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.all(32),
-                          child: Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.receipt_long_outlined, size: 48, color: Colors.white24),
-                                SizedBox(height: 12),
-                                Text(
-                                  'ยังไม่มีประวัติการเทรด',
-                                  style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 15),
-                                ),
-                                SizedBox(height: 6),
-                                Text(
-                                  'คุณสามารถส่งคำสั่งซื้อขายได้จากหน้า Chart หรือ Signals',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(color: AppColors.textMuted, fontSize: 12),
-                                ),
-                              ],
+                      if (_selectedTab == 0) ...[
+                        // Tab 0: Open Positions
+                        if (openList.isEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 20),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF141926),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: const Color(0xFF2E384D).withValues(alpha: 0.6)),
                             ),
-                          ),
-                        )
-                      else
-                        ..._trades.map((t) {
-                          final id = t['id']?.toString() ?? '';
-                          final tag = t['tag'] ?? '#POS-$id';
-                          final sym = t['symbol'] ?? 'BTC/USDT';
-                          final dir = (t['direction'] ?? 'long').toString().toUpperCase();
-                          final entry = (t['entry'] as num?)?.toDouble() ?? 0.0;
-                          final livePrice = (t['live_price'] as num?)?.toDouble() ?? entry;
-                          final size = (t['position_size'] ?? t['size'] ?? 1.0) as num;
+                            child: Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.check_circle_outline, size: 44, color: AppColors.bullish),
+                                  const SizedBox(height: 10),
+                                  const Text(
+                                    'ไม่มีสถานะที่เปิดอยู่ขณะนี้ (No Open Positions)',
+                                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  const Text(
+                                    'พอร์ตของคุณกำลังถือเงินสด 100% รอสัญญาณ SMC Confluence คุณภาพสูง',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+                                  ),
+                                  const SizedBox(height: 14),
+                                  ElevatedButton.icon(
+                                    onPressed: () => context.go('/signals'),
+                                    icon: const Icon(Icons.bolt, size: 16, color: Colors.black),
+                                    label: const Text('ดูสัญญาณเทรด SMC Signals →', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 12)),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFF00E5FF),
+                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          )
+                        else
+                          ...openList.map((t) => _buildTradeItem(t)),
+                      ] else ...[
+                        // Tab 1: Trade History (Closed Trades)
+                        if (closed.isNotEmpty)
+                          _buildHistoryFilterBar(closed.length, wins.length, closed.length - wins.length),
 
-                          final status = t['status'] ?? 'open';
-                          final isOpen = status == 'open';
-                          final closePrice = (t['close_price'] as num?)?.toDouble() ?? 0.0;
-                          final closeReason = t['close_reason']?.toString() ?? '';
-
-                          final pnl = isOpen ? ((t['live_pnl'] ?? 0.0) as num).toDouble() : ((t['pnl'] ?? 0.0) as num).toDouble();
-                          final pnlPct = isOpen ? ((t['live_pnl_pct'] ?? 0.0) as num).toDouble() : ((t['pnl_pct'] ?? 0.0) as num).toDouble();
-                          final date = (t['opened_at'] ?? '').toString().split('T').first;
-
-                          return _TradeCard(
-                            id: id,
-                            tag: tag,
-                            symbol: sym,
-                            direction: dir,
-                            entry: entry,
-                            livePrice: livePrice,
-                            closePrice: closePrice,
-                            closeReason: closeReason,
-                            size: size.toDouble(),
-                            pnl: pnlPct,
-                            pnlUsd: pnl,
-                            status: status,
-                            rr: 2.3,
-                            date: date,
-                            onClose: () => _closeTrade(id),
-                          );
-                        }),
+                        if (_getFilteredClosedTrades(closed).isEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 20),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF141926),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: const Color(0xFF2E384D).withValues(alpha: 0.6)),
+                            ),
+                            child: const Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.history_toggle_off, size: 44, color: Colors.white24),
+                                  SizedBox(height: 10),
+                                  Text(
+                                    'ไม่พบประวัติการเทรดตามเงื่อนไขที่เลือก',
+                                    style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 14),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          )
+                        else
+                          ..._getFilteredClosedTrades(closed).map((t) => _buildTradeItem(t)),
+                      ],
                     ],
                   ),
                 ),
+    );
+  }
+
+  List<Map<String, dynamic>> _getFilteredClosedTrades(List<Map<String, dynamic>> closed) {
+    if (_historyFilter == 'win') {
+      return closed.where((t) => ((t['pnl'] ?? 0) as num) > 0).toList();
+    } else if (_historyFilter == 'loss') {
+      return closed.where((t) => ((t['pnl'] ?? 0) as num) <= 0).toList();
+    }
+    return closed;
+  }
+
+  Widget _buildTradeItem(Map<String, dynamic> t) {
+    final id = t['id']?.toString() ?? '';
+    final tag = t['tag'] ?? '#POS-$id';
+    final sym = t['symbol'] ?? 'BTC/USDT';
+    final dir = (t['direction'] ?? 'long').toString().toUpperCase();
+    final entry = (t['entry'] as num?)?.toDouble() ?? 0.0;
+    final livePrice = (t['live_price'] as num?)?.toDouble() ?? entry;
+    final size = (t['position_size'] ?? t['size'] ?? 1.0) as num;
+
+    final status = t['status'] ?? 'open';
+    final isOpen = status == 'open';
+    final closePrice = (t['close_price'] as num?)?.toDouble() ?? 0.0;
+    final closeReason = t['close_reason']?.toString() ?? '';
+
+    final pnl = isOpen ? ((t['live_pnl'] ?? 0.0) as num).toDouble() : ((t['pnl'] ?? 0.0) as num).toDouble();
+    final pnlPct = isOpen ? ((t['live_pnl_pct'] ?? 0.0) as num).toDouble() : ((t['pnl_pct'] ?? 0.0) as num).toDouble();
+    final date = (t['opened_at'] ?? '').toString().split('T').first;
+
+    return _TradeCard(
+      id: id,
+      tag: tag,
+      symbol: sym,
+      direction: dir,
+      entry: entry,
+      livePrice: livePrice,
+      closePrice: closePrice,
+      closeReason: closeReason,
+      size: size.toDouble(),
+      pnl: pnlPct,
+      pnlUsd: pnl,
+      status: status,
+      rr: 2.3,
+      date: date,
+      onClose: () => _closeTrade(id),
+    );
+  }
+
+  Widget _buildTabsHeader(int openCount, int closedCount) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: const Color(0xFF141926),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFF2E384D), width: 1),
+      ),
+      child: Row(
+        children: [
+          // Tab 0: Open Positions
+          Expanded(
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => setState(() => _selectedTab = 0),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                padding: const EdgeInsets.symmetric(vertical: 9),
+                decoration: BoxDecoration(
+                  color: _selectedTab == 0 ? const Color(0xFF00E5FF).withValues(alpha: 0.15) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8),
+                  border: _selectedTab == 0 ? Border.all(color: const Color(0xFF00E5FF), width: 1.2) : null,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.bolt,
+                      size: 16,
+                      color: _selectedTab == 0 ? const Color(0xFF00E5FF) : Colors.white54,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Open Positions',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: _selectedTab == 0 ? const Color(0xFF00E5FF) : Colors.white70,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: openCount > 0 ? AppColors.bullish.withValues(alpha: 0.25) : const Color(0xFF252540),
+                        borderRadius: BorderRadius.circular(10),
+                        border: openCount > 0 ? Border.all(color: AppColors.bullish.withValues(alpha: 0.6), width: 0.8) : null,
+                      ),
+                      child: Text(
+                        '$openCount Active',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: openCount > 0 ? AppColors.bullish : Colors.white54,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          // Tab 1: Trade History
+          Expanded(
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => setState(() => _selectedTab = 1),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                padding: const EdgeInsets.symmetric(vertical: 9),
+                decoration: BoxDecoration(
+                  color: _selectedTab == 1 ? const Color(0xFF5CA3FF).withValues(alpha: 0.15) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8),
+                  border: _selectedTab == 1 ? Border.all(color: const Color(0xFF5CA3FF), width: 1.2) : null,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.history,
+                      size: 16,
+                      color: _selectedTab == 1 ? const Color(0xFF5CA3FF) : Colors.white54,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Trade History',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: _selectedTab == 1 ? const Color(0xFF5CA3FF) : Colors.white70,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF252540),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '$closedCount Closed',
+                        style: const TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white70,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHistoryFilterBar(int totalClosed, int winCount, int lossCount) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8, top: 2),
+      child: Row(
+        children: [
+          _buildFilterChip('ทั้งหมด ($totalClosed)', 'all'),
+          const SizedBox(width: 6),
+          _buildFilterChip('กำไร ($winCount) 🎯', 'win', activeColor: AppColors.bullish),
+          const SizedBox(width: 6),
+          _buildFilterChip('ขาดทุน/Invalid ($lossCount) 🛑', 'loss', activeColor: AppColors.bearish),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFilterChip(String label, String key, {Color? activeColor}) {
+    final isSelected = _historyFilter == key;
+    final color = activeColor ?? const Color(0xFF5CA3FF);
+    return InkWell(
+      borderRadius: BorderRadius.circular(6),
+      onTap: () => setState(() => _historyFilter = key),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: isSelected ? color.withValues(alpha: 0.15) : const Color(0xFF1C2333),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: isSelected ? color : const Color(0xFF2E384D),
+            width: isSelected ? 1.0 : 0.8,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+            color: isSelected ? color : Colors.white60,
+          ),
+        ),
+      ),
     );
   }
 
