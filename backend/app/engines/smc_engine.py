@@ -73,7 +73,7 @@ class SMCSignal:
     equilibrium: float = 0.0
     current_price: float = 0.0
 
-    # Confluence score (0-10)
+    # Confluence score (0-100)
     confluence: int = 0
 
     # Suggested trade
@@ -84,13 +84,24 @@ class SMCSignal:
     risk_reward: float = 0.0
     entry_type: Literal["limit", "market"] = "limit"
 
+    # Quantitative Indicators (Squeeze Momentum & Volume Delta)
+    squeeze_status: Literal["squeeze_on", "squeeze_fire", "no_squeeze"] = "no_squeeze"
+    squeeze_momentum: float = 0.0
+    momentum_direction: Literal["accelerating_up", "decelerating_up", "accelerating_down", "decelerating_down"] = "accelerating_up"
+    volume_delta: float = 0.0
+    delta_ratio: float = 0.0
+    cvd: float = 0.0
+    delta_absorption: bool = False
+    delta_status: str = "Neutral"
+    volume_spike: bool = False
+
     # Raw swing data (not serialised to JSON by default)
     swing_highs: list[SwingPoint] = field(default_factory=list, repr=False)
     swing_lows: list[SwingPoint] = field(default_factory=list, repr=False)
 
     @property
     def confluence_score(self) -> int:
-        return self.confluence * 10 if self.confluence <= 10 else self.confluence
+        return self.confluence
 
     def to_dict(self) -> dict:
         """Serialise to a JSON-safe dict (excludes raw swings)."""
@@ -134,6 +145,15 @@ class SMCSignal:
             "take_profit": self.take_profit,
             "risk_reward": self.risk_reward,
             "entry_type": self.entry_type,
+            "squeeze_status": self.squeeze_status,
+            "squeeze_momentum": self.squeeze_momentum,
+            "momentum_direction": self.momentum_direction,
+            "volume_delta": self.volume_delta,
+            "delta_ratio": self.delta_ratio,
+            "cvd": self.cvd,
+            "delta_absorption": self.delta_absorption,
+            "delta_status": self.delta_status,
+            "volume_spike": self.volume_spike,
         }
 
 
@@ -233,10 +253,29 @@ class SMCEngine:
             # 7. Liquidity sweeps
             self._detect_liquidity_sweep(df, signal)
 
-            # 8. Trade setup (Limit OB zone vs Market price)
+            # 8. Squeeze Momentum & Volume Delta quantitative analysis
+            try:
+                from app.engines.indicators import AdvancedIndicatorsEngine
+                sq = AdvancedIndicatorsEngine.compute_squeeze_momentum(df)
+                vd = AdvancedIndicatorsEngine.compute_volume_delta(df)
+
+                signal.squeeze_status = sq.status
+                signal.squeeze_momentum = sq.momentum
+                signal.momentum_direction = sq.direction
+
+                signal.volume_delta = vd.delta
+                signal.delta_ratio = vd.delta_ratio
+                signal.cvd = vd.cvd
+                signal.delta_absorption = vd.is_absorption
+                signal.delta_status = vd.description
+                signal.volume_spike = vd.volume_spike
+            except Exception as e:
+                logger.warning(f"Error computing advanced indicators for {symbol}: {e}")
+
+            # 9. Trade setup (Limit OB zone vs Market price)
             self._compute_trade_setup(signal, entry_mode=entry_mode)
 
-            # 9. Confluence score
+            # 10. Confluence score (0-100 scale)
             signal.confluence = self._compute_confluence(signal)
 
         except Exception as exc:
@@ -698,49 +737,68 @@ class SMCEngine:
 
     def _compute_confluence(self, signal: SMCSignal) -> int:
         """
-        Score the strength of the trade setup on a 0-10 scale.
-
-        Each confirming factor adds points:
-
-        +1  HTF bias aligns with LTF bias
-        +1  BOS confirmed
-        +1  CHoCH present (reversal context)
-        +1  Order Block detected
-        +1  FVG detected
-        +1  Liquidity swept before setup
-        +1  Price in premium (short setup) / discount (long setup)
-        +1  Equal highs/lows detected (liquidity target)
-        +1  R:R >= 2.0
-        +1  R:R >= 3.0
+        Score the strength of the trade setup on a 0-100 scale using the 3-Layer Confluence Matrix:
+        1. SMC Structural Location (Max 40 pts)
+        2. Volume Delta & Absorption (Max 30 pts)
+        3. Squeeze Momentum Timing (Max 30 pts)
 
         Returns
         -------
         int
-            Score in the range 0-10.
+            Score in the range 0-100.
         """
         score = 0
 
+        # ---- Layer 1: SMC Location (Max 40 pts) ----
         if signal.htf_bias != "neutral" and signal.htf_bias == signal.bias:
-            score += 1
-        if signal.bos:
-            score += 1
-        if signal.choch:
-            score += 1
+            score += 8
         if signal.order_block:
-            score += 1
+            score += 10
         if signal.fvg:
-            score += 1
+            score += 6
         if signal.liquidity_swept:
-            score += 1
+            score += 8
         if signal.direction == "long" and signal.in_discount:
-            score += 1
+            score += 5
         elif signal.direction == "short" and signal.in_premium:
-            score += 1
-        if signal.equal_highs or signal.equal_lows:
-            score += 1
-        if signal.risk_reward >= 2.0:
-            score += 1
-        if signal.risk_reward >= 3.0:
-            score += 1
+            score += 5
+        if signal.bos or signal.choch:
+            score += 3
 
-        return min(score, 10)
+        # ---- Layer 2: Volume Delta & Absorption (Max 30 pts) ----
+        # Direction alignment
+        if signal.direction == "long" and signal.volume_delta > 0:
+            score += 10
+        elif signal.direction == "short" and signal.volume_delta < 0:
+            score += 10
+
+        # Absorption / Smart Money Footprint
+        if signal.delta_absorption:
+            score += 15
+        elif abs(signal.delta_ratio) >= 0.2:
+            score += 8
+
+        # Volume Spike
+        if signal.volume_spike:
+            score += 5
+
+        # ---- Layer 3: Squeeze Momentum Breakout (Max 30 pts) ----
+        if signal.squeeze_status == "squeeze_fire":
+            score += 15
+        elif signal.squeeze_status == "no_squeeze":
+            score += 8
+        elif signal.squeeze_status == "squeeze_on":
+            score -= 5  # Penalize entering right into a dead squeeze compression
+
+        # Momentum acceleration
+        if signal.direction == "long" and signal.momentum_direction == "accelerating_up":
+            score += 15
+        elif signal.direction == "short" and signal.momentum_direction == "accelerating_down":
+            score += 15
+        elif signal.direction == "long" and signal.momentum_direction == "decelerating_up":
+            score += 8
+        elif signal.direction == "short" and signal.momentum_direction == "decelerating_down":
+            score += 8
+
+        # Bound score between 0 and 100
+        return max(0, min(score, 100))

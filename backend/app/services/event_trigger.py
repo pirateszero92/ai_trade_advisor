@@ -356,7 +356,7 @@ class MarketMonitor:
 
             zone_name = "Discount" if ltf_sig.in_discount else ("Premium" if ltf_sig.in_premium else "Equilibrium")
             
-            # Tailored structure description
+            # Tailored structure description with Quantitative Multi-Layer details
             entry_type_label = "Limit Zone (OB/FVG)" if entry_mode == "limit" else "Market Price"
             if ltf_sig.liquidity_swept and ltf_sig.in_premium:
                 structure_summary = f"เกิดการ Sweep สภาพคล่องเหนือ High ล่าสุดในโซน Premium (จุดกลับตัว Short-term)"
@@ -373,13 +373,21 @@ class MarketMonitor:
             else:
                 structure_summary = f"โครงสร้าง {direction.upper()} Confluence {confluence}/100 ราคาพักตัวในกรอบ Sideway โซน {zone_name}"
 
+            if ltf_sig.delta_absorption:
+                structure_summary += " | 🌊 Smart Money Absorption ยืนยัน"
+            elif ltf_sig.volume_spike:
+                structure_summary += " | 📊 Volume Spike"
+
+            if ltf_sig.squeeze_status == "squeeze_fire":
+                structure_summary += " | ⚡ Squeeze Fired"
+
             price_decimals = 4 if entry < 5.0 else 2
             if confluence >= 80:
-                advice_text = f"คำแนะนำ: โครงสร้างแข็งแกร่ง (Grade A+) สอดคล้องเทรนด์ใหญ่ แนะนำพิจารณาเข้าตามแผน {entry_type_label} Entry ${entry:.{price_decimals}f} SL ${sl:.{price_decimals}f} (ความเสี่ยง 1.0%)"
+                advice_text = f"คำแนะนำ: โครงสร้างแข็งแกร่ง (Grade A+) สอดคล้องเทรนด์ใหญ่ + Volume Delta แนะนำเข้าตามแผน {entry_type_label} Entry ${entry:.{price_decimals}f} SL ${sl:.{price_decimals}f} (ความเสี่ยง 1.0%)"
             elif confluence >= 65:
                 advice_text = f"คำแนะนำ: โครงสร้าง {direction.upper()} (Grade B) แตะโซน {zone_name} ควรรอแท่งยืนยัน Rejection ใน TF ย่อยก่อนเข้า หรือจำกัดความเสี่ยงที่ 0.5%"
             else:
-                advice_text = 'คำแนะนำ: รอยืนยันการเคลื่อนไหวของราคา แนะนำ "รอ (WAIT)" สัญญาณ CHoCH ยืนยันใน TF ย่อยก่อน'
+                advice_text = 'คำแนะนำ: รอยืนยันการเคลื่อนไหวของราคา แนะนำ "รอ (WAIT)" สัญญาณ CHoCH หรือ Squeeze Release ก่อน'
 
             signal_payload = {
                 "id": f"{symbol}_{tf}_{int(datetime.now(timezone.utc).timestamp())}",
@@ -395,6 +403,14 @@ class MarketMonitor:
                 "rr": 2.5 if entry_mode == "limit" else 2.2,
                 "entry_type": entry_mode,
                 "live_price": round(live_price, price_decimals),
+                "squeeze_status": ltf_sig.squeeze_status,
+                "squeeze_momentum": ltf_sig.squeeze_momentum,
+                "momentum_direction": ltf_sig.momentum_direction,
+                "volume_delta": ltf_sig.volume_delta,
+                "delta_ratio": ltf_sig.delta_ratio,
+                "delta_absorption": ltf_sig.delta_absorption,
+                "delta_status": ltf_sig.delta_status,
+                "volume_spike": ltf_sig.volume_spike,
                 "message": structure_summary,
                 "advice": advice_text,
                 "timestamp": datetime.now(timezone.utc).isoformat(),

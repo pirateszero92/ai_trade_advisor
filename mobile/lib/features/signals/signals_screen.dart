@@ -607,6 +607,10 @@ class _SignalsScreenState extends State<SignalsScreen> {
 
                               final matchingPositions = _positions.where((p) => (p['symbol'] ?? '').toString().toUpperCase() == sym.toUpperCase()).toList();
                               final entryType = (s['entry_type'] ?? 'limit').toString();
+                              final squeezeStatus = (s['squeeze_status'] ?? 'no_squeeze').toString();
+                              final volumeDelta = (s['volume_delta'] as num?)?.toDouble() ?? 0.0;
+                              final deltaAbsorption = s['delta_absorption'] == true;
+                              final deltaStatus = (s['delta_status'] ?? '').toString();
 
                               return _SignalCard(
                                 symbol: sym,
@@ -619,6 +623,10 @@ class _SignalsScreenState extends State<SignalsScreen> {
                                 tp: tp,
                                 rr: rr,
                                 entryType: entryType,
+                                squeezeStatus: squeezeStatus,
+                                volumeDelta: volumeDelta,
+                                deltaAbsorption: deltaAbsorption,
+                                deltaStatus: deltaStatus,
                                 message: msg,
                                 advice: s['advice'] as String?,
                                 time: date,
@@ -717,6 +725,10 @@ class _SignalCard extends StatelessWidget {
   final int confluence;
   final double? entry, livePrice, sl, tp, rr;
   final String entryType;
+  final String squeezeStatus;
+  final double volumeDelta;
+  final bool deltaAbsorption;
+  final String deltaStatus;
   final List<Map<String, dynamic>> openPositions;
   final VoidCallback onExecuteTrade;
   final Function(dynamic id, String tag) onClosePosition;
@@ -732,6 +744,10 @@ class _SignalCard extends StatelessWidget {
     required this.onExecuteTrade,
     required this.onClosePosition,
     this.entryType = 'limit',
+    this.squeezeStatus = 'no_squeeze',
+    this.volumeDelta = 0.0,
+    this.deltaAbsorption = false,
+    this.deltaStatus = '',
     this.advice,
     this.entry,
     this.livePrice,
@@ -817,6 +833,41 @@ class _SignalCard extends StatelessWidget {
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        if (squeezeStatus == 'squeeze_fire') ...[
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: AppColors.bullish.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: AppColors.bullish.withValues(alpha: 0.8), width: 0.8),
+                            ),
+                            child: const Text('⚡ SQUEEZE FIRE', style: TextStyle(fontSize: 8, fontWeight: FontWeight.bold, color: AppColors.bullish)),
+                          ),
+                          const SizedBox(width: 4),
+                        ] else if (squeezeStatus == 'squeeze_on') ...[
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFF9900).withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: const Color(0xFFFF9900).withValues(alpha: 0.8), width: 0.8),
+                            ),
+                            child: const Text('⚫ SQUEEZING', style: TextStyle(fontSize: 8, fontWeight: FontWeight.bold, color: Color(0xFFFF9900))),
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+                        if (deltaAbsorption) ...[
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF00E5FF).withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: const Color(0xFF00E5FF).withValues(alpha: 0.8), width: 0.8),
+                            ),
+                            child: const Text('🌊 ABSORPTION', style: TextStyle(fontSize: 8, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))),
+                          ),
+                          const SizedBox(width: 4),
+                        ],
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                           decoration: BoxDecoration(
