@@ -235,7 +235,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       final origin = Uri.base.origin;
       _apiUrlCtrl.text = (origin.isNotEmpty && !origin.startsWith('null')) ? origin : 'http://localhost:3000';
     } else {
-      _apiUrlCtrl.text = prefs.getString('api_base_url') ?? 'http://192.168.251.23:8000';
+      _apiUrlCtrl.text = prefs.getString('api_base_url') ?? 'http://192.168.22.84:8000';
     }
     _lmEndpointCtrl.text = prefs.getString('lm_studio_endpoint') ?? 'http://host.docker.internal:11434';
     _lmModelCtrl.text = prefs.getString('lm_studio_model') ?? 'gpt-oss:120b-cloud';
