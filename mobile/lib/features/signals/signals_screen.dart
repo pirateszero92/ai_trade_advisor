@@ -202,8 +202,18 @@ class _SignalsScreenState extends State<SignalsScreen> {
     final sym = signal['symbol'] ?? 'BTC/USDT';
     final dir = (signal['direction'] ?? 'LONG').toString().toLowerCase();
     final entry = (signal['live_price'] as num?)?.toDouble() ?? (signal['entry'] as num?)?.toDouble() ?? 100.0;
-    final sl = (signal['stop_loss'] as num?)?.toDouble() ?? (dir == 'long' ? entry * 0.992 : entry * 1.008);
-    final tp = (signal['take_profit'] as num?)?.toDouble() ?? (dir == 'long' ? entry * 1.02 : entry * 0.98);
+    
+    // Calculate initial safe SL distance (min 0.5% distance)
+    double slDistance = entry * 0.01; // default 1.0%
+    final rawSl = (signal['stop_loss'] as num?)?.toDouble();
+    if (rawSl != null && rawSl > 0) {
+      final diff = (entry - rawSl).abs();
+      if (diff / entry >= 0.004) {
+        slDistance = diff;
+      }
+    }
+
+    double selectedRR = 2.0; // Default 1:2.0
     final mType = (signal['market_type'] ?? 'crypto').toString().toLowerCase();
     final isStock = mType == 'stock';
     final isForex = mType == 'forex';
@@ -225,9 +235,13 @@ class _SignalsScreenState extends State<SignalsScreen> {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (context, setDlgState) {
+          final sl = dir == 'long' ? (entry - slDistance) : (entry + slDistance);
+          final tp = dir == 'long' ? (entry + slDistance * selectedRR) : (entry - slDistance * selectedRR);
           final posVal = entry * selectedQty;
           final riskAmount = (entry - sl).abs() * selectedQty;
           final gainAmount = (tp - entry).abs() * selectedQty;
+          final riskPct = entry > 0 ? (slDistance / entry) * 100 : 1.0;
+          final gainPct = riskPct * selectedRR;
 
           return AlertDialog(
             backgroundColor: AppColors.surface,
@@ -263,7 +277,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'ระบบจะส่งคำสั่ง Paper Trade ตามการวิเคราะห์ของ SMC Engine:',
+                    'ระบบคำนวณ Stop Loss และ Take Profit ป้องกันการปิดสถานะทันที:',
                     style: TextStyle(fontSize: 11, color: Colors.white70),
                   ),
                   const SizedBox(height: 10),
@@ -277,11 +291,56 @@ class _SignalsScreenState extends State<SignalsScreen> {
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        _dialogItem('Entry', _formatPrice(entry), Colors.white),
-                        _dialogItem('Stop Loss', _formatPrice(sl), AppColors.bearish),
-                        _dialogItem('Take Profit', _formatPrice(tp), AppColors.bullish),
+                        _dialogItem('Entry (สด)', _formatPrice(entry), Colors.white),
+                        _dialogItem('Stop Loss (-${riskPct.toStringAsFixed(1)}%)', _formatPrice(sl), AppColors.bearish),
+                        _dialogItem('Take Profit (+${gainPct.toStringAsFixed(1)}%)', _formatPrice(tp), AppColors.bullish),
                       ],
                     ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // Target R:R Ratio Selection
+                  Row(
+                    children: [
+                      const Text(
+                        'TARGET R:R RATIO',
+                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.textMuted, letterSpacing: 0.8),
+                      ),
+                      const Spacer(),
+                      Text('1:${selectedRR.toStringAsFixed(1)} R', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [1.5, 2.0, 2.5, 3.0].map((rr) {
+                      final isSel = (selectedRR - rr).abs() < 0.01;
+                      return Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 2),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(6),
+                            onTap: () => setDlgState(() => selectedRR = rr),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 6),
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: isSel ? const Color(0xFF00E5FF).withValues(alpha: 0.2) : const Color(0xFF1E2533),
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(color: isSel ? const Color(0xFF00E5FF) : AppColors.border),
+                              ),
+                              child: Text(
+                                '1:${rr.toStringAsFixed(1)}',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: isSel ? FontWeight.bold : FontWeight.normal,
+                                  color: isSel ? const Color(0xFF00E5FF) : Colors.white70,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    }).toList(),
                   ),
                   const SizedBox(height: 12),
 
@@ -451,6 +510,9 @@ class _SignalsScreenState extends State<SignalsScreen> {
     qtyController.dispose();
 
     if (isConfirmed == true) {
+      final safeSl = dir == 'long' ? (entry - slDistance) : (entry + slDistance);
+      final safeTp = dir == 'long' ? (entry + slDistance * selectedRR) : (entry - slDistance * selectedRR);
+
       try {
         final dio = AppApi.dio;
         final resp = await dio.post(
@@ -459,8 +521,8 @@ class _SignalsScreenState extends State<SignalsScreen> {
             'symbol': sym,
             'direction': dir,
             'entry': entry,
-            'stop_loss': sl,
-            'take_profit': tp,
+            'stop_loss': safeSl,
+            'take_profit': safeTp,
             'position_size': selectedQty,
             'size': selectedQty,
             'tag': tag,

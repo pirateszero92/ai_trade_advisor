@@ -158,14 +158,35 @@ async def place_order(
     req: PlaceOrderRequest,
     _key: str = Depends(verify_api_key),
 ):
-    """Place a new paper or live trade order."""
+    """Place a new paper or live trade order with strict TP/SL sanity check."""
     effective_size = req.get_effective_size()
+    entry = float(req.entry)
+    dir_ = req.direction.lower()
+    sl = float(req.stop_loss)
+    tp = float(req.take_profit)
+
+    # Sanity checks for TP & SL relative to Entry
+    if dir_ == "long":
+        # SL must be below Entry, TP must be above Entry
+        if sl >= entry or sl <= 0:
+            sl = round(entry * 0.99, 4)  # 1% default SL below entry
+        sl_dist = abs(entry - sl)
+        if tp <= entry or tp <= 0:
+            tp = round(entry + (sl_dist * 2.0), 4)  # Minimum 2.0x RR above entry
+    else:
+        # SHORT: SL must be above Entry, TP must be below Entry
+        if sl <= entry or sl <= 0:
+            sl = round(entry * 1.01, 4)  # 1% default SL above entry
+        sl_dist = abs(sl - entry)
+        if tp >= entry or tp <= 0:
+            tp = round(entry - (sl_dist * 2.0), 4)  # Minimum 2.0x RR below entry
+
     result = await _execution.place_order(
         symbol=req.symbol,
         direction=req.direction,
-        entry=req.entry,
-        stop_loss=req.stop_loss,
-        take_profit=req.take_profit,
+        entry=entry,
+        stop_loss=sl,
+        take_profit=tp,
         position_size=effective_size,
         exchange=req.exchange,
         mode=req.mode,
@@ -176,6 +197,9 @@ async def place_order(
         **result,
         "id": trade_id,
         "tag": tag_name,
+        "entry": entry,
+        "stop_loss": sl,
+        "take_profit": tp,
         "opened_at": datetime.now(timezone.utc).isoformat(),
         "status": "open",
         "notes": req.notes,

@@ -273,21 +273,23 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   Future<void> _executePaperOrder(String direction) async {
     final entry = _lastPrice > 0 ? _lastPrice : 64000.0;
     
-    // Dynamic SL/TP from SMC overlay if available
+    // Dynamic SL/TP from SMC overlay or safe default 1.0% distance
+    double slDist = entry * 0.01;
     final overlaySl = (_smcOverlayData?['stop_loss'] as num?)?.toDouble();
-    final overlayTp = (_smcOverlayData?['take_profit'] as num?)?.toDouble();
+    if (overlaySl != null && overlaySl > 0) {
+      final diff = (entry - overlaySl).abs();
+      if (diff / entry >= 0.004) {
+        slDist = diff;
+      }
+    }
     
-    final sl = overlaySl != null && overlaySl > 0
-        ? overlaySl
-        : (direction == 'long' ? entry * 0.992 : entry * 1.008);
-    final tp = overlayTp != null && overlayTp > 0
-        ? overlayTp
-        : (direction == 'long' ? entry * 1.025 : entry * 0.975);
+    final sl = direction == 'long' ? (entry - slDist) : (entry + slDist);
+    final tp = direction == 'long' ? (entry + slDist * 2.2) : (entry - slDist * 2.2);
         
     final size = double.tryParse(_qtyCtrl.text.trim()) ?? 0.10;
 
     try {
-      final dio = Dio();
+      final dio = AppApi.dio;
       await dio.post(
         AppApi.url('/api/v1/trades/place'),
         data: {

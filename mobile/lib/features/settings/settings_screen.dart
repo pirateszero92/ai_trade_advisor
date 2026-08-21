@@ -31,6 +31,8 @@ class SettingsState {
   final String entryMode;
   final bool autoSlTp;
   final bool autoInvalidation;
+  final double targetRr;
+  final double defaultSlPct;
 
   const SettingsState({
     this.apiBaseUrl = '',
@@ -44,6 +46,8 @@ class SettingsState {
     this.riskPerTrade = 1.0,
     this.maxDailyLoss = 3.0,
     this.maxPositions = 3,
+    this.targetRr = 2.0,
+    this.defaultSlPct = 1.0,
     this.isPaperMode = true,
     this.fcmEnabled = true,
     this.telegramToken = '',
@@ -66,6 +70,8 @@ class SettingsState {
     double? riskPerTrade,
     double? maxDailyLoss,
     int? maxPositions,
+    double? targetRr,
+    double? defaultSlPct,
     bool? isPaperMode,
     bool? fcmEnabled,
     String? telegramToken,
@@ -87,6 +93,8 @@ class SettingsState {
       riskPerTrade: riskPerTrade ?? this.riskPerTrade,
       maxDailyLoss: maxDailyLoss ?? this.maxDailyLoss,
       maxPositions: maxPositions ?? this.maxPositions,
+      targetRr: targetRr ?? this.targetRr,
+      defaultSlPct: defaultSlPct ?? this.defaultSlPct,
       isPaperMode: isPaperMode ?? this.isPaperMode,
       fcmEnabled: fcmEnabled ?? this.fcmEnabled,
       telegramToken: telegramToken ?? this.telegramToken,
@@ -126,6 +134,8 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
       riskPerTrade: prefs.getDouble('risk_per_trade') ?? state.riskPerTrade,
       maxDailyLoss: prefs.getDouble('max_daily_loss') ?? state.maxDailyLoss,
       maxPositions: prefs.getInt('max_positions') ?? state.maxPositions,
+      targetRr: prefs.getDouble('target_rr') ?? state.targetRr,
+      defaultSlPct: prefs.getDouble('default_sl_pct') ?? state.defaultSlPct,
       isPaperMode: prefs.getBool('is_paper_mode') ?? state.isPaperMode,
       fcmEnabled: prefs.getBool('fcm_enabled') ?? state.fcmEnabled,
       telegramToken: prefs.getString('telegram_token') ?? state.telegramToken,
@@ -154,6 +164,8 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     await prefs.setDouble('risk_per_trade', newState.riskPerTrade);
     await prefs.setDouble('max_daily_loss', newState.maxDailyLoss);
     await prefs.setInt('max_positions', newState.maxPositions);
+    await prefs.setDouble('target_rr', newState.targetRr);
+    await prefs.setDouble('default_sl_pct', newState.defaultSlPct);
     await prefs.setBool('is_paper_mode', newState.isPaperMode);
     await prefs.setBool('fcm_enabled', newState.fcmEnabled);
     await prefs.setString('telegram_token', newState.telegramToken);
@@ -570,6 +582,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'risk_per_trade': current.riskPerTrade,
           'max_daily_loss': current.maxDailyLoss,
           'max_open_positions': current.maxPositions,
+          'target_rr': current.targetRr,
+          'default_sl_pct': current.defaultSlPct,
         },
       );
     } catch (_) {}
@@ -972,6 +986,28 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               divisions: 9,
               onChanged: (v) => ref.read(settingsProvider.notifier).save(
                     settings.copyWith(riskPerTrade: v),
+                  ),
+              suffix: '%',
+            ),
+            _riskSlider(
+              label: 'Target Risk:Reward (R:R)',
+              value: settings.targetRr,
+              min: 1.0,
+              max: 4.0,
+              divisions: 6,
+              onChanged: (v) => ref.read(settingsProvider.notifier).save(
+                    settings.copyWith(targetRr: v),
+                  ),
+              suffix: 'R',
+            ),
+            _riskSlider(
+              label: 'Default SL Distance',
+              value: settings.defaultSlPct,
+              min: 0.5,
+              max: 3.0,
+              divisions: 5,
+              onChanged: (v) => ref.read(settingsProvider.notifier).save(
+                    settings.copyWith(defaultSlPct: v),
                   ),
               suffix: '%',
             ),

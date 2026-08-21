@@ -180,17 +180,19 @@ class MarketMonitor:
                 if current_price <= 0.0:
                     continue
 
-                # Check TP / SL hit
+                # Check TP / SL hit with strict directional safety
                 hit_reason = None
                 if dir_ == "long":
-                    if tp > 0 and current_price >= tp:
+                    # For LONG: TP must be STRICTLY above entry; SL must be STRICTLY below entry
+                    if tp > entry and current_price >= tp:
                         hit_reason = "Take Profit (TP Hit) 🎯"
-                    elif sl > 0 and current_price <= sl:
+                    elif 0 < sl < entry and current_price <= sl:
                         hit_reason = "Stop Loss (SL Hit) 🛑"
                 else:
-                    if tp > 0 and current_price <= tp:
+                    # For SHORT: TP must be STRICTLY below entry; SL must be STRICTLY above entry
+                    if 0 < tp < entry and current_price <= tp:
                         hit_reason = "Take Profit (TP Hit) 🎯"
-                    elif sl > 0 and current_price >= sl:
+                    elif sl > entry and current_price >= sl:
                         hit_reason = "Stop Loss (SL Hit) 🛑"
 
                 if hit_reason:

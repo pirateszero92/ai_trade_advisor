@@ -674,6 +674,8 @@ class RiskConfigRequest(BaseModel):
     risk_per_trade: Optional[float] = 1.0
     max_daily_loss: Optional[float] = 3.0
     max_open_positions: Optional[int] = 5
+    target_rr: Optional[float] = 2.0
+    default_sl_pct: Optional[float] = 1.0
 
 
 @router.get("/risk/config")
@@ -683,6 +685,8 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
     entry_mode = "limit"
     auto_sl_tp = True
     auto_invalidation = True
+    target_rr = 2.0
+    default_sl_pct = 1.0
     if RUNTIME_SETTINGS_FILE.exists():
         try:
             import json
@@ -690,6 +694,8 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
             entry_mode = data.get("entry_mode", "limit")
             auto_sl_tp = data.get("auto_sl_tp", True)
             auto_invalidation = data.get("auto_invalidation", True)
+            target_rr = float(data.get("target_rr", 2.0))
+            default_sl_pct = float(data.get("default_sl_pct", 1.0))
         except Exception:
             pass
 
@@ -700,6 +706,8 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
         "risk_per_trade": cfg.default_risk_per_trade,
         "max_daily_loss": cfg.max_daily_loss,
         "max_open_positions": cfg.max_open_positions,
+        "target_rr": target_rr,
+        "default_sl_pct": default_sl_pct,
     }
 
 
@@ -729,6 +737,10 @@ async def update_risk_config(req: RiskConfigRequest, _key: str = Depends(verify_
             data["auto_sl_tp"] = req.auto_sl_tp
         if req.auto_invalidation is not None:
             data["auto_invalidation"] = req.auto_invalidation
+        if req.target_rr is not None:
+            data["target_rr"] = req.target_rr
+        if req.default_sl_pct is not None:
+            data["default_sl_pct"] = req.default_sl_pct
 
         data["risk_per_trade"] = cfg.default_risk_per_trade
         data["max_daily_loss"] = cfg.max_daily_loss
@@ -748,6 +760,7 @@ async def update_risk_config(req: RiskConfigRequest, _key: str = Depends(verify_
             "auto_invalidation": req.auto_invalidation,
             "risk_per_trade": cfg.default_risk_per_trade,
             "max_daily_loss": cfg.max_daily_loss,
-            "max_open_positions": cfg.max_open_positions,
+            "target_rr": req.target_rr or 2.0,
+            "default_sl_pct": req.default_sl_pct or 1.0,
         },
     }
