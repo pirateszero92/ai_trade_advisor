@@ -136,7 +136,7 @@ class MarketDataEngine:
                 except Exception:
                     continue
 
-        # 3. Non-blocking ThreadPool Executor for Yahoo Finance (Forex / Gold / Stocks)
+        # 3. Non-blocking ThreadPool Executor for Yahoo Finance with strict 2.0s timeout
         def _get_yf_fast() -> dict:
             try:
                 yf_sym = normalize_yfinance_symbol(symbol, market_type)
@@ -188,19 +188,26 @@ class MarketDataEngine:
 
         try:
             loop = asyncio.get_running_loop()
-            yf_res = await loop.run_in_executor(None, _get_yf_fast)
+            yf_res = await asyncio.wait_for(loop.run_in_executor(None, _get_yf_fast), timeout=2.0)
             if yf_res and yf_res.get("price", 0.0) > 0.0:
                 _TICKER_CACHE[cache_key] = (now, yf_res)
                 return yf_res
         except Exception as e:
-            logger.debug(f"[MarketData] YF executor error for {symbol}: {e}")
+            logger.debug(f"[MarketData] YF executor timeout/error for {symbol}: {e}")
 
-        # 4. Fallback for Forex via Binance Spot token if yfinance fails
-        if clean_sym in ["EURUSD", "GBPUSD", "USDJPY"]:
+        # 4. Fast Fallback for Forex & Gold via Binance Spot tokens (PAXGUSDT, EURUSDT, GBPUSDT)
+        if clean_sym in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "GOLD"]:
             try:
-                spot_sym = "EURUSDT" if clean_sym == "EURUSD" else ("GBPUSDT" if clean_sym == "GBPUSD" else "USDCAD")
+                if clean_sym in ["XAUUSD", "GOLD"]:
+                    spot_sym = "PAXGUSDT"
+                elif clean_sym == "EURUSD":
+                    spot_sym = "EURUSDT"
+                elif clean_sym == "GBPUSD":
+                    spot_sym = "GBPUSDT"
+                else:
+                    spot_sym = "USDCAD"
                 async with httpx.AsyncClient(timeout=1.5) as client:
-                    resp = await client.get(f"https://data-api.binance.vision/api/v3/ticker/24hr", params={"symbol": spot_sym})
+                    resp = await client.get("https://data-api.binance.vision/api/v3/ticker/24hr", params={"symbol": spot_sym})
                     if resp.status_code == 200:
                         data = resp.json()
                         res = {

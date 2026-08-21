@@ -190,7 +190,7 @@ async def list_trades(
                 mtype = "stock"
 
             try:
-                ticker = await mde.get_ticker_24h(sym, mtype)
+                ticker = await asyncio.wait_for(mde.get_ticker_24h(sym, mtype), timeout=1.5)
                 cur_price = float(ticker.get("price", entry))
                 if cur_price > 0:
                     t_copy["live_price"] = cur_price
