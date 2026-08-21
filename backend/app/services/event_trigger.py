@@ -106,44 +106,58 @@ class MarketMonitor:
             return
         self.running = True
         logger.info(f"🚀 Proactive MarketMonitor started with {len(self.watchlist)} watchlist symbols.")
-        self._task = asyncio.create_task(self._run_loop())
+        self._scan_task = asyncio.create_task(self._run_scan_loop())
+        self._pos_task = asyncio.create_task(self._run_position_monitor_loop())
 
     def stop(self):
         self.running = False
-        if self._task:
-            self._task.cancel()
+        if hasattr(self, "_scan_task") and self._scan_task:
+            self._scan_task.cancel()
+        if hasattr(self, "_pos_task") and self._pos_task:
+            self._pos_task.cancel()
         logger.info("🛑 MarketMonitor stopped.")
 
-    async def _run_loop(self):
+    async def _run_scan_loop(self):
         while self.running:
             try:
                 await self.scan_all()
-                await self._check_open_positions_tp_sl()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in proactive scan loop: {e}")
             await asyncio.sleep(self.interval)
 
+    async def _run_position_monitor_loop(self):
+        """Fast loop checking open positions TP/SL and live PnL every 6 seconds."""
+        while self.running:
+            try:
+                await self._check_open_positions_tp_sl()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in position monitor loop: {e}")
+            await asyncio.sleep(6)
+
     async def _check_open_positions_tp_sl(self):
         """Auto-monitor open positions and execute TP/SL exits automatically."""
         try:
-            from app.api.trades import _trades
-            open_trades = [t for t in _trades.values() if t.get("status") == "open"]
+            from app.api.trades import get_all_trades, auto_close_trade_sync
+            trades_dict = get_all_trades()
+            open_trades = [t for t in trades_dict.values() if t.get("status") == "open"]
             if not open_trades:
                 return
 
             for trade in open_trades:
                 sym = trade["symbol"]
                 dir_ = trade.get("direction", "long").lower()
-                entry = trade.get("entry", 0.0)
-                sl = trade.get("stop_loss", 0.0)
-                tp = trade.get("take_profit", 0.0)
+                entry = float(trade.get("entry", 0.0))
+                sl = float(trade.get("stop_loss", 0.0))
+                tp = float(trade.get("take_profit", 0.0))
                 trade_id = trade.get("id")
 
                 # Detect correct market type
                 s_up = sym.upper().replace("/", "").replace("-", "")
-                if s_up in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "AUDUSD", "USDCAD"]:
+                if any(f in s_up for f in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "AUDUSD", "USDCAD"]):
                     m_type = "forex"
                 elif "/" in sym or "USDT" in s_up:
                     m_type = "crypto"
@@ -153,7 +167,7 @@ class MarketMonitor:
                 # Get latest live ticker price
                 current_price = 0.0
                 try:
-                    ticker_data = await self.market_data.get_ticker_24h(sym, m_type)
+                    ticker_data = await asyncio.wait_for(self.market_data.get_ticker_24h(sym, m_type), timeout=1.5)
                     current_price = float(ticker_data.get("price", 0.0))
                 except Exception:
                     pass
@@ -164,11 +178,6 @@ class MarketMonitor:
                         current_price = float(df["close"].iloc[-1])
 
                 if current_price <= 0.0:
-                    continue
-
-                # Sanity check: price must not deviate by >40% from entry to ignore invalid network spikes
-                if entry > 0 and (current_price > entry * 1.5 or current_price < entry * 0.5):
-                    logger.warning(f"Ignored abnormal price spike for {sym}: Entry={entry}, Live={current_price}")
                     continue
 
                 # Check TP / SL hit
@@ -185,40 +194,22 @@ class MarketMonitor:
                         hit_reason = "Stop Loss (SL Hit) 🛑"
 
                 if hit_reason:
-                    # Calculate realized PnL
-                    size = trade.get("position_size", trade.get("size", 1.0))
-                    if dir_ == "long":
-                        pnl = (current_price - entry) * size
-                        pnl_pct = ((current_price - entry) / entry) * 100
-                    else:
-                        pnl = (entry - current_price) * size
-                        pnl_pct = ((entry - current_price) / entry) * 100
-
-                    trade["pnl"] = round(pnl, 2)
-                    trade["pnl_pct"] = round(pnl_pct, 2)
-
-                    try:
-                        from app.api.trades import _save_trades
-                        _save_trades()
-                    except Exception:
-                        pass
-
-                    logger.info(f"⚡ AUTO EXIT: {sym} {trade.get('tag', trade_id)} closed by {hit_reason} at ${current_price:.2f} (PnL: ${pnl:.2f})")
-
-                    # Broadcast update to WebSocket
-                    await broadcast({"type": "trade_closed", "data": trade})
-
-                    # Dispatch Alert to Telegram / LINE
-                    await self.notifier.send_signal_alert(
-                        symbol=sym,
-                        timeframe="1M",
-                        direction="closed",
-                        message=f"[{hit_reason}] Position {trade.get('tag', sym)} ปิดสถานะอัตโนมัติที่ราคา ${current_price:.2f} | Realized PnL: ${pnl:+.2f} ({pnl_pct:+.2f}%)",
-                        confluence_score=100,
-                        entry=entry,
-                        sl=sl,
-                        tp=tp,
-                    )
+                    closed = auto_close_trade_sync(trade_id, hit_reason, current_price)
+                    if closed:
+                        pnl = closed.get("pnl", 0.0)
+                        pnl_pct = closed.get("pnl_pct", 0.0)
+                        logger.info(f"⚡ AUTO EXIT: {sym} {closed.get('tag', trade_id)} closed by {hit_reason} at ${current_price:.2f} (PnL: ${pnl:.2f})")
+                        await broadcast({"type": "trade_closed", "data": closed})
+                        await self.notifier.send_signal_alert(
+                            symbol=sym,
+                            timeframe="1M",
+                            direction="closed",
+                            message=f"[{hit_reason}] Position {closed.get('tag', sym)} ปิดสถานะอัตโนมัติที่ราคา ${current_price:.2f} | Realized PnL: ${pnl:+.2f} ({pnl_pct:+.2f}%)",
+                            confluence_score=100,
+                            entry=entry,
+                            sl=sl,
+                            tp=tp,
+                        )
         except Exception as e:
             logger.error(f"Error checking open positions TP/SL: {e}")
 
@@ -244,7 +235,20 @@ class MarketMonitor:
                 htf_sig = self.smc.analyze(htf_df, symbol, htf)
                 htf_bias = htf_sig.bias
 
-            ltf_sig = self.smc.analyze(ltf_df, symbol, tf, htf_bias=htf_bias)
+            # Load user-configured risk & entry settings
+            entry_mode = "limit"
+            auto_invalidation = True
+            try:
+                from app.api.settings_api import RUNTIME_SETTINGS_FILE
+                if RUNTIME_SETTINGS_FILE.exists():
+                    import json
+                    r_cfg = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
+                    entry_mode = r_cfg.get("entry_mode", "limit")
+                    auto_invalidation = r_cfg.get("auto_invalidation", True)
+            except Exception:
+                pass
+
+            ltf_sig = self.smc.analyze(ltf_df, symbol, tf, htf_bias=htf_bias, entry_mode=entry_mode)
 
             # 3. Strategy evaluation
             strat_res = self.strategy.evaluate(ltf_sig)
@@ -263,25 +267,97 @@ class MarketMonitor:
             elif strat_res.direction in ("long", "short"):
                 direction = strat_res.direction
 
-            entry = float(ltf_sig.current_price) if ltf_sig.current_price > 0 else float(ltf_df["close"].iloc[-1])
-            
-            # Dynamic SL/TP based on Order Block or 0.8% ATR buffer
-            if direction == "long":
-                sl = (ltf_sig.order_block.bottom * 0.998) if ltf_sig.order_block else (entry * 0.992)
-                if sl >= entry:
-                    sl = entry * 0.992
-                sl_dist = abs(entry - sl)
-                tp = entry + (sl_dist * 2.2)
-            else:
-                sl = (ltf_sig.order_block.top * 1.002) if ltf_sig.order_block else (entry * 1.008)
-                if sl <= entry:
-                    sl = entry * 1.008
-                sl_dist = abs(entry - sl)
-                tp = entry - (sl_dist * 2.2)
+            live_price = float(ltf_sig.current_price) if ltf_sig.current_price > 0 else float(ltf_df["close"].iloc[-1])
+
+            # 4. Auto Invalidation Cut-Loss for Open Trades
+            if auto_invalidation:
+                from app.api.trades import get_all_trades, auto_close_trade_sync
+                all_t = get_all_trades()
+                for t in all_t.values():
+                    if t.get("status") == "open" and t.get("symbol") == symbol:
+                        t_dir = str(t.get("direction", "")).lower()
+                        # If open short and new structure is strong bullish or bullish CHoCH
+                        if t_dir == "short" and (direction == "long" and (confluence >= 65 or ltf_sig.choch)):
+                            closed = auto_close_trade_sync(t["id"], "Structure Invalidation (Market turned Bullish) ⚠️", live_price)
+                            if closed:
+                                logger.info(f"⚡ AUTO CUT LOSS: {symbol} Short position closed due to bullish invalidation")
+                                await broadcast({"type": "trade_closed", "data": closed})
+                                await self.notifier.send_signal_alert(
+                                    symbol=symbol,
+                                    timeframe=tf.upper(),
+                                    direction="closed",
+                                    message=f"[Structure Invalidation] ปิดสถานะ SHORT {symbol} อัตโนมัติเนื่องจากตลาดเปลี่ยนโครงสร้างเป็น BULLISH | PnL: ${closed.get('pnl', 0):+.2f}",
+                                    confluence_score=confluence,
+                                    entry=t.get("entry", 0),
+                                    sl=t.get("stop_loss", 0),
+                                    tp=t.get("take_profit", 0),
+                                )
+                        # If open long and new structure is strong bearish or bearish CHoCH
+                        elif t_dir == "long" and (direction == "short" and (confluence >= 65 or ltf_sig.choch)):
+                            closed = auto_close_trade_sync(t["id"], "Structure Invalidation (Market turned Bearish) ⚠️", live_price)
+                            if closed:
+                                logger.info(f"⚡ AUTO CUT LOSS: {symbol} Long position closed due to bearish invalidation")
+                                await broadcast({"type": "trade_closed", "data": closed})
+                                await self.notifier.send_signal_alert(
+                                    symbol=symbol,
+                                    timeframe=tf.upper(),
+                                    direction="closed",
+                                    message=f"[Structure Invalidation] ปิดสถานะ LONG {symbol} อัตโนมัติเนื่องจากตลาดเปลี่ยนโครงสร้างเป็น BEARISH | PnL: ${closed.get('pnl', 0):+.2f}",
+                                    confluence_score=confluence,
+                                    entry=t.get("entry", 0),
+                                    sl=t.get("stop_loss", 0),
+                                    tp=t.get("take_profit", 0),
+                                )
+
+            # 5. Calculate entry, SL, TP based on entry_mode
+            if entry_mode == "limit":
+                if direction == "long":
+                    if ltf_sig.order_block and ltf_sig.order_block.direction == "bullish":
+                        entry = ltf_sig.order_block.mid
+                        sl = ltf_sig.order_block.bottom * 0.998
+                    elif ltf_sig.fvg and ltf_sig.fvg.direction == "bullish":
+                        entry = ltf_sig.fvg.mid
+                        sl = ltf_sig.fvg.bottom * 0.998
+                    else:
+                        entry = live_price
+                        sl = entry * 0.992
+                    if sl >= entry:
+                        sl = entry * 0.992
+                    sl_dist = abs(entry - sl)
+                    tp = entry + (sl_dist * 2.5)
+                else:
+                    if ltf_sig.order_block and ltf_sig.order_block.direction == "bearish":
+                        entry = ltf_sig.order_block.mid
+                        sl = ltf_sig.order_block.top * 1.002
+                    elif ltf_sig.fvg and ltf_sig.fvg.direction == "bearish":
+                        entry = ltf_sig.fvg.mid
+                        sl = ltf_sig.fvg.top * 1.002
+                    else:
+                        entry = live_price
+                        sl = entry * 1.008
+                    if sl <= entry:
+                        sl = entry * 1.008
+                    sl_dist = abs(entry - sl)
+                    tp = entry - (sl_dist * 2.5)
+            else:  # market entry
+                entry = live_price
+                if direction == "long":
+                    sl = (ltf_sig.order_block.bottom * 0.998) if ltf_sig.order_block else (entry * 0.992)
+                    if sl >= entry:
+                        sl = entry * 0.992
+                    sl_dist = abs(entry - sl)
+                    tp = entry + (sl_dist * 2.2)
+                else:
+                    sl = (ltf_sig.order_block.top * 1.002) if ltf_sig.order_block else (entry * 1.008)
+                    if sl <= entry:
+                        sl = entry * 1.008
+                    sl_dist = abs(entry - sl)
+                    tp = entry - (sl_dist * 2.2)
 
             zone_name = "Discount" if ltf_sig.in_discount else ("Premium" if ltf_sig.in_premium else "Equilibrium")
             
             # Tailored structure description
+            entry_type_label = "Limit Zone (OB/FVG)" if entry_mode == "limit" else "Market Price"
             if ltf_sig.liquidity_swept and ltf_sig.in_premium:
                 structure_summary = f"เกิดการ Sweep สภาพคล่องเหนือ High ล่าสุดในโซน Premium (จุดกลับตัว Short-term)"
             elif ltf_sig.liquidity_swept and ltf_sig.in_discount:
@@ -299,7 +375,7 @@ class MarketMonitor:
 
             price_decimals = 4 if entry < 5.0 else 2
             if confluence >= 80:
-                advice_text = f"คำแนะนำ: โครงสร้างแข็งแกร่ง (Grade A+) สอดคล้องเทรนด์ใหญ่ แนะนำพิจารณาเข้าตามแผน Entry ${entry:.{price_decimals}f} SL ${sl:.{price_decimals}f} (ความเสี่ยง 1.0%)"
+                advice_text = f"คำแนะนำ: โครงสร้างแข็งแกร่ง (Grade A+) สอดคล้องเทรนด์ใหญ่ แนะนำพิจารณาเข้าตามแผน {entry_type_label} Entry ${entry:.{price_decimals}f} SL ${sl:.{price_decimals}f} (ความเสี่ยง 1.0%)"
             elif confluence >= 65:
                 advice_text = f"คำแนะนำ: โครงสร้าง {direction.upper()} (Grade B) แตะโซน {zone_name} ควรรอแท่งยืนยัน Rejection ใน TF ย่อยก่อนเข้า หรือจำกัดความเสี่ยงที่ 0.5%"
             else:
@@ -316,7 +392,9 @@ class MarketMonitor:
                 "entry": round(entry, price_decimals),
                 "stop_loss": round(sl, price_decimals),
                 "take_profit": round(tp, price_decimals),
-                "rr": 2.2,
+                "rr": 2.5 if entry_mode == "limit" else 2.2,
+                "entry_type": entry_mode,
+                "live_price": round(live_price, price_decimals),
                 "message": structure_summary,
                 "advice": advice_text,
                 "timestamp": datetime.now(timezone.utc).isoformat(),

@@ -28,6 +28,9 @@ class SettingsState {
   final String telegramToken;
   final String telegramChatId;
   final String lineToken;
+  final String entryMode;
+  final bool autoSlTp;
+  final bool autoInvalidation;
 
   const SettingsState({
     this.apiBaseUrl = '',
@@ -46,6 +49,9 @@ class SettingsState {
     this.telegramToken = '',
     this.telegramChatId = '',
     this.lineToken = '',
+    this.entryMode = 'limit',
+    this.autoSlTp = true,
+    this.autoInvalidation = true,
   });
 
   SettingsState copyWith({
@@ -65,6 +71,9 @@ class SettingsState {
     String? telegramToken,
     String? telegramChatId,
     String? lineToken,
+    String? entryMode,
+    bool? autoSlTp,
+    bool? autoInvalidation,
   }) {
     return SettingsState(
       apiBaseUrl: apiBaseUrl ?? this.apiBaseUrl,
@@ -83,6 +92,9 @@ class SettingsState {
       telegramToken: telegramToken ?? this.telegramToken,
       telegramChatId: telegramChatId ?? this.telegramChatId,
       lineToken: lineToken ?? this.lineToken,
+      entryMode: entryMode ?? this.entryMode,
+      autoSlTp: autoSlTp ?? this.autoSlTp,
+      autoInvalidation: autoInvalidation ?? this.autoInvalidation,
     );
   }
 }
@@ -119,6 +131,9 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
       telegramToken: prefs.getString('telegram_token') ?? state.telegramToken,
       telegramChatId: prefs.getString('telegram_chat_id') ?? state.telegramChatId,
       lineToken: prefs.getString('line_token') ?? state.lineToken,
+      entryMode: prefs.getString('entry_mode') ?? state.entryMode,
+      autoSlTp: prefs.getBool('auto_sl_tp') ?? state.autoSlTp,
+      autoInvalidation: prefs.getBool('auto_invalidation') ?? state.autoInvalidation,
       geminiKey: await _storage.read(key: 'gemini_key') ?? '',
       openRouterKey: await _storage.read(key: 'openrouter_key') ?? '',
     );
@@ -144,6 +159,9 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     await prefs.setString('telegram_token', newState.telegramToken);
     await prefs.setString('telegram_chat_id', newState.telegramChatId);
     await prefs.setString('line_token', newState.lineToken);
+    await prefs.setString('entry_mode', newState.entryMode);
+    await prefs.setBool('auto_sl_tp', newState.autoSlTp);
+    await prefs.setBool('auto_invalidation', newState.autoInvalidation);
     await _storage.write(key: 'gemini_key', value: newState.geminiKey);
     await _storage.write(key: 'openrouter_key', value: newState.openRouterKey);
   }
@@ -541,6 +559,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'alpaca_base_url': _alpacaBaseUrlCtrl.text.trim(),
         },
       );
+
+      // Save Position & Risk settings
+      await dio.post(
+        AppApi.url('/api/v1/settings/risk/config'),
+        data: {
+          'entry_mode': current.entryMode,
+          'auto_sl_tp': current.autoSlTp,
+          'auto_invalidation': current.autoInvalidation,
+          'risk_per_trade': current.riskPerTrade,
+          'max_daily_loss': current.maxDailyLoss,
+          'max_open_positions': current.maxPositions,
+        },
+      );
     } catch (_) {}
 
     if (mounted) {
@@ -864,9 +895,75 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
           const SizedBox(height: 16),
 
-          // ---- Risk Settings ----
-          _sectionHeader('⚖️ Risk Settings'),
+          // ---- Risk & Position Management ----
+          _sectionHeader('🛡️ Position & Risk Management'),
           _card([
+            const Text(
+              'รูปแบบจุดเข้า (SMC Entry Style):',
+              style: TextStyle(fontSize: 13, color: Colors.white70, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: ChoiceChip(
+                    label: const Center(
+                      child: Text('Limit Zone (OB/FVG)', style: TextStyle(fontSize: 12)),
+                    ),
+                    selected: settings.entryMode == 'limit',
+                    selectedColor: AppColors.bullish,
+                    backgroundColor: const Color(0xFF252540),
+                    onSelected: (selected) {
+                      if (selected) {
+                        ref.read(settingsProvider.notifier).save(settings.copyWith(entryMode: 'limit'));
+                      }
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ChoiceChip(
+                    label: const Center(
+                      child: Text('Market (Live Price)', style: TextStyle(fontSize: 12)),
+                    ),
+                    selected: settings.entryMode == 'market',
+                    selectedColor: AppColors.bullish,
+                    backgroundColor: const Color(0xFF252540),
+                    onSelected: (selected) {
+                      if (selected) {
+                        ref.read(settingsProvider.notifier).save(settings.copyWith(entryMode: 'market'));
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              settings.entryMode == 'limit'
+                  ? '💡 โหมด Limit: ตรึงราคาเข้าไว้ที่โซน Order Block / FVG (ราคาคงที่ไม่เปลี่ยนตาม Tick)'
+                  : '⚡ โหมด Market: จุดเข้าอิงตามราคาตลาดปัจจุบัน เข้าทันทีเมื่อยืนยันสัญญาณ',
+              style: const TextStyle(fontSize: 11, color: Colors.white38),
+            ),
+            const Divider(color: Colors.white12, height: 24),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Auto Stop Loss & Take Profit', style: TextStyle(fontSize: 14, color: Colors.white, fontWeight: FontWeight.w600)),
+              subtitle: const Text('สั่งปิดออเดอร์ตัดขาดทุน/ทำกำไรอัตโนมัติเมื่อราคาแตะเส้น SL หรือ TP', style: TextStyle(fontSize: 11, color: Colors.white54)),
+              value: settings.autoSlTp,
+              activeColor: AppColors.bullish,
+              onChanged: (v) => ref.read(settingsProvider.notifier).save(settings.copyWith(autoSlTp: v)),
+            ),
+            const Divider(color: Colors.white12, height: 16),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Auto Invalidation Cut-Loss', style: TextStyle(fontSize: 14, color: Colors.white, fontWeight: FontWeight.w600)),
+              subtitle: const Text('ตัดขาดทุนทันทีเมื่อโครงสร้างตลาดกลับตัวฝั่งตรงข้าม (เช่น เกิด CHoCH สวนทาง)', style: TextStyle(fontSize: 11, color: Colors.white54)),
+              value: settings.autoInvalidation,
+              activeColor: AppColors.bullish,
+              onChanged: (v) => ref.read(settingsProvider.notifier).save(settings.copyWith(autoInvalidation: v)),
+            ),
+            const Divider(color: Colors.white12, height: 16),
             _riskSlider(
               label: 'Risk per Trade',
               value: settings.riskPerTrade,

@@ -665,3 +665,89 @@ async def set_trading_mode(req: TradingModeRequest, _key: str = Depends(verify_a
         logger.warning(f"Failed to persist TRADING_MODE to .env: {e}")
 
     return {"status": "ok", "trading_mode": req.mode}
+
+
+class RiskConfigRequest(BaseModel):
+    entry_mode: Optional[Literal["limit", "market"]] = "limit"
+    auto_sl_tp: Optional[bool] = True
+    auto_invalidation: Optional[bool] = True
+    risk_per_trade: Optional[float] = 1.0
+    max_daily_loss: Optional[float] = 3.0
+    max_open_positions: Optional[int] = 5
+
+
+@router.get("/risk/config")
+async def get_risk_config(_key: str = Depends(verify_api_key)):
+    """Get active risk management and entry mode configuration."""
+    cfg = get_settings()
+    entry_mode = "limit"
+    auto_sl_tp = True
+    auto_invalidation = True
+    if RUNTIME_SETTINGS_FILE.exists():
+        try:
+            import json
+            data = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
+            entry_mode = data.get("entry_mode", "limit")
+            auto_sl_tp = data.get("auto_sl_tp", True)
+            auto_invalidation = data.get("auto_invalidation", True)
+        except Exception:
+            pass
+
+    return {
+        "entry_mode": entry_mode,
+        "auto_sl_tp": auto_sl_tp,
+        "auto_invalidation": auto_invalidation,
+        "risk_per_trade": cfg.default_risk_per_trade,
+        "max_daily_loss": cfg.max_daily_loss,
+        "max_open_positions": cfg.max_open_positions,
+    }
+
+
+@router.post("/risk/config")
+async def update_risk_config(req: RiskConfigRequest, _key: str = Depends(verify_api_key)):
+    """Update risk management and entry mode settings and persist to JSON storage."""
+    cfg = get_settings()
+    if req.risk_per_trade is not None:
+        cfg.default_risk_per_trade = req.risk_per_trade
+    if req.max_daily_loss is not None:
+        cfg.max_daily_loss = req.max_daily_loss
+    if req.max_open_positions is not None:
+        cfg.max_open_positions = req.max_open_positions
+
+    try:
+        import json
+        data = {}
+        if RUNTIME_SETTINGS_FILE.exists():
+            try:
+                data = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+
+        if req.entry_mode is not None:
+            data["entry_mode"] = req.entry_mode
+        if req.auto_sl_tp is not None:
+            data["auto_sl_tp"] = req.auto_sl_tp
+        if req.auto_invalidation is not None:
+            data["auto_invalidation"] = req.auto_invalidation
+
+        data["risk_per_trade"] = cfg.default_risk_per_trade
+        data["max_daily_loss"] = cfg.max_daily_loss
+        data["max_open_positions"] = cfg.max_open_positions
+
+        RUNTIME_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RUNTIME_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Failed to save risk config to JSON: {e}")
+
+    return {
+        "status": "ok",
+        "message": "Risk & Entry settings saved successfully",
+        "config": {
+            "entry_mode": req.entry_mode,
+            "auto_sl_tp": req.auto_sl_tp,
+            "auto_invalidation": req.auto_invalidation,
+            "risk_per_trade": cfg.default_risk_per_trade,
+            "max_daily_loss": cfg.max_daily_loss,
+            "max_open_positions": cfg.max_open_positions,
+        },
+    }

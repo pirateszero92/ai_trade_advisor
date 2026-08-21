@@ -605,8 +605,8 @@ class _SignalsScreenState extends State<SignalsScreen> {
                               final rr = (s['rr'] as num?)?.toDouble() ?? 2.2;
                               final date = (s['timestamp'] ?? '').toString().split('T').first;
 
-                              // Find matching open positions for this symbol
                               final matchingPositions = _positions.where((p) => (p['symbol'] ?? '').toString().toUpperCase() == sym.toUpperCase()).toList();
+                              final entryType = (s['entry_type'] ?? 'limit').toString();
 
                               return _SignalCard(
                                 symbol: sym,
@@ -618,6 +618,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
                                 sl: sl,
                                 tp: tp,
                                 rr: rr,
+                                entryType: entryType,
                                 message: msg,
                                 advice: s['advice'] as String?,
                                 time: date,
@@ -715,6 +716,7 @@ class _SignalCard extends StatelessWidget {
   final String? advice;
   final int confluence;
   final double? entry, livePrice, sl, tp, rr;
+  final String entryType;
   final List<Map<String, dynamic>> openPositions;
   final VoidCallback onExecuteTrade;
   final Function(dynamic id, String tag) onClosePosition;
@@ -729,6 +731,7 @@ class _SignalCard extends StatelessWidget {
     required this.openPositions,
     required this.onExecuteTrade,
     required this.onClosePosition,
+    this.entryType = 'limit',
     this.advice,
     this.entry,
     this.livePrice,
@@ -889,7 +892,14 @@ class _SignalCard extends StatelessWidget {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Text('Entry / Live', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                          Text(
+                            entryType == 'limit' ? 'OB Zone / Live' : 'Market / Live',
+                            style: TextStyle(
+                              fontSize: 9,
+                              color: entryType == 'limit' ? const Color(0xFF5CA3FF) : AppColors.textMuted,
+                              fontWeight: entryType == 'limit' ? FontWeight.bold : FontWeight.normal,
+                            ),
+                          ),
                           const SizedBox(height: 3),
                           SizedBox(
                             height: 22,

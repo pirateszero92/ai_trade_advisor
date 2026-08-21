@@ -82,6 +82,7 @@ class SMCSignal:
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     risk_reward: float = 0.0
+    entry_type: Literal["limit", "market"] = "limit"
 
     # Raw swing data (not serialised to JSON by default)
     swing_highs: list[SwingPoint] = field(default_factory=list, repr=False)
@@ -114,6 +115,7 @@ class SMCSignal:
                 "top": self.fvg.top,
                 "bottom": self.fvg.bottom,
                 "mid": self.fvg.mid,
+                "mitigated": self.fvg.mitigated,
             } if self.fvg else None,
             "equal_highs": self.equal_highs,
             "equal_lows": self.equal_lows,
@@ -125,11 +127,13 @@ class SMCSignal:
             "equilibrium": self.equilibrium,
             "current_price": self.current_price,
             "confluence": self.confluence,
+            "confluence_score": self.confluence_score,
             "direction": self.direction,
             "entry": self.entry,
             "stop_loss": self.stop_loss,
             "take_profit": self.take_profit,
             "risk_reward": self.risk_reward,
+            "entry_type": self.entry_type,
         }
 
 
@@ -167,29 +171,31 @@ class SMCEngine:
         symbol: str,
         timeframe: str,
         htf_bias: Literal["bullish", "bearish", "neutral"] = "neutral",
+        entry_mode: Literal["limit", "market"] = "limit",
     ) -> SMCSignal:
         """
-        Run full SMC analysis on the supplied OHLCV DataFrame.
+        Run full SMC analysis pipeline on the given OHLCV DataFrame.
 
         Parameters
         ----------
         df:
-            DataFrame with columns open, high, low, close, volume and a
-            DatetimeIndex.  Minimum 50 rows recommended.
+            DataFrame with columns: open, high, low, close, volume.
         symbol:
-            Trading pair / symbol string e.g. ``"BTCUSDT"``.
+            Ticker symbol (e.g. "BTC/USDT").
         timeframe:
-            Timeframe label e.g. ``"1H"``, ``"4H"``, ``"D"``.
+            Chart timeframe string (e.g. "1h", "4h").
         htf_bias:
-            Higher-timeframe directional bias passed from the caller.
+            Higher Timeframe trend bias for confluence checking.
+        entry_mode:
+            "limit" (anchored to Order Block / FVG zone) or "market" (current price).
 
         Returns
         -------
         SMCSignal
-            Populated signal object.
+            Complete analysis result object.
         """
-        if df is None or df.empty or len(df) < 20:
-            logger.warning(f"[SMC] Insufficient data for {symbol} {timeframe}")
+        if df.empty or len(df) < self.DEFAULT_SWING_LENGTH * 2 + 1:
+            logger.warning(f"[SMC] Insufficient data for {symbol} ({len(df)} bars)")
             return SMCSignal(symbol=symbol, timeframe=timeframe, htf_bias=htf_bias)
 
         df = df.copy()
@@ -227,8 +233,8 @@ class SMCEngine:
             # 7. Liquidity sweeps
             self._detect_liquidity_sweep(df, signal)
 
-            # 8. Trade setup
-            self._compute_trade_setup(signal)
+            # 8. Trade setup (Limit OB zone vs Market price)
+            self._compute_trade_setup(signal, entry_mode=entry_mode)
 
             # 9. Confluence score
             signal.confluence = self._compute_confluence(signal)
@@ -615,7 +621,9 @@ class SMCEngine:
     # Trade Setup Computation
     # ------------------------------------------------------------------
 
-    def _compute_trade_setup(self, signal: SMCSignal) -> None:
+    def _compute_trade_setup(
+        self, signal: SMCSignal, entry_mode: Literal["limit", "market"] = "limit"
+    ) -> None:
         """
         Derive entry, SL, TP, and R:R from detected SMC structures.
         Modifies ``signal`` in-place.
@@ -623,6 +631,7 @@ class SMCEngine:
         price = signal.current_price
         ob = signal.order_block
         fvg = signal.fvg
+        signal.entry_type = entry_mode
 
         # Determine directional bias
         if signal.htf_bias != "neutral":
@@ -634,33 +643,46 @@ class SMCEngine:
             return
 
         if direction == "bullish":
-            # Entry at OB mid or FVG mid
-            if ob and ob.direction == "bullish":
-                entry = ob.mid
-                sl = ob.bottom * 0.999  # just below OB
-                tp = price + (price - sl) * 2.5
-            elif fvg and fvg.direction == "bullish":
-                entry = fvg.mid
-                sl = fvg.bottom * 0.999
-                tp = price + (price - sl) * 2.5
-            else:
-                signal.direction = "wait"
-                return
             signal.direction = "long"
+            if entry_mode == "limit":
+                if ob and ob.direction == "bullish":
+                    entry = ob.mid
+                    sl = ob.bottom * 0.998
+                elif fvg and fvg.direction == "bullish":
+                    entry = fvg.mid
+                    sl = fvg.bottom * 0.998
+                else:
+                    entry = price
+                    sl = entry * 0.992
+            else:  # market entry
+                entry = price
+                sl = (ob.bottom * 0.998) if (ob and ob.direction == "bullish") else (entry * 0.992)
+
+            if sl >= entry:
+                sl = entry * 0.992
+            sl_dist = abs(entry - sl)
+            tp = entry + (sl_dist * 2.5)
 
         else:  # bearish
-            if ob and ob.direction == "bearish":
-                entry = ob.mid
-                sl = ob.top * 1.001  # just above OB
-                tp = price - (sl - price) * 2.5
-            elif fvg and fvg.direction == "bearish":
-                entry = fvg.mid
-                sl = fvg.top * 1.001
-                tp = price - (sl - price) * 2.5
-            else:
-                signal.direction = "wait"
-                return
             signal.direction = "short"
+            if entry_mode == "limit":
+                if ob and ob.direction == "bearish":
+                    entry = ob.mid
+                    sl = ob.top * 1.002
+                elif fvg and fvg.direction == "bearish":
+                    entry = fvg.mid
+                    sl = fvg.top * 1.002
+                else:
+                    entry = price
+                    sl = entry * 1.008
+            else:  # market entry
+                entry = price
+                sl = (ob.top * 1.002) if (ob and ob.direction == "bearish") else (entry * 1.008)
+
+            if sl <= entry:
+                sl = entry * 1.008
+            sl_dist = abs(entry - sl)
+            tp = entry - (sl_dist * 2.5)
 
         signal.entry = round(entry, 6)
         signal.stop_loss = round(sl, 6)

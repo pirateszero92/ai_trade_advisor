@@ -46,6 +46,42 @@ def _save_trades():
 _trades: dict[str, dict] = _load_trades()
 
 
+def get_all_trades() -> dict[str, dict]:
+    global _trades
+    _trades = _load_trades()
+    return _trades
+
+
+def auto_close_trade_sync(trade_id: str, reason: str, close_price: float) -> Optional[dict]:
+    global _trades
+    _trades = _load_trades()
+    trade = _trades.get(trade_id)
+    if not trade or trade.get("status") != "open":
+        return None
+
+    entry = float(trade.get("entry", close_price))
+    direction = str(trade.get("direction", "long")).lower()
+    size = float(trade.get("size", trade.get("position_size", 1.0)))
+
+    if direction == "long":
+        pnl_pct = ((close_price - entry) / entry) * 100 if entry > 0 else 0.0
+        pnl = (close_price - entry) * size
+    else:
+        pnl_pct = ((entry - close_price) / entry) * 100 if entry > 0 else 0.0
+        pnl = (entry - close_price) * size
+
+    trade["status"] = "closed"
+    trade["closed_at"] = datetime.now(timezone.utc).isoformat()
+    trade["close_price"] = round(close_price, 4)
+    trade["close_reason"] = reason
+    trade["pnl"] = round(pnl, 2)
+    trade["pnl_pct"] = round(pnl_pct, 2)
+
+    _trades[trade_id] = trade
+    _save_trades()
+    return trade
+
+
 def _load_paper_config() -> dict:
     if PAPER_CONFIG_FILE.exists():
         try:

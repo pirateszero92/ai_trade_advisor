@@ -884,6 +884,9 @@ class _TradeCard extends StatelessWidget {
       } else if (closeReason.contains('SL')) {
         statusLabel = '🛑 SL HIT';
         statusColor = AppColors.bearish;
+      } else if (closeReason.toLowerCase().contains('invalidation') || closeReason.toLowerCase().contains('invalid')) {
+        statusLabel = '⚠️ INVALIDATED';
+        statusColor = const Color(0xFFFF9900);
       } else {
         statusLabel = 'CLOSED';
         statusColor = Colors.white54;
