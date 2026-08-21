@@ -1,11 +1,14 @@
-﻿FROM python:3.12-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    g++ \
+    curl \
     libpq-dev \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Python dependencies
