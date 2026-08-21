@@ -4,11 +4,12 @@ __pycache__/
 *$py.class
 .venv/
 venv/
-env/
+# Environments & Secrets
 .env
+.env.*
 .env.local
-
-# Secrets
+!.env.example
+!**/.env.example
 *.key
 *.pem
 
