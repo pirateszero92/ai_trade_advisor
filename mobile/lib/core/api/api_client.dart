@@ -51,7 +51,7 @@ class AppApi {
       return '';
     }
     // 3. Mobile default IP
-    return 'http://192.168.22.84:8000';
+    return 'http://192.168.1.40:8000';
   }
 
   static String url(String path) {
@@ -72,7 +72,7 @@ class AppApi {
         final port = loc.hasPort ? ':${loc.port}' : '';
         return '$scheme://$host$port$clean';
       }
-      return 'ws://192.168.22.84:8000$clean';
+      return 'ws://192.168.1.40:8000$clean';
     }
     final wsBase = base
         .replaceFirst(RegExp(r'^https://', caseSensitive: false), 'wss://')

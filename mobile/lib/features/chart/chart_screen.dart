@@ -194,8 +194,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     });
 
     try {
-      final dio = Dio();
-      final baseUrl = AppApi.baseUrl;
+      final dio = AppApi.dio;
 
       // 1. Fetch OHLCV candles
       final ohlcvResp = await dio.get(
