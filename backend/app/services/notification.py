@@ -1,4 +1,4 @@
-﻿"""Multi-channel notification service supporting FCM (Android), Telegram, and LINE Notify."""
+"""Multi-channel notification service supporting FCM (Android), Telegram, and LINE Notify."""
 
 from typing import Optional
 import httpx
@@ -144,19 +144,22 @@ class NotificationService:
             return False
 
         try:
-            # FCM Legacy HTTP or V1
+            # Format payload for FCM with stringified data map
+            str_data = {str(k): str(v) for k, v in data.items()}
             payload = {
                 "to": "/topics/signals",
                 "notification": {"title": title, "body": body},
-                "data": data,
+                "data": str_data,
             }
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
                     "https://fcm.googleapis.com/fcm/send",
-                    headers={"Authorization": f"key={self.cfg.fcm_server_key}"},
+                    headers={"Authorization": f"key={self.cfg.fcm_server_key.strip()}"},
                     json=payload,
                 )
+                if resp.status_code != 200:
+                    logger.warning(f"[FCM] Push response status {resp.status_code}: {resp.text}")
                 return resp.status_code == 200
         except Exception as e:
-            logger.error(f"Failed to send FCM push: {e}")
+            logger.error(f"[FCM] Failed to send push: {e}")
             return False

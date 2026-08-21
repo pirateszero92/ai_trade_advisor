@@ -1,10 +1,11 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiConfig {
   static const _storage = FlutterSecureStorage();
-  static const _defaultBaseUrl = kIsWeb ? '' : 'http://10.0.2.2:8000'; // Relative on web, 10.0.2.2 on Android
+  static const _defaultBaseUrl = kIsWeb ? '' : 'http://192.168.251.23:8000'; // Default to PC LAN IP on mobile
 
   static Future<String> getBaseUrl() async {
     if (kIsWeb) return '';
@@ -27,17 +28,47 @@ class ApiConfig {
 }
 
 class AppApi {
+  static String? _customBaseUrl;
+
+  static void setBaseUrl(String url) {
+    final trimmed = url.trim().replaceAll(RegExp(r'/$'), '');
+    _customBaseUrl = trimmed;
+  }
+
   static String get baseUrl {
-    if (kIsWeb) return '';
-    return 'http://10.0.2.2:8000';
+    if (kIsWeb) {
+      try {
+        final origin = Uri.base.origin;
+        if (origin.isNotEmpty && !origin.startsWith('null')) {
+          return origin;
+        }
+      } catch (_) {}
+      return '';
+    }
+    if (_customBaseUrl != null && _customBaseUrl!.isNotEmpty) {
+      return _customBaseUrl!;
+    }
+    return 'http://192.168.251.23:8000'; // Default to PC Wi-Fi IP for direct physical phone connection
   }
 
   static String url(String path) {
     final clean = path.startsWith('/') ? path : '/$path';
-    if (kIsWeb) {
-      return clean;
-    }
-    return '$baseUrl$clean';
+    final base = baseUrl;
+    if (base.isEmpty) return clean;
+    return '$base$clean';
+  }
+
+  static Dio? _dioInstance;
+
+  static Dio get dio {
+    _dioInstance ??= Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 15),
+        receiveTimeout: const Duration(seconds: 20),
+        sendTimeout: const Duration(seconds: 15),
+      ),
+    );
+    return _dioInstance!;
   }
 }
 

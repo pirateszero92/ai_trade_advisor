@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -12,7 +13,7 @@ import '../../core/api/api_client.dart';
 
 class SettingsState {
   final String apiBaseUrl;
-  final String aiProvider; // 'lmstudio' | 'gemini' | 'openrouter'
+  final String aiProvider; // 'local' | 'gemini' | 'openrouter'
   final String lmStudioEndpoint;
   final String lmStudioModel;
   final String geminiKey;
@@ -29,14 +30,14 @@ class SettingsState {
   final String lineToken;
 
   const SettingsState({
-    this.apiBaseUrl = 'http://10.0.2.2:8000',
-    this.aiProvider = 'lmstudio',
-    this.lmStudioEndpoint = 'http://10.0.2.2:1234/v1',
-    this.lmStudioModel = 'local-model',
+    this.apiBaseUrl = '',
+    this.aiProvider = 'local',
+    this.lmStudioEndpoint = 'http://host.docker.internal:11434',
+    this.lmStudioModel = 'gpt-oss:120b-cloud',
     this.geminiKey = '',
-    this.geminiModel = 'gemini-1.5-pro',
+    this.geminiModel = 'gemini-2.0-flash',
     this.openRouterKey = '',
-    this.openRouterModel = 'google/gemini-pro-1.5',
+    this.openRouterModel = 'anthropic/claude-3.5-sonnet',
     this.riskPerTrade = 1.0,
     this.maxDailyLoss = 3.0,
     this.maxPositions = 3,
@@ -125,6 +126,9 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
 
   Future<void> save(SettingsState newState) async {
     state = newState;
+    if (newState.apiBaseUrl.isNotEmpty) {
+      AppApi.setBaseUrl(newState.apiBaseUrl);
+    }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('api_base_url', newState.apiBaseUrl);
     await prefs.setString('ai_provider', newState.aiProvider);
@@ -157,8 +161,9 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late TabController _aiTabController;
+  late TabController _brokerTabController;
 
   // Text controllers
   late TextEditingController _apiUrlCtrl;
@@ -172,6 +177,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   late TextEditingController _telegramChatIdCtrl;
   late TextEditingController _lineTokenCtrl;
 
+  // Broker & Exchange controllers
+  late TextEditingController _mt5LoginCtrl;
+  late TextEditingController _mt5PasswordCtrl;
+  late TextEditingController _mt5ServerCtrl;
+  late TextEditingController _mt5PathCtrl;
+  late TextEditingController _binanceKeyCtrl;
+  late TextEditingController _binanceSecretCtrl;
+  late TextEditingController _bybitKeyCtrl;
+  late TextEditingController _bybitSecretCtrl;
+  late TextEditingController _alpacaKeyCtrl;
+  late TextEditingController _alpacaSecretCtrl;
+  late TextEditingController _alpacaBaseUrlCtrl;
+
   bool _initialized = false;
 
   List<Map<String, dynamic>> _watchlist = [];
@@ -180,6 +198,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   void initState() {
     super.initState();
     _aiTabController = TabController(length: 3, vsync: this);
+    _brokerTabController = TabController(length: 3, vsync: this);
     _apiUrlCtrl = TextEditingController();
     _lmEndpointCtrl = TextEditingController();
     _lmModelCtrl = TextEditingController();
@@ -190,7 +209,90 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     _telegramTokenCtrl = TextEditingController();
     _telegramChatIdCtrl = TextEditingController();
     _lineTokenCtrl = TextEditingController();
+
+    _mt5LoginCtrl = TextEditingController();
+    _mt5PasswordCtrl = TextEditingController();
+    _mt5ServerCtrl = TextEditingController();
+    _mt5PathCtrl = TextEditingController(text: r'C:/Program Files/MetaTrader 5/terminal64.exe');
+    _binanceKeyCtrl = TextEditingController();
+    _binanceSecretCtrl = TextEditingController();
+    _bybitKeyCtrl = TextEditingController();
+    _bybitSecretCtrl = TextEditingController();
+    _alpacaKeyCtrl = TextEditingController();
+    _alpacaSecretCtrl = TextEditingController();
+    _alpacaBaseUrlCtrl = TextEditingController(text: 'https://paper-api.alpaca.markets');
+
+    _loadAllSettings();
     _fetchWatchlist();
+  }
+
+  Future<void> _loadAllSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    const storage = FlutterSecureStorage();
+
+    // 1. Preload local SharedPreferences
+    if (kIsWeb) {
+      final origin = Uri.base.origin;
+      _apiUrlCtrl.text = (origin.isNotEmpty && !origin.startsWith('null')) ? origin : 'http://localhost:3000';
+    } else {
+      _apiUrlCtrl.text = prefs.getString('api_base_url') ?? 'http://192.168.251.23:8000';
+    }
+    _lmEndpointCtrl.text = prefs.getString('lm_studio_endpoint') ?? 'http://host.docker.internal:11434';
+    _lmModelCtrl.text = prefs.getString('lm_studio_model') ?? 'gpt-oss:120b-cloud';
+    _geminiModelCtrl.text = prefs.getString('gemini_model') ?? 'gemini-2.0-flash';
+    _openRouterModelCtrl.text = prefs.getString('openrouter_model') ?? 'anthropic/claude-3.5-sonnet';
+    _telegramTokenCtrl.text = prefs.getString('telegram_token') ?? '';
+    _telegramChatIdCtrl.text = prefs.getString('telegram_chat_id') ?? '';
+    _lineTokenCtrl.text = prefs.getString('line_token') ?? '';
+    _geminiKeyCtrl.text = await storage.read(key: 'gemini_key') ?? '';
+    _openRouterKeyCtrl.text = await storage.read(key: 'openrouter_key') ?? '';
+
+    final savedProvider = prefs.getString('ai_provider') ?? 'local';
+    final tabIndex = {'local': 0, 'lmstudio': 0, 'openai': 0, 'gemini': 1, 'openrouter': 2}[savedProvider] ?? 0;
+    _aiTabController.animateTo(tabIndex);
+
+    // 2. Fetch live backend configuration to sync
+    try {
+      final dio = Dio();
+      final resp = await dio.get(AppApi.url('/api/v1/settings/llm/config'));
+      final data = resp.data as Map<String, dynamic>;
+      if (mounted) {
+        setState(() {
+          final ep = data['local_endpoint'] as String?;
+          final m = data['local_model'] as String?;
+          final gk = data['gemini_key'] as String?;
+          final gm = data['gemini_model'] as String?;
+          final ok = data['openrouter_key'] as String?;
+          final om = data['openrouter_model'] as String?;
+
+          if (ep != null && ep.isNotEmpty) _lmEndpointCtrl.text = ep;
+          if (m != null && m.isNotEmpty) _lmModelCtrl.text = m;
+          if (gk != null && gk.isNotEmpty) _geminiKeyCtrl.text = gk;
+          if (gm != null && gm.isNotEmpty) _geminiModelCtrl.text = gm;
+          if (ok != null && ok.isNotEmpty) _openRouterKeyCtrl.text = ok;
+          if (om != null && om.isNotEmpty) _openRouterModelCtrl.text = om;
+        });
+      }
+
+      // Fetch Broker configuration
+      final bResp = await dio.get(AppApi.url('/api/v1/settings/brokers/config'));
+      final bData = bResp.data as Map<String, dynamic>;
+      if (mounted) {
+        setState(() {
+          if (bData['mt5_login'] != null && bData['mt5_login'] != 0) _mt5LoginCtrl.text = bData['mt5_login'].toString();
+          if (bData['mt5_password'] != null) _mt5PasswordCtrl.text = bData['mt5_password'].toString();
+          if (bData['mt5_server'] != null) _mt5ServerCtrl.text = bData['mt5_server'].toString();
+          if (bData['mt5_path'] != null) _mt5PathCtrl.text = bData['mt5_path'].toString();
+          if (bData['binance_api_key'] != null) _binanceKeyCtrl.text = bData['binance_api_key'].toString();
+          if (bData['binance_api_secret'] != null) _binanceSecretCtrl.text = bData['binance_api_secret'].toString();
+          if (bData['bybit_api_key'] != null) _bybitKeyCtrl.text = bData['bybit_api_key'].toString();
+          if (bData['bybit_api_secret'] != null) _bybitSecretCtrl.text = bData['bybit_api_secret'].toString();
+          if (bData['alpaca_api_key'] != null) _alpacaKeyCtrl.text = bData['alpaca_api_key'].toString();
+          if (bData['alpaca_api_secret'] != null) _alpacaSecretCtrl.text = bData['alpaca_api_secret'].toString();
+          if (bData['alpaca_base_url'] != null) _alpacaBaseUrlCtrl.text = bData['alpaca_base_url'].toString();
+        });
+      }
+    } catch (_) {}
   }
 
   Future<void> _fetchWatchlist() async {
@@ -336,28 +438,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     );
   }
 
-  void _initControllers(SettingsState s) {
-    if (_initialized) return;
-    _initialized = true;
-    _apiUrlCtrl.text = s.apiBaseUrl;
-    _lmEndpointCtrl.text = s.lmStudioEndpoint;
-    _lmModelCtrl.text = s.lmStudioModel;
-    _geminiKeyCtrl.text = s.geminiKey;
-    _geminiModelCtrl.text = s.geminiModel;
-    _openRouterKeyCtrl.text = s.openRouterKey;
-    _openRouterModelCtrl.text = s.openRouterModel;
-    _telegramTokenCtrl.text = s.telegramToken;
-    _telegramChatIdCtrl.text = s.telegramChatId;
-    _lineTokenCtrl.text = s.lineToken;
-
-    // Set AI provider tab
-    final tabIndex = {'lmstudio': 0, 'gemini': 1, 'openrouter': 2}[s.aiProvider] ?? 0;
-    _aiTabController.animateTo(tabIndex);
-  }
-
   @override
   void dispose() {
     _aiTabController.dispose();
+    _brokerTabController.dispose();
     _apiUrlCtrl.dispose();
     _lmEndpointCtrl.dispose();
     _lmModelCtrl.dispose();
@@ -368,6 +452,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     _telegramTokenCtrl.dispose();
     _telegramChatIdCtrl.dispose();
     _lineTokenCtrl.dispose();
+
+    _mt5LoginCtrl.dispose();
+    _mt5PasswordCtrl.dispose();
+    _mt5ServerCtrl.dispose();
+    _mt5PathCtrl.dispose();
+    _binanceKeyCtrl.dispose();
+    _binanceSecretCtrl.dispose();
+    _bybitKeyCtrl.dispose();
+    _bybitSecretCtrl.dispose();
+    _alpacaKeyCtrl.dispose();
+    _alpacaSecretCtrl.dispose();
+    _alpacaBaseUrlCtrl.dispose();
     super.dispose();
   }
 
@@ -406,12 +502,30 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'openrouter_model': _openRouterModelCtrl.text.trim(),
         },
       );
+
+      // Save Broker & Exchange settings
+      await dio.post(
+        AppApi.url('/api/v1/settings/brokers/config'),
+        data: {
+          'mt5_login': int.tryParse(_mt5LoginCtrl.text.trim()) ?? 0,
+          'mt5_password': _mt5PasswordCtrl.text.trim(),
+          'mt5_server': _mt5ServerCtrl.text.trim(),
+          'mt5_path': _mt5PathCtrl.text.trim(),
+          'binance_api_key': _binanceKeyCtrl.text.trim(),
+          'binance_api_secret': _binanceSecretCtrl.text.trim(),
+          'bybit_api_key': _bybitKeyCtrl.text.trim(),
+          'bybit_api_secret': _bybitSecretCtrl.text.trim(),
+          'alpaca_api_key': _alpacaKeyCtrl.text.trim(),
+          'alpaca_api_secret': _alpacaSecretCtrl.text.trim(),
+          'alpaca_base_url': _alpacaBaseUrlCtrl.text.trim(),
+        },
+      );
     } catch (_) {}
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Settings saved & synced with AI Engine ✓'),
+          content: Text('Settings & Broker connections saved ✓'),
           backgroundColor: AppColors.bullish,
           duration: Duration(seconds: 2),
         ),
@@ -531,11 +645,60 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     }
   }
 
+  Future<void> _testBrokerConnection(String brokerType) async {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Testing ${brokerType.toUpperCase()} connection...'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+
+    try {
+      final dio = Dio();
+      final resp = await dio.post(
+        AppApi.url('/api/v1/settings/brokers/test'),
+        data: {
+          'broker_type': brokerType,
+          'login': int.tryParse(_mt5LoginCtrl.text.trim()),
+          'server': _mt5ServerCtrl.text.trim(),
+          'password': _mt5PasswordCtrl.text.trim(),
+          'api_key': brokerType == 'binance'
+              ? _binanceKeyCtrl.text.trim()
+              : (brokerType == 'bybit' ? _bybitKeyCtrl.text.trim() : _alpacaKeyCtrl.text.trim()),
+          'api_secret': brokerType == 'binance'
+              ? _binanceSecretCtrl.text.trim()
+              : (brokerType == 'bybit' ? _bybitSecretCtrl.text.trim() : _alpacaSecretCtrl.text.trim()),
+          'base_url': _alpacaBaseUrlCtrl.text.trim(),
+        },
+      );
+
+      final ok = resp.data['status'] == 'ok';
+      final msg = resp.data['message']?.toString() ?? 'Tested';
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: ok ? AppColors.bullish : AppColors.bearish,
+            content: Text(
+              msg,
+              style: TextStyle(color: ok ? Colors.black : Colors.white, fontWeight: FontWeight.bold),
+            ),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(backgroundColor: AppColors.bearish, content: Text('Connection test failed: $e')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
-    _initControllers(settings);
-
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
@@ -555,7 +718,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           // ---- Backend Connection ----
           _sectionHeader('🔌 Backend Connection'),
           _card([
-            _textField('API Base URL', _apiUrlCtrl, hint: 'http://10.0.2.2:8000'),
+            _textField('API Base URL', _apiUrlCtrl, hint: 'http://192.168.251.23:8000'),
             const SizedBox(height: 8),
             SizedBox(
               width: double.infinity,
@@ -576,7 +739,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             TabBar(
               controller: _aiTabController,
               tabs: const [
-                Tab(text: 'LM Studio'),
+                Tab(text: 'OpenAI'),
                 Tab(text: 'Gemini'),
                 Tab(text: 'OpenRouter'),
               ],
@@ -589,16 +752,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               child: TabBarView(
                 controller: _aiTabController,
                 children: [
-                  // LM Studio tab
+                  // OpenAI tab (Ollama / LM Studio / OpenAI)
                   Padding(
                     padding: const EdgeInsets.only(top: 12),
                     child: Column(
                       children: [
-                        _textField('Endpoint', _lmEndpointCtrl, hint: 'http://10.0.2.2:1234/v1'),
+                        _textField('Endpoint (Ollama / LM Studio / OpenAI)', _lmEndpointCtrl, hint: 'http://10.0.2.2:11434 หรือ http://10.0.2.2:1234/v1'),
                         const SizedBox(height: 8),
-                        _textField('Model', _lmModelCtrl, hint: 'local-model'),
+                        _textField('Model Name', _lmModelCtrl, hint: 'gpt-oss:120b-cloud หรือ gpt-4o-mini'),
                         const SizedBox(height: 8),
-                        _testBtn('LM Studio'),
+                        _testBtn('OpenAI'),
                       ],
                     ),
                   ),
@@ -659,9 +822,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: () {
-                      // TODO: open prompt editor
-                    },
+                    onPressed: _openPromptEditor,
                     icon: const Icon(Icons.edit, size: 16),
                     label: const Text('Edit Prompt'),
                     style: OutlinedButton.styleFrom(foregroundColor: Colors.white70),
@@ -670,7 +831,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 const SizedBox(width: 8),
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: () => _testConnection('Prompt'),
+                    onPressed: _testPrompt,
                     icon: const Icon(Icons.play_arrow, size: 16),
                     label: const Text('Test Prompt'),
                     style: OutlinedButton.styleFrom(foregroundColor: AppColors.bullish),
@@ -734,9 +895,22 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     icon: Icons.science_outlined,
                     selected: settings.isPaperMode,
                     color: AppColors.neutral,
-                    onTap: () => ref
-                        .read(settingsProvider.notifier)
-                        .save(settings.copyWith(isPaperMode: true)),
+                    onTap: () async {
+                      ref.read(settingsProvider.notifier).save(settings.copyWith(isPaperMode: true));
+                      try {
+                        final dio = Dio();
+                        await dio.post(AppApi.url('/api/v1/settings/trading-mode'), data: {'mode': 'paper'});
+                      } catch (_) {}
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            backgroundColor: AppColors.neutral,
+                            content: Text('🧪 Switched to Paper Trading Mode', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+                            duration: Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                    },
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -765,6 +939,170 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                   ],
                 ),
               ),
+          ]),
+
+          const SizedBox(height: 16),
+
+          // ---- Broker & Exchange Accounts ----
+          _sectionHeader('🏢 Broker & Exchange Accounts (เชื่อมต่อโบรกเกอร์)'),
+          _card([
+            TabBar(
+              controller: _brokerTabController,
+              indicatorColor: AppColors.bullish,
+              labelColor: AppColors.bullish,
+              unselectedLabelColor: Colors.white38,
+              tabs: const [
+                Tab(text: '💱 MetaTrader 5'),
+                Tab(text: '🪙 Binance/Bybit'),
+                Tab(text: '📈 Alpaca'),
+              ],
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 290,
+              child: TabBarView(
+                controller: _brokerTabController,
+                children: [
+                  // 1. MetaTrader 5 Tab
+                  SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.hub_outlined, color: Color(0xFF00E5FF), size: 16),
+                            SizedBox(width: 6),
+                            Text('MetaTrader 5 Direct Bridge (Forex & Gold)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white)),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        _textField(
+                          'MT5 Login / Account ID',
+                          _mt5LoginCtrl,
+                          hint: 'e.g. 5123984',
+                        ),
+                        const SizedBox(height: 10),
+                        _textField(
+                          'MT5 Password',
+                          _mt5PasswordCtrl,
+                          hint: '••••••••',
+                          obscure: true,
+                        ),
+                        const SizedBox(height: 10),
+                        _textField(
+                          'MT5 Server Name (Broker)',
+                          _mt5ServerCtrl,
+                          hint: 'e.g. ICMarketsSC-Demo หรือ Exness-Real',
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: () => _testBrokerConnection('mt5'),
+                                icon: const Icon(Icons.cable, size: 16),
+                                label: const Text('Test MT5 Bridge'),
+                                style: OutlinedButton.styleFrom(foregroundColor: AppColors.bullish),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // 2. Binance / Bybit Tab
+                  SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.currency_bitcoin, color: Color(0xFFF0B90B), size: 16),
+                            SizedBox(width: 6),
+                            Text('Binance / Bybit API Connection (Crypto)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white)),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        _textField(
+                          'Binance / Bybit API Key',
+                          _binanceKeyCtrl,
+                          hint: 'vmPU... or API Key',
+                        ),
+                        const SizedBox(height: 10),
+                        _textField(
+                          'API Secret Key',
+                          _binanceSecretCtrl,
+                          hint: '••••••••',
+                          obscure: true,
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: () => _testBrokerConnection('binance'),
+                                icon: const Icon(Icons.cable, size: 16),
+                                label: const Text('Test Binance API'),
+                                style: OutlinedButton.styleFrom(foregroundColor: AppColors.bullish),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // 3. Alpaca Tab
+                  SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.trending_up, color: Color(0xFFFFD700), size: 16),
+                            SizedBox(width: 6),
+                            Text('Alpaca Markets (US Equities & Stocks)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white)),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        _textField(
+                          'Alpaca API Key ID',
+                          _alpacaKeyCtrl,
+                          hint: 'PK...',
+                        ),
+                        const SizedBox(height: 10),
+                        _textField(
+                          'Alpaca Secret Key',
+                          _alpacaSecretCtrl,
+                          hint: '••••••••',
+                          obscure: true,
+                        ),
+                        const SizedBox(height: 10),
+                        _textField(
+                          'Alpaca Base URL',
+                          _alpacaBaseUrlCtrl,
+                          hint: 'https://paper-api.alpaca.markets',
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: () => _testBrokerConnection('alpaca'),
+                                icon: const Icon(Icons.cable, size: 16),
+                                label: const Text('Test Alpaca API'),
+                                style: OutlinedButton.styleFrom(foregroundColor: AppColors.bullish),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ]),
 
           const SizedBox(height: 16),
@@ -1012,27 +1350,337 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   void _confirmLiveMode(SettingsState settings) {
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (dialogCtx) => AlertDialog(
         backgroundColor: AppColors.surface,
-        title: const Text('Enable Live Trading?', style: TextStyle(color: Colors.white)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: const Row(
+          children: [
+            Icon(Icons.bolt, color: AppColors.bearish, size: 22),
+            SizedBox(width: 8),
+            Text('Enable Live Trading?', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+          ],
+        ),
         content: const Text(
-          'This will use real funds. Make sure you understand the risks before proceeding.',
-          style: TextStyle(color: Colors.white70),
+          'This will enable LIVE trading mode using connected exchange accounts (Alpaca / Binance / MT5). Orders will be executed using real funds.\n\nAre you sure you want to proceed?',
+          style: TextStyle(color: Colors.white70, fontSize: 13, height: 1.4),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
+            onPressed: () => Navigator.of(dialogCtx).pop(),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
           ),
-          TextButton(
-            onPressed: () {
-              ref.read(settingsProvider.notifier).save(settings.copyWith(isPaperMode: false));
-              Navigator.pop(context);
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.of(dialogCtx).pop();
+              await ref.read(settingsProvider.notifier).save(settings.copyWith(isPaperMode: false));
+              try {
+                final dio = Dio();
+                await dio.post(AppApi.url('/api/v1/settings/trading-mode'), data: {'mode': 'live'});
+              } catch (_) {}
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    backgroundColor: AppColors.bearish,
+                    content: Text('⚡ LIVE TRADING MODE ACTIVATED (Real Funds)', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                    duration: Duration(seconds: 3),
+                  ),
+                );
+              }
             },
-            child: const Text('Enable Live', style: TextStyle(color: AppColors.bearish)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.bearish,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+            ),
+            child: const Text('Enable Live Trading', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
           ),
         ],
       ),
+    );
+  }
+
+  Future<void> _openPromptEditor() async {
+    String content = '';
+    String promptName = 'advisor_v1.md';
+    bool isLoading = true;
+    bool isFetched = false;
+    final textCtrl = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            if (!isFetched) {
+              isFetched = true;
+              Dio().get(AppApi.url('/api/v1/settings/prompts/active')).then((resp) {
+                setModalState(() {
+                  content = resp.data['content']?.toString() ?? '';
+                  promptName = resp.data['name']?.toString() ?? 'advisor_v1.md';
+                  textCtrl.text = content;
+                  isLoading = false;
+                });
+              }).catchError((e) {
+                setModalState(() {
+                  content = '# Error loading prompt: $e';
+                  textCtrl.text = content;
+                  isLoading = false;
+                });
+              });
+            }
+
+            return Dialog(
+              backgroundColor: const Color(0xFF141923),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: Color(0xFF252D3D))),
+              insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+              child: Container(
+                width: 760,
+                height: 620,
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.edit_note, color: Color(0xFF2E82FE), size: 24),
+                        const SizedBox(width: 8),
+                        Text('System Prompt Editor ($promptName)', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white)),
+                        const Spacer(),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: AppColors.orderBlock.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text('${textCtrl.text.length} chars', style: const TextStyle(fontSize: 11, color: AppColors.orderBlock)),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          icon: const Icon(Icons.close, color: Colors.white54),
+                          onPressed: () => Navigator.pop(ctx),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    if (isLoading)
+                      const Expanded(
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              CircularProgressIndicator(color: AppColors.bullish),
+                              SizedBox(height: 12),
+                              Text('Loading active prompt...', style: TextStyle(color: Colors.white54)),
+                            ],
+                          ),
+                        ),
+                      )
+                    else
+                      Expanded(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0D111A),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: const Color(0xFF252D3D)),
+                          ),
+                          child: TextField(
+                            controller: textCtrl,
+                            maxLines: null,
+                            expands: true,
+                            style: const TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'monospace', height: 1.45),
+                            decoration: const InputDecoration(
+                              contentPadding: EdgeInsets.all(14),
+                              border: InputBorder.none,
+                              hintText: 'Enter AI trading advisor system prompt instructions...',
+                            ),
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        TextButton.icon(
+                          onPressed: () async {
+                            try {
+                              await Dio().post(AppApi.url('/api/v1/settings/prompts/reload'));
+                              final resp = await Dio().get(AppApi.url('/api/v1/settings/prompts/active'));
+                              setModalState(() {
+                                content = resp.data['content']?.toString() ?? '';
+                                textCtrl.text = content;
+                              });
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(backgroundColor: AppColors.bullish, content: Text('Prompt reloaded from disk!')),
+                                );
+                              }
+                            } catch (_) {}
+                          },
+                          icon: const Icon(Icons.refresh, size: 16),
+                          label: const Text('Reload from Disk'),
+                          style: TextButton.styleFrom(foregroundColor: Colors.white60),
+                        ),
+                        const Spacer(),
+                        TextButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton.icon(
+                          onPressed: isLoading
+                              ? null
+                              : () async {
+                                  try {
+                                    final newContent = textCtrl.text;
+                                    await Dio().post(
+                                      AppApi.url('/api/v1/settings/prompts/save'),
+                                      data: {
+                                        'name': promptName,
+                                        'content': newContent,
+                                      },
+                                    );
+                                    if (ctx.mounted) {
+                                      Navigator.pop(ctx);
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(
+                                          backgroundColor: AppColors.bullish,
+                                          content: Text('✅ System Prompt saved & active in AI Advisor!'),
+                                        ),
+                                      );
+                                    }
+                                  } catch (e) {
+                                    if (ctx.mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(backgroundColor: AppColors.bearish, content: Text('Save failed: $e')),
+                                      );
+                                    }
+                                  }
+                                },
+                          icon: const Icon(Icons.save, size: 16, color: Colors.black),
+                          label: const Text('Save Changes', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+                          style: ElevatedButton.styleFrom(backgroundColor: AppColors.bullish),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _testPrompt() async {
+    bool isTesting = true;
+    bool isTriggered = false;
+    String responseText = '';
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            if (!isTriggered) {
+              isTriggered = true;
+              Dio(BaseOptions(connectTimeout: const Duration(seconds: 90), receiveTimeout: const Duration(seconds: 90)))
+                  .post(AppApi.url('/api/v1/settings/prompts/test'))
+                  .then((resp) {
+                setModalState(() {
+                  isTesting = false;
+                  responseText = resp.data['ai_response']?.toString() ?? 'No response returned.';
+                });
+              }).catchError((e) {
+                setModalState(() {
+                  isTesting = false;
+                  responseText = 'Prompt Test Failed: $e\n\nPlease check that your configured AI provider is running and reachable.';
+                });
+              });
+            }
+
+            return Dialog(
+              backgroundColor: const Color(0xFF141923),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: Color(0xFF252D3D))),
+              child: Container(
+                width: 620,
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.smart_toy_outlined, color: AppColors.bullish, size: 24),
+                        const SizedBox(width: 8),
+                        const Text('AI Advisor Prompt Test', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white)),
+                        const Spacer(),
+                        IconButton(icon: const Icon(Icons.close, color: Colors.white54), onPressed: () => Navigator.pop(ctx)),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    if (isTesting)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 36),
+                        child: Center(
+                          child: Column(
+                            children: [
+                              CircularProgressIndicator(color: AppColors.bullish),
+                              SizedBox(height: 16),
+                              Text('Testing active system prompt with AI Engine...', style: TextStyle(color: Colors.white70)),
+                            ],
+                          ),
+                        ),
+                      )
+                    else ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1E2533),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: const Color(0xFF2E82FE).withOpacity(0.4)),
+                        ),
+                        child: const Row(
+                          children: [
+                            Icon(Icons.input, size: 14, color: Color(0xFF2E82FE)),
+                            SizedBox(width: 6),
+                            Text('Test Input: BTC/USDT (LONG) Confluence 80/100', style: TextStyle(fontSize: 12, color: Color(0xFF2E82FE), fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Container(
+                        width: double.infinity,
+                        constraints: const BoxConstraints(maxHeight: 300),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0D111A),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFF252D3D)),
+                        ),
+                        child: SingleChildScrollView(
+                          child: Text(
+                            responseText,
+                            style: const TextStyle(fontSize: 13, color: Colors.white, height: 1.45),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: ElevatedButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1E2533)),
+                          child: const Text('Close', style: TextStyle(color: Colors.white)),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 }

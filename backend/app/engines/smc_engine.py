@@ -578,26 +578,38 @@ class SMCEngine:
         if len(df) < 5:
             return
 
-        last_candle = df.iloc[-1]
-        prev_candles = df.iloc[-6:-1]
+        # Check last 3 candles for liquidity sweep against prior window
+        for idx in range(-1, -4, -1):
+            if abs(idx) >= len(df):
+                break
+            c = df.iloc[idx]
+            c_high = float(c["high"])
+            c_low = float(c["low"])
+            c_close = float(c["close"])
+            
+            p_start = max(0, len(df) + idx - 6)
+            p_end = len(df) + idx
+            if p_end <= p_start:
+                continue
+            prev_window = df.iloc[p_start:p_end]
+            if prev_window.empty:
+                continue
+            p_high = float(prev_window["high"].max())
+            p_low = float(prev_window["low"].min())
 
-        prev_high = prev_candles["high"].max()
-        prev_low = prev_candles["low"].min()
-        last_close = float(last_candle["close"])
-        last_high = float(last_candle["high"])
-        last_low = float(last_candle["low"])
+            # Swept above and closed back below — bearish sweep
+            if c_high > p_high and c_close < p_high:
+                signal.liquidity_swept = True
+                signal.sweep_direction = "high"
+                signal.sweep_price = p_high
+                break
 
-        # Swept above and closed back below — bearish sweep
-        if last_high > prev_high and last_close < prev_high:
-            signal.liquidity_swept = True
-            signal.sweep_direction = "high"
-            signal.sweep_price = float(prev_high)
-
-        # Swept below and closed back above — bullish sweep
-        elif last_low < prev_low and last_close > prev_low:
-            signal.liquidity_swept = True
-            signal.sweep_direction = "low"
-            signal.sweep_price = float(prev_low)
+            # Swept below and closed back above — bullish sweep
+            elif c_low < p_low and c_close > p_low:
+                signal.liquidity_swept = True
+                signal.sweep_direction = "low"
+                signal.sweep_price = p_low
+                break
 
     # ------------------------------------------------------------------
     # Trade Setup Computation

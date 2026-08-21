@@ -12,6 +12,7 @@ from typing import Literal
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
+from app.core.config import get_settings
 from app.engines.ai_engine import AIEngine
 from app.engines.market_data import MarketDataEngine
 from app.engines.smc_engine import SMCEngine
@@ -23,6 +24,14 @@ _market = MarketDataEngine()
 
 # Connection registry
 _connections: set[WebSocket] = set()
+
+
+def _is_ws_authenticated(websocket: WebSocket) -> bool:
+    cfg = get_settings()
+    if cfg.app_env == "development":
+        return True
+    key = websocket.query_params.get("api_key") or websocket.query_params.get("token")
+    return bool(key and key == cfg.app_secret_key)
 
 
 async def broadcast(message: dict) -> None:
@@ -44,14 +53,11 @@ async def broadcast(message: dict) -> None:
 async def ws_signals(websocket: WebSocket):
     """
     WebSocket endpoint for real-time signal streaming.
-
-    Accepts JSON commands from the client:
-        {"action": "subscribe", "symbol": "BTC/USDT", "timeframe": "1H", "htf_bias": "bullish"}
-        {"action": "unsubscribe"}
-        {"action": "ping"}
-
-    Sends signal updates every ``interval`` seconds.
     """
+    if not _is_ws_authenticated(websocket):
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
     await websocket.accept()
     _connections.add(websocket)
     logger.info(f"[WS] Client connected. Total: {len(_connections)}")
@@ -65,7 +71,7 @@ async def ws_signals(websocket: WebSocket):
                 sym = subscription.get("symbol", "BTC/USDT")
                 tf = subscription.get("timeframe", "1H")
                 bias = subscription.get("htf_bias", "neutral")
-                interval = subscription.get("interval", 60)
+                interval = max(5, int(subscription.get("interval", 60)))
 
                 df = await _market.get_ohlcv(symbol=sym, timeframe=tf)
                 if not df.empty:
@@ -80,7 +86,12 @@ async def ws_signals(websocket: WebSocket):
     try:
         while True:
             raw = await websocket.receive_text()
-            msg = json.loads(raw)
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                await websocket.send_text(json.dumps({"type": "error", "message": "Invalid JSON frame"}))
+                continue
+
             action = msg.get("action")
 
             if action == "subscribe":
@@ -120,14 +131,22 @@ async def ws_signals(websocket: WebSocket):
 async def ws_chat(websocket: WebSocket):
     """
     WebSocket endpoint for real-time AI advisor chat.
-    Accepts: {"messages": [...]} and streams back the AI response.
     """
+    if not _is_ws_authenticated(websocket):
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
     await websocket.accept()
     logger.info("[WS] Chat client connected")
     try:
         while True:
             raw = await websocket.receive_text()
-            msg = json.loads(raw)
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                await websocket.send_text(json.dumps({"type": "error", "message": "Invalid JSON frame"}))
+                continue
+
             messages = msg.get("messages", [])
             if not messages:
                 await websocket.send_text(json.dumps({"type": "error", "message": "No messages provided"}))

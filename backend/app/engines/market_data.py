@@ -29,14 +29,21 @@ def normalize_yfinance_symbol(symbol: str, market_type: str) -> str:
     """Normalize any symbol format to Yahoo Finance ticker."""
     s = symbol.upper().replace("/", "").replace("-", "")
 
-    if market_type == "crypto" or "USDT" in s or "USD" in s:
-        base = s.replace("USDT", "").replace("USD", "")
-        return f"{base}-USD"
-    elif market_type == "forex" or s in ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD"]:
+    if market_type == "forex" or s in ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD"]:
         if s == "XAUUSD":
             return "GC=F"
         return f"{s}=X"
+    elif market_type == "crypto" or "USDT" in s:
+        base = s.replace("USDT", "").replace("USD", "")
+        return f"{base}-USD"
+    elif "/" in symbol:
+        base = s.replace("USD", "").replace("USDT", "")
+        return f"{base}-USD"
     return symbol
+
+
+_TICKER_CACHE: dict[str, tuple[float, dict]] = {}
+CACHE_TTL_SECONDS = 2.5
 
 
 class MarketDataEngine:
@@ -78,35 +85,45 @@ class MarketDataEngine:
             if not df.empty and len(df) >= 5:
                 return df
         except Exception as e:
-            logger.warning(f"[MarketData] Yahoo Finance fetch failed for {symbol}: {e}")
+            logger.warning(f"[MarketData] Yahoo Finance fallback failed for {symbol}: {e}")
 
-        # 3. Final Fallback: Synthetic realistic data (prevents blank UI)
-        logger.warning(f"[MarketData] Generating synthetic fallback candles for {symbol}")
-        return self._generate_fallback_data(symbol, limit)
+        # 3. Final Fallback: Return empty dataframe safely (no fake data into strategy)
+        logger.warning(f"[MarketData] All market data providers failed for {symbol}")
+        return pd.DataFrame()
 
     async def get_ticker_24h(
         self,
         symbol: str,
         market_type: str = "crypto",
     ) -> dict:
-        """Fetch exact 24h ticker: lastPrice, priceChangePercent, highPrice, lowPrice, volume."""
+        """Fetch exact 24h ticker with fast caching and non-blocking executors."""
+        import time
+        now = time.time()
+        cache_key = f"{symbol}:{market_type}"
+
+        # 1. Return from memory cache if fresh
+        if cache_key in _TICKER_CACHE:
+            ts, cached_data = _TICKER_CACHE[cache_key]
+            if now - ts < CACHE_TTL_SECONDS:
+                return cached_data
+
         import httpx
         clean_sym = symbol.replace("/", "").replace("-", "").upper()
 
-        if market_type == "crypto":
+        # 2. Crypto lookups (Binance / Bybit)
+        if market_type == "crypto" or ("/" in symbol and "USD" in clean_sym and clean_sym not in ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY"]):
             binance_hosts = [
                 "https://data-api.binance.vision",
                 "https://api1.binance.com",
                 "https://api.binance.com",
-                "https://api2.binance.com",
             ]
             for host in binance_hosts:
                 try:
-                    async with httpx.AsyncClient(timeout=3.0) as client:
+                    async with httpx.AsyncClient(timeout=1.2) as client:
                         resp = await client.get(f"{host}/api/v3/ticker/24hr", params={"symbol": clean_sym})
                         if resp.status_code == 200:
                             data = resp.json()
-                            return {
+                            res = {
                                 "symbol": symbol,
                                 "price": float(data["lastPrice"]),
                                 "change_24h": float(data["priceChangePercent"]),
@@ -114,35 +131,100 @@ class MarketDataEngine:
                                 "low_24h": float(data["lowPrice"]),
                                 "volume_24h": float(data["volume"]),
                             }
+                            _TICKER_CACHE[cache_key] = (now, res)
+                            return res
                 except Exception:
                     continue
 
-        # Fallback to yfinance ticker if crypto direct or stocks/forex
-        try:
-            yf_sym = normalize_yfinance_symbol(symbol, market_type)
-            t = yf.Ticker(yf_sym)
-            fi = t.fast_info
-            last_p = float(fi.last_price or fi.previous_close or 100.0)
-            prev_c = float(fi.previous_close or last_p)
-            chg = ((last_p - prev_c) / prev_c) * 100 if prev_c > 0 else 0.0
+        # 3. Non-blocking ThreadPool Executor for Yahoo Finance (Forex / Gold / Stocks)
+        def _get_yf_fast() -> dict:
+            try:
+                yf_sym = normalize_yfinance_symbol(symbol, market_type)
+                t = yf.Ticker(yf_sym)
+                last_p = 0.0
+                prev_c = 0.0
+                day_h = 0.0
+                day_l = 0.0
+                day_v = 0.0
+                try:
+                    fi = t.fast_info
+                    last_p = float(getattr(fi, "last_price", None) or getattr(fi, "previous_close", None) or 0.0)
+                    prev_c = float(getattr(fi, "previous_close", None) or last_p)
+                    day_h = float(getattr(fi, "day_high", None) or (last_p * 1.01 if last_p > 0 else 0.0))
+                    day_l = float(getattr(fi, "day_low", None) or (last_p * 0.99 if last_p > 0 else 0.0))
+                    day_v = float(getattr(fi, "last_volume", None) or 100000.0)
+                except Exception:
+                    pass
+
+                if last_p <= 0.0:
+                    hist = t.history(period="2d", interval="5m")
+                    if not hist.empty:
+                        last_p = float(hist["Close"].iloc[-1])
+                        prev_c = float(hist["Close"].iloc[0])
+                        day_h = float(hist["High"].max())
+                        day_l = float(hist["Low"].min())
+                        day_v = float(hist["Volume"].sum())
+
+                if last_p > 0.0:
+                    chg = ((last_p - prev_c) / prev_c) * 100 if prev_c > 0 else 0.0
+                    return {
+                        "symbol": symbol,
+                        "price": last_p,
+                        "change_24h": round(chg, 2),
+                        "high_24h": round(day_h, 2),
+                        "low_24h": round(day_l, 2),
+                        "volume_24h": round(day_v, 2),
+                    }
+            except Exception as e:
+                logger.debug(f"[MarketData] YFinance fast ticker fallback for {symbol}: {e}")
             return {
                 "symbol": symbol,
-                "price": last_p,
-                "change_24h": round(chg, 2),
-                "high_24h": float(fi.day_high or last_p * 1.01),
-                "low_24h": float(fi.day_low or last_p * 0.99),
-                "volume_24h": float(fi.last_volume or 100000),
-            }
-        except Exception as e:
-            logger.warning(f"Ticker fallback error for {symbol}: {e}")
-            return {
-                "symbol": symbol,
-                "price": 100.0,
+                "price": 0.0,
                 "change_24h": 0.0,
-                "high_24h": 105.0,
-                "low_24h": 95.0,
-                "volume_24h": 10000,
+                "high_24h": 0.0,
+                "low_24h": 0.0,
+                "volume_24h": 0.0,
             }
+
+        try:
+            loop = asyncio.get_running_loop()
+            yf_res = await loop.run_in_executor(None, _get_yf_fast)
+            if yf_res and yf_res.get("price", 0.0) > 0.0:
+                _TICKER_CACHE[cache_key] = (now, yf_res)
+                return yf_res
+        except Exception as e:
+            logger.debug(f"[MarketData] YF executor error for {symbol}: {e}")
+
+        # 4. Fallback for Forex via Binance Spot token if yfinance fails
+        if clean_sym in ["EURUSD", "GBPUSD", "USDJPY"]:
+            try:
+                spot_sym = "EURUSDT" if clean_sym == "EURUSD" else ("GBPUSDT" if clean_sym == "GBPUSD" else "USDCAD")
+                async with httpx.AsyncClient(timeout=1.5) as client:
+                    resp = await client.get(f"https://data-api.binance.vision/api/v3/ticker/24hr", params={"symbol": spot_sym})
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        res = {
+                            "symbol": symbol,
+                            "price": float(data["lastPrice"]),
+                            "change_24h": float(data["priceChangePercent"]),
+                            "high_24h": float(data["highPrice"]),
+                            "low_24h": float(data["lowPrice"]),
+                            "volume_24h": float(data["volume"]),
+                        }
+                        _TICKER_CACHE[cache_key] = (now, res)
+                        return res
+            except Exception:
+                pass
+
+        # 5. Return 0.0 on error without corrupting cache
+        return {
+            "symbol": symbol,
+            "price": 0.0,
+            "change_24h": 0.0,
+            "high_24h": 0.0,
+            "low_24h": 0.0,
+            "volume_24h": 0.0,
+        }
 
     async def _get_crypto(
         self, symbol: str, timeframe: str, exchange_name: str, limit: int

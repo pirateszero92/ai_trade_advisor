@@ -1,0 +1,18 @@
+{
+  "08455887-b9d6-41c1-b2a4-53bcc28c1377": {
+    "mode": "paper",
+    "symbol": "SOL/USDT",
+    "direction": "short",
+    "entry": 89.33,
+    "stop_loss": 89.98,
+    "take_profit": 87.7,
+    "size": 1000.0,
+    "status": "open",
+    "id": "08455887-b9d6-41c1-b2a4-53bcc28c1377",
+    "tag": "#SOLUSDT-SHORT-101",
+    "opened_at": "2026-08-21T02:59:20.850253+00:00",
+    "notes": "",
+    "pnl": -910.0,
+    "pnl_pct": -1.02
+  }
+}

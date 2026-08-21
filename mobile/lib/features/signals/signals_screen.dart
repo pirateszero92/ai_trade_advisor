@@ -1,6 +1,7 @@
 import 'dart:async';
-import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
 
@@ -16,6 +17,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
   List<Map<String, dynamic>> _positions = [];
   bool _isLoading = true;
   bool _isScanning = false;
+  String? _errorMessage;
   String _selectedFilter = 'all';
   Timer? _liveTimer;
   int _tagCounter = 101;
@@ -34,24 +36,51 @@ class _SignalsScreenState extends State<SignalsScreen> {
     super.dispose();
   }
 
+  static String _formatPrice(double? price) {
+    if (price == null) return '-';
+    if (price < 5.0) {
+      return '\$${price.toStringAsFixed(4)}';
+    }
+    return '\$${price.toStringAsFixed(2)}';
+  }
+
   void _startLiveTicker() {
-    _liveTimer = Timer.periodic(const Duration(milliseconds: 1400), (_) {
+    _liveTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) {
       if (!mounted) return;
-      setState(() {
-        // Minor realistic live tick simulation on signals for interactive feedback
-        for (var s in _signals) {
-          final cur = (s['live_price'] as num?)?.toDouble() ?? (s['entry'] as num?)?.toDouble() ?? 100.0;
-          final delta = (DateTime.now().millisecond % 5 - 2) * 0.05;
-          s['live_price'] = (cur + delta).clamp(1.0, 100000.0);
-        }
-      });
+      _fetchLivePrices();
+      _fetchPositions();
     });
   }
 
-  Future<void> _fetchSignals() async {
-    setState(() => _isLoading = true);
+  Future<void> _fetchLivePrices() async {
     try {
-      final dio = Dio();
+      final dio = AppApi.dio;
+      final resp = await dio.get(AppApi.url('/api/v1/signals/live-prices'));
+      final prices = resp.data['prices'] as Map<String, dynamic>? ?? {};
+      if (prices.isEmpty || !mounted) return;
+
+      setState(() {
+        for (var s in _signals) {
+          final sym = s['symbol']?.toString() ?? '';
+          if (prices.containsKey(sym)) {
+            final pData = prices[sym] as Map<String, dynamic>;
+            final p = (pData['price'] as num?)?.toDouble();
+            if (p != null && p > 0) {
+              s['live_price'] = p;
+            }
+          }
+        }
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _fetchSignals() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final dio = AppApi.dio;
       final resp = await dio.get(AppApi.url('/api/v1/signals/'));
       final List<dynamic> list = resp.data['signals'] ?? [];
       setState(() {
@@ -61,31 +90,43 @@ class _SignalsScreenState extends State<SignalsScreen> {
           return m;
         }).toList();
         _isLoading = false;
+        _errorMessage = null;
       });
+      _fetchLivePrices();
     } catch (e) {
-      setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _errorMessage = 'ไม่สามารถเชื่อมต่อ Scanner Backend ได้ (${AppApi.baseUrl})';
+        });
+      }
     }
   }
 
   Future<void> _fetchPositions() async {
     try {
-      final dio = Dio();
+      final dio = AppApi.dio;
       final resp = await dio.get(AppApi.url('/api/v1/trades/'));
       final List<dynamic> list = resp.data['trades'] ?? [];
-      setState(() {
-        _positions = list
-            .map((e) => Map<String, dynamic>.from(e as Map))
-            .where((p) => (p['status'] ?? 'open') == 'open')
-            .toList();
-      });
+      if (mounted) {
+        setState(() {
+          _positions = list
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .where((p) => (p['status'] ?? 'open') == 'open')
+              .toList();
+        });
+      }
     } catch (_) {}
   }
 
   Future<void> _triggerScan() async {
     setState(() => _isScanning = true);
     try {
-      final dio = Dio();
-      final resp = await dio.post(AppApi.url('/api/v1/signals/scan'));
+      final dio = AppApi.dio;
+      final resp = await dio.post(
+        AppApi.url('/api/v1/signals/scan'),
+        options: Options(receiveTimeout: const Duration(seconds: 30)),
+      );
       final List<dynamic> list = resp.data['signals'] ?? [];
       setState(() {
         _signals = list.map((e) {
@@ -94,6 +135,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
           return m;
         }).toList();
         _isScanning = false;
+        _errorMessage = null;
       });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -117,90 +159,258 @@ class _SignalsScreenState extends State<SignalsScreen> {
     final sym = signal['symbol'] ?? 'BTC/USDT';
     final dir = (signal['direction'] ?? 'LONG').toString().toLowerCase();
     final entry = (signal['live_price'] as num?)?.toDouble() ?? (signal['entry'] as num?)?.toDouble() ?? 100.0;
-    final sl = (signal['stop_loss'] as num?)?.toDouble() ?? (entry * 0.99);
-    final tp = (signal['take_profit'] as num?)?.toDouble() ?? (entry * 1.02);
+    final sl = (signal['stop_loss'] as num?)?.toDouble() ?? (dir == 'long' ? entry * 0.992 : entry * 1.008);
+    final tp = (signal['take_profit'] as num?)?.toDouble() ?? (dir == 'long' ? entry * 1.02 : entry * 0.98);
+    final mType = (signal['market_type'] ?? 'crypto').toString().toLowerCase();
+    final isStock = mType == 'stock';
+    final isForex = mType == 'forex';
+    final unitLabel = isStock ? 'Shares' : (isForex ? 'Lots' : sym.split('/').first);
+
+    double defaultQty = isStock ? 5.0 : (isForex ? 0.10 : 0.10);
+    double qtyStep = isStock ? 1.0 : (isForex ? 0.01 : 0.05);
+    final List<double> presetChips = isStock
+        ? [1.0, 5.0, 10.0, 50.0, 100.0]
+        : (isForex ? [0.01, 0.05, 0.10, 0.50, 1.00] : [0.05, 0.10, 0.25, 0.50, 1.00]);
+
     final tag = '#${sym.replaceAll('/', '')}-${dir.toUpperCase()}-$_tagCounter';
     _tagCounter++;
 
-    final tagCtrl = TextEditingController(text: tag);
-    final sizeCtrl = TextEditingController(text: '1.0');
+    final qtyController = TextEditingController(text: defaultQty.toStringAsFixed(isStock ? 0 : 2));
+    double selectedQty = defaultQty;
 
-    final bool? confirm = await showModalBottomSheet<bool>(
+    final isConfirmed = await showDialog<bool>(
       context: context,
-      backgroundColor: AppColors.surface,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (ctx) {
-        final isBuy = dir == 'long';
-        final col = isBuy ? AppColors.bullish : AppColors.bearish;
-        return Padding(
-          padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom + 16, left: 16, right: 16, top: 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(color: col.withOpacity(0.2), borderRadius: BorderRadius.circular(6), border: Border.all(color: col)),
-                    child: Text(isBuy ? 'BUY / LONG' : 'SELL / SHORT', style: TextStyle(color: col, fontWeight: FontWeight.bold, fontSize: 13)),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDlgState) {
+          final posVal = entry * selectedQty;
+          final riskAmount = (entry - sl).abs() * selectedQty;
+          final gainAmount = (tp - entry).abs() * selectedQty;
+
+          return AlertDialog(
+            backgroundColor: AppColors.surface,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            titlePadding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            contentPadding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            title: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: (dir == 'long' ? AppColors.bullish : AppColors.bearish).withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(6),
                   ),
-                  const SizedBox(width: 10),
-                  Text(sym, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                  const Spacer(),
-                  Text('Mark: \$${entry.toStringAsFixed(2)}', style: const TextStyle(color: AppColors.bullish, fontWeight: FontWeight.bold, fontSize: 13)),
+                  child: Icon(
+                    dir == 'long' ? Icons.arrow_upward : Icons.arrow_downward,
+                    color: dir == 'long' ? AppColors.bullish : AppColors.bearish,
+                    size: 18,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'ยืนยันส่งคำสั่ง $sym (${dir.toUpperCase()})',
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'ระบบจะส่งคำสั่ง Paper Trade ตามการวิเคราะห์ของ SMC Engine:',
+                    style: TextStyle(fontSize: 11, color: Colors.white70),
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF141926),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        _dialogItem('Entry', _formatPrice(entry), Colors.white),
+                        _dialogItem('Stop Loss', _formatPrice(sl), AppColors.bearish),
+                        _dialogItem('Take Profit', _formatPrice(tp), AppColors.bullish),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Order Quantity Header
+                  Text(
+                    'ORDER QUANTITY ($unitLabel)',
+                    style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.textMuted, letterSpacing: 0.8),
+                  ),
+                  const SizedBox(height: 6),
+
+                  // Quantity Control Row (- input +)
+                  Row(
+                    children: [
+                      IconButton.filledTonal(
+                        onPressed: () {
+                          if (selectedQty > qtyStep) {
+                            setDlgState(() {
+                              selectedQty = (selectedQty - qtyStep);
+                              if (selectedQty < qtyStep) selectedQty = qtyStep;
+                              qtyController.text = selectedQty.toStringAsFixed(isStock ? 0 : 2);
+                            });
+                          }
+                        },
+                        icon: const Icon(Icons.remove, size: 16),
+                        style: IconButton.styleFrom(
+                          backgroundColor: const Color(0xFF252D3F),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          minimumSize: const Size(36, 36),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Container(
+                          height: 40,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF141926),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: const Color(0xFF2E82FE).withValues(alpha: 0.5)),
+                          ),
+                          child: TextField(
+                            controller: qtyController,
+                            textAlign: TextAlign.center,
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white, fontFamily: 'monospace'),
+                            decoration: InputDecoration(
+                              isDense: true,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+                              border: InputBorder.none,
+                              suffixText: unitLabel,
+                              suffixStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted),
+                            ),
+                            onChanged: (val) {
+                              final parsed = double.tryParse(val);
+                              if (parsed != null && parsed > 0) {
+                                setDlgState(() => selectedQty = parsed);
+                              }
+                            },
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton.filledTonal(
+                        onPressed: () {
+                          setDlgState(() {
+                            selectedQty = (selectedQty + qtyStep);
+                            qtyController.text = selectedQty.toStringAsFixed(isStock ? 0 : 2);
+                          });
+                        },
+                        icon: const Icon(Icons.add, size: 16),
+                        style: IconButton.styleFrom(
+                          backgroundColor: const Color(0xFF252D3F),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          minimumSize: const Size(36, 36),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+
+                  // Quick Preset Chips
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: presetChips.map((preset) {
+                      final isSelected = (selectedQty - preset).abs() < 0.001;
+                      return GestureDetector(
+                        onTap: () {
+                          setDlgState(() {
+                            selectedQty = preset;
+                            qtyController.text = preset.toStringAsFixed(isStock ? 0 : (preset < 0.1 ? 2 : 2));
+                          });
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: isSelected ? const Color(0xFF2E82FE) : const Color(0xFF1E2533),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: isSelected ? const Color(0xFF2E82FE) : AppColors.border),
+                          ),
+                          child: Text(
+                            isStock ? preset.toStringAsFixed(0) : preset.toStringAsFixed(2),
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                              color: isSelected ? Colors.white : AppColors.textMuted,
+                            ),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // Live Risk & Value Bar
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF141926),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Value: \$${posVal.toStringAsFixed(posVal > 1000 ? 1 : 2)}',
+                          style: const TextStyle(fontSize: 11, color: Colors.white70, fontFamily: 'monospace'),
+                        ),
+                        Text(
+                          'Risk: -\$${riskAmount.toStringAsFixed(2)}',
+                          style: const TextStyle(fontSize: 11, color: AppColors.bearish, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+                        ),
+                        Text(
+                          'TP: +\$${gainAmount.toStringAsFixed(2)}',
+                          style: const TextStyle(fontSize: 11, color: AppColors.bullish, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+                        ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: tagCtrl,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(labelText: 'Position Tag / Order Number', prefixIcon: Icon(Icons.tag, size: 18, color: Colors.white54)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('ยกเลิก', style: TextStyle(color: Colors.white60)),
               ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: sizeCtrl,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(labelText: 'Order Size (Qty / Lots)', prefixIcon: Icon(Icons.layers, size: 18, color: Colors.white54)),
-              ),
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(color: const Color(0xFF141923), borderRadius: BorderRadius.circular(8)),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    _dialogItem('Stop Loss', '\$${sl.toStringAsFixed(2)}', AppColors.bearish),
-                    _dialogItem('Take Profit', '\$${tp.toStringAsFixed(2)}', AppColors.bullish),
-                    _dialogItem('Target R:R', '${signal['rr'] ?? 2.2}R', AppColors.neutral),
-                  ],
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: dir == 'long' ? AppColors.bullish : AppColors.bearish,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                 ),
-              ),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () => Navigator.pop(ctx, true),
-                  icon: Icon(isBuy ? Icons.arrow_upward : Icons.arrow_downward, color: Colors.black),
-                  label: Text('CONFIRM ${isBuy ? "BUY" : "SELL"} EXECUTION', style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: col,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                  ),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: Text(
+                  'Confirm Execute (${selectedQty.toStringAsFixed(isStock ? 0 : 2)})',
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                 ),
               ),
             ],
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
 
-    if (confirm == true) {
+    qtyController.dispose();
+
+    if (isConfirmed == true) {
       try {
-        final dio = Dio();
-        final size = double.tryParse(sizeCtrl.text) ?? 1.0;
-        await dio.post(
+        final dio = AppApi.dio;
+        final resp = await dio.post(
           AppApi.url('/api/v1/trades/place'),
           data: {
             'symbol': sym,
@@ -208,9 +418,9 @@ class _SignalsScreenState extends State<SignalsScreen> {
             'entry': entry,
             'stop_loss': sl,
             'take_profit': tp,
-            'position_size': size,
-            'tag': tagCtrl.text.trim(),
-            'notes': 'Executed via Proactive Scanner ($tag)',
+            'position_size': selectedQty,
+            'size': selectedQty,
+            'tag': tag,
           },
         );
 
@@ -218,7 +428,10 @@ class _SignalsScreenState extends State<SignalsScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               backgroundColor: AppColors.bullish,
-              content: Text('🚀 Position ${tagCtrl.text} opened successfully at \$${entry.toStringAsFixed(2)}!', style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+              content: Text(
+                '✅ ${resp.data['message'] ?? 'Trade executed successfully: $tag'}',
+                style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+              ),
             ),
           );
         }
@@ -233,10 +446,13 @@ class _SignalsScreenState extends State<SignalsScreen> {
     }
   }
 
-  Future<void> _closePosition(int tradeId, String tag) async {
+  Future<void> _closePosition(dynamic tradeId, String tag) async {
     try {
-      final dio = Dio();
-      await dio.post(AppApi.url('/api/v1/trades/$tradeId/close'));
+      final dio = AppApi.dio;
+      await dio.post(
+        AppApi.url('/api/v1/trades/$tradeId/close'),
+        data: {'reason': 'manual'},
+      );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -277,7 +493,11 @@ class _SignalsScreenState extends State<SignalsScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text('Proactive SMC Scanner'),
+        title: const FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Text('Proactive SMC Scanner', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+        ),
         backgroundColor: AppColors.surface,
         actions: [
           IconButton(
@@ -292,30 +512,52 @@ class _SignalsScreenState extends State<SignalsScreen> {
       ),
       body: Column(
         children: [
-          // Filter Bar + Scan Trigger Button
+          // Filter Bar + Scan Trigger Button (Horizontally scrollable with fixed Scan button)
           Container(
             color: AppColors.surface,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Row(
               children: [
-                _filterChip('ALL', 'all'),
-                const SizedBox(width: 6),
-                _filterChip('CRYPTO', 'crypto'),
-                const SizedBox(width: 6),
-                _filterChip('FOREX & GOLD', 'forex'),
-                const SizedBox(width: 6),
-                _filterChip('STOCKS', 'stock'),
-                const Spacer(),
-                ElevatedButton.icon(
-                  onPressed: _isScanning ? null : _triggerScan,
-                  icon: _isScanning
-                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
-                      : const Icon(Icons.radar, size: 16),
-                  label: Text(_isScanning ? 'Scanning...' : 'Scan Now', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.bullish,
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                Expanded(
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        _filterChip('ALL', 'all'),
+                        const SizedBox(width: 6),
+                        _filterChip('CRYPTO', 'crypto'),
+                        const SizedBox(width: 6),
+                        _filterChip('FOREX & GOLD', 'forex'),
+                        const SizedBox(width: 6),
+                        _filterChip('STOCKS', 'stock'),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                InkWell(
+                  onTap: _isScanning ? null : _triggerScan,
+                  borderRadius: BorderRadius.circular(18),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: AppColors.bullish,
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_isScanning)
+                          const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                        else
+                          const Icon(Icons.radar, size: 16, color: Colors.black),
+                        const SizedBox(width: 4),
+                        Text(
+                          _isScanning ? '...' : 'Scan',
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -325,65 +567,121 @@ class _SignalsScreenState extends State<SignalsScreen> {
           Expanded(
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator(color: AppColors.bullish))
-                : filtered.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.radar, size: 48, color: AppColors.textMuted),
-                            const SizedBox(height: 12),
-                            const Text('No SMC setups detected in current regime.', style: TextStyle(color: Colors.white70)),
-                            const SizedBox(height: 8),
-                            const Text('Click "Scan Now" to scan all markets proactively.', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
-                            const SizedBox(height: 16),
-                            ElevatedButton.icon(
-                              onPressed: _triggerScan,
-                              icon: const Icon(Icons.refresh),
-                              label: const Text('Scan Markets'),
+                : _errorMessage != null && _signals.isEmpty
+                    ? _buildErrorBanner()
+                    : filtered.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.radar, size: 48, color: AppColors.textMuted),
+                                const SizedBox(height: 12),
+                                const Text('No SMC setups detected in current regime.', style: TextStyle(color: Colors.white70)),
+                                const SizedBox(height: 8),
+                                const Text('Click "Scan Now" to scan all markets proactively.', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
+                                const SizedBox(height: 16),
+                                ElevatedButton.icon(
+                                  onPressed: _triggerScan,
+                                  icon: const Icon(Icons.refresh),
+                                  label: const Text('Scan Markets'),
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
-                      )
-                    : ListView.builder(
-                        padding: const EdgeInsets.all(12),
-                        itemCount: filtered.length,
-                        itemBuilder: (ctx, i) {
-                          final s = filtered[i];
-                          final sym = s['symbol'] ?? 'BTC/USDT';
-                          final dir = (s['direction'] ?? 'LONG').toString().toUpperCase();
-                          final tf = s['timeframe'] ?? '1H';
-                          final confluence = (s['confluence'] as num?)?.toInt() ?? 80;
-                          final msg = s['message'] ?? '';
-                          final entry = (s['entry'] as num?)?.toDouble();
-                          final livePrice = (s['live_price'] as num?)?.toDouble() ?? entry;
-                          final sl = (s['stop_loss'] as num?)?.toDouble();
-                          final tp = (s['take_profit'] as num?)?.toDouble();
-                          final rr = (s['rr'] as num?)?.toDouble() ?? 2.2;
-                          final date = (s['timestamp'] ?? '').toString().split('T').first;
+                          )
+                        : ListView.builder(
+                            padding: const EdgeInsets.fromLTRB(12, 10, 12, 90),
+                            itemCount: filtered.length,
+                            itemBuilder: (ctx, i) {
+                              final s = filtered[i];
+                              final sym = s['symbol'] ?? 'BTC/USDT';
+                              final dir = (s['direction'] ?? 'LONG').toString().toUpperCase();
+                              final tf = s['timeframe'] ?? '1H';
+                              final confluence = (s['confluence'] as num?)?.toInt() ?? 80;
+                              final msg = s['message'] ?? '';
+                              final entry = (s['entry'] as num?)?.toDouble();
+                              final livePrice = (s['live_price'] as num?)?.toDouble() ?? entry;
+                              final sl = (s['stop_loss'] as num?)?.toDouble();
+                              final tp = (s['take_profit'] as num?)?.toDouble();
+                              final rr = (s['rr'] as num?)?.toDouble() ?? 2.2;
+                              final date = (s['timestamp'] ?? '').toString().split('T').first;
 
-                          // Find matching open positions for this symbol
-                          final matchingPositions = _positions.where((p) => (p['symbol'] ?? '').toString().toUpperCase() == sym.toUpperCase()).toList();
+                              // Find matching open positions for this symbol
+                              final matchingPositions = _positions.where((p) => (p['symbol'] ?? '').toString().toUpperCase() == sym.toUpperCase()).toList();
 
-                          return _SignalCard(
-                            symbol: sym,
-                            direction: dir,
-                            timeframe: tf,
-                            confluence: confluence,
-                            entry: entry,
-                            livePrice: livePrice,
-                            sl: sl,
-                            tp: tp,
-                            rr: rr,
-                            message: msg,
-                            time: date,
-                            openPositions: matchingPositions,
-                            onExecuteTrade: () => _placeOrderFromSignal(s),
-                            onClosePosition: (id, tag) => _closePosition(id, tag),
-                          );
-                        },
-                      ),
+                              return _SignalCard(
+                                symbol: sym,
+                                direction: dir,
+                                timeframe: tf,
+                                confluence: confluence,
+                                entry: entry,
+                                livePrice: livePrice,
+                                sl: sl,
+                                tp: tp,
+                                rr: rr,
+                                message: msg,
+                                advice: s['advice'] as String?,
+                                time: date,
+                                openPositions: matchingPositions,
+                                onExecuteTrade: () => _placeOrderFromSignal(s),
+                                onClosePosition: (id, tag) => _closePosition(id, tag),
+                              );
+                            },
+                          ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildErrorBanner() {
+    return Center(
+      child: Container(
+        margin: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFF221518),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.bearish.withOpacity(0.4)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.wifi_off, color: AppColors.bearish, size: 36),
+            const SizedBox(height: 10),
+            const Text(
+              'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้',
+              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'แอปพยายามเชื่อมต่อไปที่: ${AppApi.baseUrl}\nกรุณาตั้งค่า IP เครื่องคอมพิวเตอร์ในหน้า Settings หรือตรวจสอบว่าเปิด Backend อยู่',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: () => context.go('/settings'),
+                  icon: const Icon(Icons.settings, size: 16),
+                  label: const Text('ตั้งค่า IP'),
+                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF2E82FE)),
+                ),
+                const SizedBox(width: 10),
+                OutlinedButton.icon(
+                  onPressed: () {
+                    _fetchSignals();
+                    _fetchPositions();
+                  },
+                  icon: const Icon(Icons.refresh, size: 16),
+                  label: const Text('ลองใหม่'),
+                  style: OutlinedButton.styleFrom(foregroundColor: Colors.white70),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -414,11 +712,12 @@ class _SignalsScreenState extends State<SignalsScreen> {
 
 class _SignalCard extends StatelessWidget {
   final String symbol, direction, timeframe, message, time;
+  final String? advice;
   final int confluence;
   final double? entry, livePrice, sl, tp, rr;
   final List<Map<String, dynamic>> openPositions;
   final VoidCallback onExecuteTrade;
-  final Function(int id, String tag) onClosePosition;
+  final Function(dynamic id, String tag) onClosePosition;
 
   const _SignalCard({
     required this.symbol,
@@ -430,12 +729,36 @@ class _SignalCard extends StatelessWidget {
     required this.openPositions,
     required this.onExecuteTrade,
     required this.onClosePosition,
+    this.advice,
     this.entry,
     this.livePrice,
     this.sl,
     this.tp,
     this.rr,
   });
+
+  String _getAdviceText(String? customAdvice, String direction, int confluence, bool isGradeA, bool isGradeB) {
+    if (customAdvice != null && customAdvice.trim().isNotEmpty && customAdvice.contains('คำแนะนำ:')) {
+      return customAdvice;
+    }
+    if (isGradeA) {
+      return 'คำแนะนำ: โครงสร้างแข็งแกร่ง (Grade A+) สอดคล้องเทรนด์ใหญ่ แนะนำพิจารณาเข้าตามแผน Entry / SL ได้ทันที (ความเสี่ยง 1.0%)';
+    } else if (isGradeB) {
+      final isLong = direction == 'LONG';
+      final zone = isLong ? 'Discount' : 'Premium';
+      return 'คำแนะนำ: โครงสร้าง $direction (Grade B) แตะโซน $zone ควรรอแท่งยืนยัน Rejection ใน TF ย่อยก่อนเข้า หรือจำกัดความเสี่ยงที่ 0.5%';
+    } else {
+      return 'คำแนะนำ: รอยืนยันการเคลื่อนไหวของราคา แนะนำ "รอ (WAIT)" สัญญาณ CHoCH ยืนยันใน TF ย่อยก่อน';
+    }
+  }
+
+  String _formatPrice(double? price) {
+    if (price == null) return '-';
+    if (price < 5.0) {
+      return '\$${price.toStringAsFixed(4)}';
+    }
+    return '\$${price.toStringAsFixed(2)}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -455,169 +778,251 @@ class _SignalCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Interactive Buy / Sell Button on the Direction Badge
-                ElevatedButton.icon(
-                  onPressed: onExecuteTrade,
-                  icon: Icon(
-                    isLong ? Icons.arrow_upward : Icons.arrow_downward,
-                    size: 14,
-                    color: Colors.black,
-                  ),
-                  label: Text(
-                    isLong ? 'BUY / LONG' : 'SELL / SHORT',
-                    style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 12),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: color,
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    minimumSize: Size.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text(symbol, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: gradeColor.withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: gradeColor.withOpacity(0.6), width: 0.8),
-                  ),
-                  child: Text(
-                    gradeText,
-                    style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: gradeColor),
-                  ),
-                ),
-                const Spacer(),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF252540),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(timeframe, style: const TextStyle(fontSize: 11, color: Colors.white70, fontWeight: FontWeight.bold)),
-                ),
-                const SizedBox(width: 8),
-                Text(time, style: const TextStyle(fontSize: 11, color: Colors.white38)),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text(message, style: const TextStyle(fontSize: 13, color: Colors.white70, height: 1.4)),
-            if (!isGradeA && !isGradeB) ...[
-              const SizedBox(height: 8),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF332200),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: const Color(0xFFFF9900).withOpacity(0.5)),
-                ),
-                child: const Row(
+                Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.info_outline, color: Color(0xFFFF9900), size: 14),
-                    SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        'คำแนะนำ: ยังไม่ควรเสี่ยงเข้าทันที แนะนำ "รอ (WAIT)" สัญญาณ CHoCH ยืนยันใน TF ย่อยก่อน',
-                        style: TextStyle(fontSize: 11, color: Color(0xFFFFB84D), fontWeight: FontWeight.w500),
+                    // Interactive Buy / Sell Button on the Direction Badge
+                    ElevatedButton.icon(
+                      onPressed: onExecuteTrade,
+                      icon: Icon(
+                        isLong ? Icons.arrow_upward : Icons.arrow_downward,
+                        size: 13,
+                        color: Colors.black,
                       ),
+                      label: Text(
+                        isLong ? 'BUY / LONG' : 'SELL / SHORT',
+                        style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 11),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: color,
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(symbol, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  ],
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: gradeColor.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(4),
+                            border: Border.all(color: gradeColor.withValues(alpha: 0.6), width: 0.8),
+                          ),
+                          child: Text(
+                            gradeText,
+                            style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: gradeColor),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF252540),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(timeframe, style: const TextStyle(fontSize: 10, color: Colors.white70, fontWeight: FontWeight.bold)),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      time,
+                      style: const TextStyle(fontSize: 10, color: Colors.white38, fontWeight: FontWeight.w500),
                     ),
                   ],
                 ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              decoration: BoxDecoration(
+                color: const Color(0xFF332200),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: const Color(0xFFFF9900).withValues(alpha: 0.6)),
               ),
-            ],
+              child: Row(
+                children: [
+                  const Icon(Icons.info_outline, color: Color(0xFFFF9900), size: 15),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _getAdviceText(advice, direction, confluence, isGradeA, isGradeB),
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFFFFB84D),
+                        fontWeight: FontWeight.w500,
+                        height: 1.3,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
             if (entry != null && sl != null && tp != null) ...[
               const SizedBox(height: 10),
               Container(
-                padding: const EdgeInsets.all(8),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
                 decoration: BoxDecoration(
                   color: const Color(0xFF141923),
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
                     // Entry Price + Real-time Live Price Tag
-                    Column(
-                      children: [
-                        const Text('Entry / Live', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
-                        const SizedBox(height: 2),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text('\$${entry!.toStringAsFixed(2)}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white, fontFamily: 'monospace')),
-                            const SizedBox(width: 4),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                              decoration: BoxDecoration(
-                                color: AppColors.bullish.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(3),
-                                border: Border.all(color: AppColors.bullish, width: 0.5),
-                              ),
-                              child: Text(
-                                '● \$${(livePrice ?? entry!).toStringAsFixed(2)}',
-                                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: AppColors.bullish, fontFamily: 'monospace'),
+                    Expanded(
+                      flex: 36,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text('Entry / Live', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                          const SizedBox(height: 3),
+                          SizedBox(
+                            height: 22,
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.center,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.center,
+                                children: [
+                                  Text(
+                                    _formatPrice(entry),
+                                    style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white, fontFamily: 'monospace'),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: (isLong
+                                              ? ((livePrice ?? entry!) >= entry! ? AppColors.bullish : AppColors.bearish)
+                                              : ((livePrice ?? entry!) <= entry! ? AppColors.bullish : AppColors.bearish))
+                                          .withValues(alpha: 0.2),
+                                      borderRadius: BorderRadius.circular(4),
+                                      border: Border.all(
+                                        color: isLong
+                                            ? ((livePrice ?? entry!) >= entry! ? AppColors.bullish : AppColors.bearish)
+                                            : ((livePrice ?? entry!) <= entry! ? AppColors.bullish : AppColors.bearish),
+                                        width: 0.8,
+                                      ),
+                                    ),
+                                    child: Text(
+                                      '● ${_formatPrice(livePrice ?? entry)}',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: isLong
+                                            ? ((livePrice ?? entry!) >= entry! ? AppColors.bullish : AppColors.bearish)
+                                            : ((livePrice ?? entry!) <= entry! ? AppColors.bullish : AppColors.bearish),
+                                        fontFamily: 'monospace',
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                          ],
-                        ),
-                      ],
+                          ),
+                        ],
+                      ),
                     ),
-                    _levelInfo('Stop Loss', '\$${sl!.toStringAsFixed(2)}', AppColors.bearish),
-                    _levelInfo('Take Profit', '\$${tp!.toStringAsFixed(2)}', AppColors.bullish),
-                    _levelInfo('R:R', '${rr ?? 2.2}R', AppColors.neutral),
+                    Expanded(
+                      flex: 22,
+                      child: _levelInfo('Stop Loss', _formatPrice(sl), AppColors.bearish),
+                    ),
+                    Expanded(
+                      flex: 24,
+                      child: _levelInfo('Take Profit', _formatPrice(tp), AppColors.bullish),
+                    ),
+                    Expanded(
+                      flex: 18,
+                      child: _levelInfo('R:R', '${rr ?? 2.2}R', AppColors.neutral),
+                    ),
                   ],
                 ),
               ),
             ],
             // Active Open Positions for this symbol
             if (openPositions.isNotEmpty) ...[
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               ...openPositions.map((pos) {
-                final pTag = pos['tag'] ?? '#POS-${pos['id']}';
+                final rawTag = pos['tag']?.toString();
+                final rawId = pos['id']?.toString() ?? '';
+                final pTag = (rawTag != null && rawTag.isNotEmpty && !rawTag.startsWith('POS-'))
+                    ? (rawTag.startsWith('#') ? rawTag : '#$rawTag')
+                    : '#POS-${rawId.length > 8 ? rawId.substring(0, 8) : rawId}';
                 final pEntry = (pos['entry'] as num?)?.toDouble() ?? 0.0;
                 final pDir = (pos['direction'] ?? 'long').toString().toUpperCase();
+                final size = (pos['position_size'] as num?)?.toDouble() ?? (pos['size'] as num?)?.toDouble() ?? 1.0;
                 final cur = livePrice ?? pEntry;
-                final pnl = pDir == 'LONG' ? (cur - pEntry) : (pEntry - cur);
-                final pnlPct = pEntry > 0 ? (pnl / pEntry) * 100 : 0.0;
+                final pnl = (pDir == 'LONG' ? (cur - pEntry) : (pEntry - cur)) * size;
+                final pnlPct = pEntry > 0 ? ((pDir == 'LONG' ? (cur - pEntry) : (pEntry - cur)) / pEntry) * 100 : 0.0;
                 final isWin = pnl >= 0;
                 final pCol = isWin ? AppColors.bullish : AppColors.bearish;
 
                 return Container(
                   margin: const EdgeInsets.only(bottom: 4),
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                   decoration: BoxDecoration(
                     color: const Color(0xFF1B2333),
                     borderRadius: BorderRadius.circular(6),
                     border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4)),
                   ),
-                  child: Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.bookmark_added, size: 14, color: Color(0xFF00E5FF)),
-                      const SizedBox(width: 6),
-                      Text('$pTag ($pDir)', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))),
-                      const SizedBox(width: 8),
-                      Text('Entry: \$${pEntry.toStringAsFixed(2)}', style: const TextStyle(fontSize: 11, color: Colors.white70)),
-                      const Spacer(),
-                      Text(
-                        'PnL: ${isWin ? '+' : ''}\$${pnl.toStringAsFixed(2)} (${isWin ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)',
-                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: pCol),
-                      ),
-                      const SizedBox(width: 8),
-                      GestureDetector(
-                        onTap: () => onClosePosition(pos['id'] as int? ?? 0, pTag),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: AppColors.bearish.withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(4),
-                            border: Border.all(color: AppColors.bearish, width: 0.8),
+                      Row(
+                        children: [
+                          const Icon(Icons.bookmark_added, size: 13, color: Color(0xFF00E5FF)),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              '$pTag ($pDir) • Size: ${size.toStringAsFixed(size.truncateToDouble() == size ? 0 : 2)}',
+                              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF)),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ),
-                          child: const Text('Close ✕', style: TextStyle(fontSize: 10, color: AppColors.bearish, fontWeight: FontWeight.bold)),
-                        ),
+                          const SizedBox(width: 6),
+                          FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              '${isWin ? '+' : ''}\$${pnl.toStringAsFixed(2)} (${isWin ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)',
+                              style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: pCol, fontFamily: 'monospace'),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          GestureDetector(
+                            onTap: () => onClosePosition(pos['id'], pTag),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: AppColors.bearish.withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(color: AppColors.bearish, width: 0.8),
+                              ),
+                              child: const Text('Close ✕', style: TextStyle(fontSize: 10, color: AppColors.bearish, fontWeight: FontWeight.bold)),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Entry: ${_formatPrice(pEntry)}  ➜  Live: ${_formatPrice(cur)}',
+                        style: const TextStyle(fontSize: 10, color: Colors.white60, fontFamily: 'monospace'),
                       ),
                     ],
                   ),
@@ -627,13 +1032,13 @@ class _SignalCard extends StatelessWidget {
             const SizedBox(height: 10),
             Row(
               children: [
-                const Text('Institutional Confluence: ', style: TextStyle(fontSize: 12, color: Colors.white38)),
+                const Text('Institutional Confluence: ', style: TextStyle(fontSize: 11, color: Colors.white38)),
                 Text(
                   '$confluence/100',
-                  style: TextStyle(fontSize: 12, color: gradeColor, fontWeight: FontWeight.bold),
+                  style: TextStyle(fontSize: 11, color: gradeColor, fontWeight: FontWeight.bold),
                 ),
                 const Spacer(),
-                const Text('Proactive Alert ✓', style: TextStyle(fontSize: 11, color: AppColors.bullish, fontWeight: FontWeight.bold)),
+                const Text('Proactive Alert ✓', style: TextStyle(fontSize: 10, color: AppColors.bullish, fontWeight: FontWeight.bold)),
               ],
             ),
           ],
@@ -644,10 +1049,21 @@ class _SignalCard extends StatelessWidget {
 
   Widget _levelInfo(String label, String val, Color col) {
     return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
         Text(label, style: const TextStyle(fontSize: 9, color: AppColors.textMuted)),
-        const SizedBox(height: 2),
-        Text(val, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: col, fontFamily: 'monospace')),
+        const SizedBox(height: 3),
+        SizedBox(
+          height: 22,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.center,
+            child: Text(
+              val,
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: col, fontFamily: 'monospace'),
+            ),
+          ),
+        ),
       ],
     );
   }

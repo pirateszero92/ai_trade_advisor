@@ -1,4 +1,4 @@
-﻿from typing import Literal, Optional
+from typing import Literal, Optional
 from loguru import logger
 from app.core.config import get_settings
 
@@ -20,6 +20,13 @@ class ExecutionEngine:
         exchange: str = "binance",
         mode: Optional[Literal["paper", "live"]] = None,
     ) -> dict:
+        if position_size <= 0:
+            raise ValueError(f"Invalid position size: {position_size}")
+        if entry <= 0:
+            raise ValueError(f"Invalid entry price: {entry}")
+        if stop_loss <= 0 or take_profit <= 0:
+            raise ValueError("SL and TP must be positive numbers")
+
         effective_mode = mode or self.cfg.trading_mode
         if effective_mode == "paper":
             return await self._paper_order(symbol, direction, entry, stop_loss, take_profit, position_size)
@@ -40,5 +47,8 @@ class ExecutionEngine:
         }
 
     async def _live_order(self, symbol, direction, entry, sl, tp, size, exchange) -> dict:
-        logger.warning(f"LIVE ORDER requested for {symbol} — not yet implemented")
-        return {"mode": "live", "status": "not_implemented", "message": "Live execution coming in Phase 3"}
+        logger.error(f"LIVE ORDER rejected for {symbol} — live execution disabled")
+        raise NotImplementedError(
+            f"Live trading for {symbol} on {exchange} is not enabled. "
+            "Please switch TRADING_MODE to 'paper' in Settings."
+        )

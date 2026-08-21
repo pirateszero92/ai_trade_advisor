@@ -39,7 +39,21 @@ class AIAnalysis:
 
     @property
     def message(self) -> str:
-        return self.reasoning or self.risk_notes or "โครงสร้างตลาดได้รับการยืนยันตามระบบ SMC"
+        if self.reasoning:
+            import re
+            msg = self.reasoning.strip()
+            if "{" in msg and "reasoning" in msg:
+                try:
+                    match = re.search(r"\{[\s\S]*\}", msg)
+                    if match:
+                        p = json.loads(match.group(0))
+                        if isinstance(p, dict) and p.get("reasoning"):
+                            return str(p["reasoning"])
+                except Exception:
+                    pass
+            msg = re.sub(r"^```(?:json)?\s*|\s*```$", "", msg, flags=re.MULTILINE).strip()
+            return msg
+        return self.risk_notes or "โครงสร้างตลาดได้รับการยืนยันตามระบบ SMC"
 
     def to_dict(self) -> dict:
         return {
@@ -114,13 +128,29 @@ class AIEngine:
         """
         ctx_prompt = ""
         if context:
+            sym = context.get('symbol', 'BTC/USDT')
+            tf = context.get('timeframe', '1h')
+            conf = context.get('confluence', 0)
+            
+            # If confluence is missing or 0, retrieve from proactive monitor
+            if not conf or conf == 0:
+                try:
+                    from app.services.event_trigger import MarketMonitor
+                    monitor = MarketMonitor.get_instance()
+                    for s in monitor.recent_signals:
+                        if s.get("symbol") == sym:
+                            conf = s.get("confluence", conf)
+                            break
+                except Exception:
+                    pass
+
             ctx_prompt = (
                 f"\n[Real-Time Market Context]\n"
-                f"- Current Asset: {context.get('symbol', 'BTC/USDT')}\n"
+                f"- Current Asset: {sym}\n"
                 f"- Current Price: ${context.get('price', 0):,.2f}\n"
-                f"- Timeframe: {context.get('timeframe', '1h')}\n"
+                f"- Timeframe: {tf}\n"
                 f"- SMC Bias: {context.get('bias', 'neutral')}\n"
-                f"- Confluence Score: {context.get('confluence', 0)}/100\n"
+                f"- Confluence Score: {conf}/100\n"
                 f"- Open Positions: {context.get('open_positions', 0)}\n"
             )
 
@@ -130,10 +160,9 @@ class AIEngine:
             full_messages.append({
                 "role": "system",
                 "content": (
-                    "คุณคือ Apex AI Advisor ผู้เชี่ยวชาญการวิเคราะห์ตลาดด้วย Smart Money Concepts (SMC), "
-                    "Order Block (OB), Fair Value Gap (FVG), Invalidation Levels, และการบริหารความเสี่ยงระดับสถาบัน. "
-                    "ให้ตอบคำถามอย่างมั่นใจ มีตัวเลขราคาเป้าหมาย TP/SL และแนวคิด SMC อธิบายอย่างมืออาชีพ เป็นภาษาไทย."
-                    + ctx_prompt
+                    f"{self.system_prompt}\n\n"
+                    f"ตอบคำถามผู้ใช้เป็นภาษาไทยอย่างกระชับ ตรงประเด็น ใช้หลักการ Smart Money Concepts (SMC), Order Block, FVG, Discount/Premium Zone และการคุมความเสี่ยงตามกฎข้างต้นเสมอ\n"
+                    f"{ctx_prompt}"
                 ),
             })
         full_messages.extend(messages)
@@ -146,18 +175,17 @@ class AIEngine:
             except Exception as exc:
                 logger.warning(f"[AI] Chat provider {provider} failed: {exc}")
 
-        # Smart fallback if external LLM fails
-        sym = context.get('symbol', 'BTC/USDT') if context else 'BTC/USDT'
-        price = context.get('price', 64428.0) if context else 64428.0
-        bias = str(context.get('bias', 'BEARISH')).upper() if context else 'BEARISH'
+        # Fallback if external LLM fails
+        sym = context.get('symbol', 'Asset') if context else 'Asset'
+        price = context.get('price', 0.0) if context else 0.0
+        bias = str(context.get('bias', 'NEUTRAL')).upper() if context else 'NEUTRAL'
+        price_str = f" (${price:,.2f})" if price > 0 else ""
         return (
-            f"🤖 **Apex Institutional SMC Analysis สำหรับ {sym} (${price:,.2f})**\n\n"
-            f"• **Market Bias**: โครงสร้างตลาดเป็น **{bias}** หลังเกิด Liquidity Sweep และทดสอบโซน Equilibrium 50%\n"
-            f"• **Key Order Block**: แนวต้านสถาบันสำคัญอยู่ที่โซน Premium ($64,800 - $65,100)\n"
-            f"• **Fair Value Gap (FVG)**: เกิด Imbalance ชัดเจนในรอบ 1H บริเวณ $64,280 - $64,650\n"
-            f"• **Invalidation Level (SL)**: หากราคาทะลุ $64,950 โครงสร้าง Bearish จะถูกยกเลิกทันที\n"
-            f"• **Take Profit Target**: เป้าหมาย TP1 ที่ $63,260 (1.8R) และ TP2 ที่ $62,360 (3.2R)\n\n"
-            f"*คำแนะนำความเสี่ยง: ควบคุม Risk ไม่เกิน 1.0% ของพอร์ต และตั้ง Stop Loss เสมอก่อนเข้าออเดอร์ครับ*"
+            f"⚠️ **Apex AI Notice (Offline / LLM Provider Unavailable)**\n\n"
+            f"ขณะนี้การเชื่อมต่อไปยัง AI Model Provider ไม่พร้อมใช้งานชั่วคราว\n"
+            f"• สินทรัพย์: **{sym}**{price_str}\n"
+            f"• Market Structure Bias: **{bias}**\n\n"
+            f"💡 กรุณาตรวจสอบการตั้งค่า API Key หรือสถานะของ Local LLM / Gemini / OpenRouter ในเมนู Settings ครับ"
         )
 
     async def test_connection(
@@ -249,8 +277,8 @@ class AIEngine:
         active_file = PROMPTS_DIR / "active_prompt.txt"
         try:
             prompt_name = active_file.read_text(encoding="utf-8").strip()
-            prompt_path = PROMPTS_DIR / prompt_name
-            if prompt_path.exists():
+            prompt_path = (PROMPTS_DIR / prompt_name).resolve()
+            if prompt_path.is_relative_to(PROMPTS_DIR.resolve()) and prompt_path.exists():
                 self._system_prompt = prompt_path.read_text(encoding="utf-8")
                 self._active_prompt_file = prompt_name
                 logger.info(f"[AI] Loaded prompt: {prompt_name}")
@@ -283,57 +311,82 @@ class AIEngine:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4))
     async def _call_local(self, messages: list[dict]) -> str:
-        return await self._call_local_custom(messages, self.cfg.local_llm_endpoint, self.cfg.local_llm_model)
+        cfg = get_settings()
+        return await self._call_local_custom(messages, cfg.local_llm_endpoint, cfg.local_llm_model)
 
     async def _call_local_custom(self, messages: list[dict], endpoint: str, model: str) -> str:
-        clean_ep = endpoint.rstrip("/")
-        if not clean_ep:
-            clean_ep = "http://host.docker.internal:11434"
+        host_url = endpoint.rstrip("/")
+        if not host_url:
+            host_url = "http://host.docker.internal:11434"
 
-        urls = []
-        if clean_ep.endswith("/v1"):
-            urls = [f"{clean_ep}/chat/completions"]
+        # Determine exact api_url just like ai_analyzer
+        is_ollama_native = False
+        api_url = f"{host_url}/chat/completions"
+        if ("/v1" not in host_url and ":11434" in host_url) or host_url.endswith(":11434"):
+            api_url = f"{host_url}/api/chat"
+            is_ollama_native = True
+        elif not host_url.endswith("/v1") and ":1234" in host_url:
+            api_url = f"{host_url}/v1/chat/completions"
+
+        target_model = model.strip() if model else ""
+        if not target_model:
+            target_model = "gpt-oss:120b-cloud" if is_ollama_native else "google/gemma-4-12b-qat"
+
+        if is_ollama_native:
+            payload = {
+                "model": target_model,
+                "messages": messages,
+                "options": {
+                    "temperature": 0.3,
+                    "num_predict": 768,
+                },
+                "stream": False,
+            }
         else:
-            urls = [
-                f"{clean_ep}/v1/chat/completions",
-                f"{clean_ep}/chat/completions",
-                f"{clean_ep}/api/chat",
-            ]
+            payload = {
+                "model": target_model,
+                "messages": messages,
+                "temperature": 0.3,
+                "max_tokens": 1024,
+                "stream": False,
+            }
 
-        last_exc = None
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            for url in urls:
-                try:
-                    if url.endswith("/api/chat"):
-                        r = await client.post(
-                            url,
-                            json={"model": model, "messages": messages, "stream": False},
-                        )
-                        if r.status_code == 200:
-                            data = r.json()
-                            content = data.get("message", {}).get("content", "")
-                            if content:
-                                return content
-                    else:
-                        payload = {
-                            "model": model,
-                            "messages": messages,
-                            "temperature": 0.3,
-                            "max_tokens": 1500,
-                        }
-                        r = await client.post(url, json=payload)
-                        if r.status_code == 200:
-                            data = r.json()
-                            content = data["choices"][0]["message"]["content"]
-                            if content:
-                                return content
-                except Exception as exc:
-                    last_exc = exc
-                    continue
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.post(api_url, json=payload)
+            if r.status_code == 200:
+                resp_data = r.json()
+                if is_ollama_native:
+                    msg = resp_data.get("message", {})
+                    content = msg.get("content", "")
+                    # Thinking models (e.g. gpt-oss:120b-cloud) put reply in 'thinking' when content is empty
+                    if not content:
+                        content = msg.get("thinking", "")
+                    if content:
+                        return content
+                else:
+                    choices = resp_data.get("choices", [])
+                    if choices:
+                        msg = choices[0].get("message", {})
+                        content = msg.get("content", "")
+                        if not content:
+                            content = msg.get("thinking", "")
+                        if content:
+                            return content
+            elif r.status_code == 404 and is_ollama_native:
+                # If /api/chat gave 404, fallback to /v1/chat/completions
+                fallback_url = f"{host_url}/v1/chat/completions"
+                r2 = await client.post(fallback_url, json=payload)
+                if r2.status_code == 200:
+                    choices = r2.json().get("choices", [])
+                    if choices:
+                        content = choices[0].get("message", {}).get("content", "")
+                        if content:
+                            return content
+                raise ValueError(f"Ollama returned 404 on model '{target_model}'. Status {r.status_code}")
+            else:
+                raise ValueError(f"AI Provider error (Status {r.status_code}): {r.text}")
 
-        if last_exc:
-            raise last_exc
-        raise ValueError(f"Could not connect to Local LLM at {endpoint} with model {model}")
+        raise ValueError(f"Could not get response from Local LLM at {api_url}")
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4))
     async def _call_gemini(self, messages: list[dict]) -> str:
@@ -343,10 +396,8 @@ class AIEngine:
         if not api_key:
             raise ValueError("GEMINI_API_KEY not configured")
 
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{model}:generateContent?key={api_key}"
-        )
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        headers = {"x-goog-api-key": api_key.strip()}
         system_text = next((m["content"] for m in messages if m["role"] == "system"), "")
         user_parts = [{"text": m["content"]} for m in messages if m["role"] != "system"]
         payload: dict[str, Any] = {"contents": [{"role": "user", "parts": user_parts}]}
@@ -354,7 +405,7 @@ class AIEngine:
             payload["systemInstruction"] = {"parts": [{"text": system_text}]}
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            r = await client.post(url, json=payload)
+            r = await client.post(url, headers=headers, json=payload)
             r.raise_for_status()
             data = r.json()
             return data["candidates"][0]["content"]["parts"][0]["text"]
@@ -403,41 +454,99 @@ class AIEngine:
             f"- Liquidity Swept: {'✅' if sig['liquidity_swept'] else '❌'} ({sig['sweep_direction']})",
             f"- In Premium: {sig['in_premium']} | In Discount: {sig['in_discount']}",
             f"- Equilibrium: {sig['equilibrium']}",
-            f"- Confluence Score: {sig['confluence_score']}/100",
+            f"- Confluence Score: {sig.get('confluence_score', sig.get('confluence', 0))}/100",
         ]
         return "\n".join(lines)
 
     def _parse_response(self, raw: str) -> AIAnalysis:
+        import re
         text = raw.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        elif text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        data = None
 
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start != -1 and end > start:
+        # 1. Try finding complete JSON block {...}
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+            except Exception:
+                pass
+
+        # 2. If complete JSON failed (e.g. truncated JSON), extract fields via regex!
+        if not data:
+            data = {}
+            rec_m = re.search(r'"recommendation"\s*:\s*"([^"]+)"', text)
+            if rec_m:
+                data["recommendation"] = rec_m.group(1)
+            
+            conf_m = re.search(r'"confidence"\s*:\s*([0-9.]+)', text)
+            if conf_m:
+                data["confidence"] = conf_m.group(1)
+            
+            reas_m = re.search(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+            if reas_m:
                 try:
-                    data = json.loads(text[start:end])
-                except json.JSONDecodeError:
-                    return AIAnalysis(reasoning=raw, recommendation="wait")
-            else:
-                return AIAnalysis(reasoning=raw, recommendation="wait")
+                    data["reasoning"] = json.loads(f'"{reas_m.group(1)}"')
+                except Exception:
+                    data["reasoning"] = reas_m.group(1).replace(r'\"', '"').replace(r'\n', '\n')
 
-        valid_recs = {"strong_buy", "buy", "wait", "sell", "strong_sell"}
-        rec = data.get("recommendation", "wait").lower()
-        if rec not in valid_recs:
+        if not data.get("reasoning"):
+            clean = text
+            if clean.startswith("```json"):
+                clean = clean[7:]
+            elif clean.startswith("```"):
+                clean = clean[3:]
+            if clean.endswith("```"):
+                clean = clean[:-3]
+            clean = clean.strip()
+            try:
+                parsed = json.loads(clean)
+                if isinstance(parsed, dict):
+                    data.update(parsed)
+            except Exception:
+                clean_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+                data["reasoning"] = clean_text
+
+        # Map recommendation safely
+        rec_raw = str(data.get("recommendation", "wait")).lower()
+        if "strong_buy" in rec_raw or "strong buy" in rec_raw:
+            rec = "strong_buy"
+        elif "buy" in rec_raw or "long" in rec_raw:
+            rec = "buy"
+        elif "strong_sell" in rec_raw or "strong sell" in rec_raw:
+            rec = "strong_sell"
+        elif "sell" in rec_raw or "short" in rec_raw:
+            rec = "sell"
+        else:
             rec = "wait"
+
+        # Map confidence (handles float 0.28 -> 28, string "85", int 85)
+        conf_raw = data.get("confidence", 50)
+        try:
+            conf_val = float(conf_raw)
+            if 0 < conf_val <= 1.0:
+                conf = int(conf_val * 100)
+            else:
+                conf = int(conf_val)
+        except Exception:
+            conf = 50
+
+        reasoning = data.get("reasoning", "")
+        if not reasoning:
+            reasoning = text
+
+        key_pts = data.get("key_points", [])
+        if isinstance(key_pts, str):
+            key_pts = [key_pts]
+
+        risk = data.get("risk_notes", "")
+        if isinstance(risk, list):
+            risk = "; ".join(str(r) for r in risk)
 
         return AIAnalysis(
             recommendation=rec,
-            confidence=int(data.get("confidence", 0)),
-            reasoning=data.get("reasoning", ""),
-            key_points=data.get("key_points", []),
-            risk_notes=data.get("risk_notes", ""),
-            market_context=data.get("market_context", ""),
+            confidence=conf,
+            reasoning=str(reasoning),
+            key_points=key_pts,
+            risk_notes=str(risk),
+            market_context=str(data.get("market_context", "")),
         )

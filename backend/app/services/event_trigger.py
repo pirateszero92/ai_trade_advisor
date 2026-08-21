@@ -34,6 +34,42 @@ DEFAULT_WATCHLIST = [
 ]
 
 
+def _clean_message_text(raw: str) -> str:
+    if not raw:
+        return ""
+    import json, re
+    text = str(raw).strip()
+    
+    # 1. Try regex extraction of "reasoning" key even if JSON was cut off/truncated
+    match = re.search(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    if match:
+        try:
+            return json.loads(f'"{match.group(1)}"')
+        except Exception:
+            return match.group(1).replace(r'\"', '"').replace(r'\n', '\n')
+
+    # 2. Try full JSON parse
+    match_json = re.search(r"\{[\s\S]*\}", text)
+    if match_json:
+        try:
+            data = json.loads(match_json.group(0))
+            if isinstance(data, dict) and data.get("reasoning"):
+                return str(data["reasoning"])
+        except Exception:
+            pass
+
+    # 3. Strip any markdown code fences
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+    
+    # 4. If text still looks like raw json snippet { ... }, extract the longest string inside
+    if text.startswith("{") or '"recommendation":' in text:
+        m_any = re.search(r'"(?:reasoning|message|text)"\s*:\s*"([^"]+)"', text)
+        if m_any:
+            return m_any.group(1)
+
+    return text
+
+
 class MarketMonitor:
     """Proactively monitors watchlist symbols, checks SMC conditions,
     invokes Apex AI, and broadcasts signals via WebSocket & Push notifications.
@@ -105,11 +141,35 @@ class MarketMonitor:
                 tp = trade.get("take_profit", 0.0)
                 trade_id = trade.get("id")
 
-                # Get latest live price
-                df = await self.market_data.get_ohlcv(sym, "1m", "crypto" if "/" in sym else "stock", limit=5)
-                if df.empty:
+                # Detect correct market type
+                s_up = sym.upper().replace("/", "").replace("-", "")
+                if s_up in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "AUDUSD", "USDCAD"]:
+                    m_type = "forex"
+                elif "/" in sym or "USDT" in s_up:
+                    m_type = "crypto"
+                else:
+                    m_type = "stock"
+
+                # Get latest live ticker price
+                current_price = 0.0
+                try:
+                    ticker_data = await self.market_data.get_ticker_24h(sym, m_type)
+                    current_price = float(ticker_data.get("price", 0.0))
+                except Exception:
+                    pass
+
+                if current_price <= 0.0:
+                    df = await self.market_data.get_ohlcv(sym, "1m", m_type, limit=5)
+                    if not df.empty:
+                        current_price = float(df["close"].iloc[-1])
+
+                if current_price <= 0.0:
                     continue
-                current_price = float(df["close"].iloc[-1])
+
+                # Sanity check: price must not deviate by >40% from entry to ignore invalid network spikes
+                if entry > 0 and (current_price > entry * 1.5 or current_price < entry * 0.5):
+                    logger.warning(f"Ignored abnormal price spike for {sym}: Entry={entry}, Live={current_price}")
+                    continue
 
                 # Check TP / SL hit
                 hit_reason = None
@@ -134,12 +194,14 @@ class MarketMonitor:
                         pnl = (entry - current_price) * size
                         pnl_pct = ((entry - current_price) / entry) * 100
 
-                    trade["status"] = "closed"
-                    trade["closed_at"] = datetime.now(timezone.utc).isoformat()
-                    trade["close_price"] = current_price
-                    trade["close_reason"] = hit_reason
                     trade["pnl"] = round(pnl, 2)
                     trade["pnl_pct"] = round(pnl_pct, 2)
+
+                    try:
+                        from app.api.trades import _save_trades
+                        _save_trades()
+                    except Exception:
+                        pass
 
                     logger.info(f"⚡ AUTO EXIT: {sym} {trade.get('tag', trade_id)} closed by {hit_reason} at ${current_price:.2f} (PnL: ${pnl:.2f})")
 
@@ -160,113 +222,159 @@ class MarketMonitor:
         except Exception as e:
             logger.error(f"Error checking open positions TP/SL: {e}")
 
+    async def _scan_single_symbol(self, item: dict) -> Optional[dict]:
+        symbol = item["symbol"]
+        tf = item.get("timeframe", "1h")
+        htf = item.get("htf_timeframe", "4h")
+        m_type = item.get("market_type", "crypto")
+        ex = item.get("exchange", "binance")
+
+        try:
+            # 1. Fetch multi-timeframe OHLCV in parallel
+            ltf_df, htf_df = await asyncio.gather(
+                self.market_data.get_ohlcv(symbol, tf, m_type, ex, limit=150),
+                self.market_data.get_ohlcv(symbol, htf, m_type, ex, limit=80),
+                return_exceptions=True,
+            )
+            if isinstance(ltf_df, Exception) or ltf_df is None or ltf_df.empty:
+                return None
+
+            htf_bias = "neutral"
+            if not isinstance(htf_df, Exception) and htf_df is not None and not htf_df.empty:
+                htf_sig = self.smc.analyze(htf_df, symbol, htf)
+                htf_bias = htf_sig.bias
+
+            ltf_sig = self.smc.analyze(ltf_df, symbol, tf, htf_bias=htf_bias)
+
+            # 3. Strategy evaluation
+            strat_res = self.strategy.evaluate(ltf_sig)
+            confluence = ltf_sig.confluence_score
+
+            # Determine smart SMC setup direction
+            direction = "long"
+            if ltf_sig.liquidity_swept and ltf_sig.in_premium:
+                direction = "short"  # Sweep of highs -> Short pullback
+            elif ltf_sig.liquidity_swept and ltf_sig.in_discount:
+                direction = "long"   # Sweep of lows -> Long bounce
+            elif ltf_sig.bias == "bearish" or (htf_bias == "bearish" and ltf_sig.in_premium):
+                direction = "short"
+            elif ltf_sig.bias == "bullish" or (htf_bias == "bullish" and ltf_sig.in_discount):
+                direction = "long"
+            elif strat_res.direction in ("long", "short"):
+                direction = strat_res.direction
+
+            entry = float(ltf_sig.current_price) if ltf_sig.current_price > 0 else float(ltf_df["close"].iloc[-1])
+            
+            # Dynamic SL/TP based on Order Block or 0.8% ATR buffer
+            if direction == "long":
+                sl = (ltf_sig.order_block.bottom * 0.998) if ltf_sig.order_block else (entry * 0.992)
+                if sl >= entry:
+                    sl = entry * 0.992
+                sl_dist = abs(entry - sl)
+                tp = entry + (sl_dist * 2.2)
+            else:
+                sl = (ltf_sig.order_block.top * 1.002) if ltf_sig.order_block else (entry * 1.008)
+                if sl <= entry:
+                    sl = entry * 1.008
+                sl_dist = abs(entry - sl)
+                tp = entry - (sl_dist * 2.2)
+
+            zone_name = "Discount" if ltf_sig.in_discount else ("Premium" if ltf_sig.in_premium else "Equilibrium")
+            
+            # Tailored structure description
+            if ltf_sig.liquidity_swept and ltf_sig.in_premium:
+                structure_summary = f"เกิดการ Sweep สภาพคล่องเหนือ High ล่าสุดในโซน Premium (จุดกลับตัว Short-term)"
+            elif ltf_sig.liquidity_swept and ltf_sig.in_discount:
+                structure_summary = f"เกิดการ Sweep สภาพคล่องใต้ Low สำคัญในโซน Discount พร้อมดีดตัวรับแรงซื้อ"
+            elif ltf_sig.order_block and ltf_sig.in_discount:
+                structure_summary = f"โครงสร้าง {direction.upper()} Confluence {confluence}/100 ราคาแตะ Bullish Order Block ในโซน Discount"
+            elif ltf_sig.order_block and ltf_sig.in_premium:
+                structure_summary = f"โครงสร้าง {direction.upper()} Confluence {confluence}/100 ราคาแตะ Bearish Order Block ในโซน Premium"
+            elif ltf_sig.bos:
+                structure_summary = f"โครงสร้าง {direction.upper()} Confluence {confluence}/100 เกิด Break of Structure (BOS) ตามเทรนด์ใหญ่"
+            elif ltf_sig.choch:
+                structure_summary = f"โครงสร้าง {direction.upper()} Confluence {confluence}/100 เกิด Change of Character (CHoCH) ส่งสัญญาณต้นเทรนด์"
+            else:
+                structure_summary = f"โครงสร้าง {direction.upper()} Confluence {confluence}/100 ราคาพักตัวในกรอบ Sideway โซน {zone_name}"
+
+            price_decimals = 4 if entry < 5.0 else 2
+            if confluence >= 80:
+                advice_text = f"คำแนะนำ: โครงสร้างแข็งแกร่ง (Grade A+) สอดคล้องเทรนด์ใหญ่ แนะนำพิจารณาเข้าตามแผน Entry ${entry:.{price_decimals}f} SL ${sl:.{price_decimals}f} (ความเสี่ยง 1.0%)"
+            elif confluence >= 65:
+                advice_text = f"คำแนะนำ: โครงสร้าง {direction.upper()} (Grade B) แตะโซน {zone_name} ควรรอแท่งยืนยัน Rejection ใน TF ย่อยก่อนเข้า หรือจำกัดความเสี่ยงที่ 0.5%"
+            else:
+                advice_text = 'คำแนะนำ: รอยืนยันการเคลื่อนไหวของราคา แนะนำ "รอ (WAIT)" สัญญาณ CHoCH ยืนยันใน TF ย่อยก่อน'
+
+            signal_payload = {
+                "id": f"{symbol}_{tf}_{int(datetime.now(timezone.utc).timestamp())}",
+                "symbol": symbol,
+                "market_type": m_type,
+                "timeframe": tf.upper(),
+                "htf_timeframe": htf.upper(),
+                "direction": direction.upper(),
+                "confluence": confluence,
+                "entry": round(entry, price_decimals),
+                "stop_loss": round(sl, price_decimals),
+                "take_profit": round(tp, price_decimals),
+                "rr": 2.2,
+                "message": structure_summary,
+                "advice": advice_text,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+            # Broadcast to WebSocket
+            await broadcast({"type": "signal", "data": signal_payload})
+
+            # Send Push / Telegram / LINE alerts if high confluence
+            if confluence >= 65:
+                await self.notifier.send_signal_alert(
+                    symbol=symbol,
+                    timeframe=tf.upper(),
+                    direction=direction,
+                    message=f"{structure_summary} | {advice_text}",
+                    confluence_score=confluence,
+                    entry=entry,
+                    sl=sl,
+                    tp=tp,
+                    rr=2.2,
+                )
+                logger.info(f"📢 Alert sent for {symbol} ({direction.upper()}) Confluence: {confluence}")
+
+            return signal_payload
+
+        except Exception as e:
+            logger.error(f"Error scanning {symbol} ({tf}): {e}")
+            return None
+
     async def scan_all(self) -> list[dict]:
-        """Scan all watchlist symbols and return newly detected signals."""
+        """Scan all watchlist symbols with bounded concurrency (Semaphore=4) to prevent rate limits."""
         self.last_scan_time = datetime.now(timezone.utc).isoformat()
-        logger.info(f"🔍 Proactive Scanner scanning {len(self.watchlist)} symbols...")
-        new_signals = []
+        logger.info(f"🔍 Proactive Scanner scanning {len(self.watchlist)} symbols in parallel...")
+        
+        sem = asyncio.Semaphore(4)
 
-        for item in self.watchlist:
-            symbol = item["symbol"]
-            tf = item.get("timeframe", "1h")
-            htf = item.get("htf_timeframe", "4h")
-            m_type = item.get("market_type", "crypto")
-            ex = item.get("exchange", "binance")
+        async def _bounded_scan(item):
+            async with sem:
+                try:
+                    return await self._scan_single_symbol(item)
+                except Exception as exc:
+                    logger.warning(f"[Scanner] Exception scanning {item.get('symbol')}: {exc}")
+                    return None
 
-            try:
-                # 1. Fetch multi-timeframe OHLCV
-                ltf_df = await self.market_data.get_ohlcv(symbol, tf, m_type, ex, limit=150)
-                if ltf_df.empty:
-                    continue
+        results = await asyncio.gather(*[_bounded_scan(item) for item in self.watchlist], return_exceptions=False)
+        new_signals = [s for s in results if s is not None]
 
-                # 2. SMC Multi-timeframe analysis
-                htf_df = await self.market_data.get_ohlcv(symbol, htf, m_type, ex, limit=80)
-                htf_bias = "neutral"
-                if not htf_df.empty:
-                    htf_sig = self.smc.analyze(htf_df, symbol, htf)
-                    htf_bias = htf_sig.bias
+        # 100% Strict Unique 1-Signal-Per-Symbol
+        signal_map = {s["symbol"]: s for s in self.recent_signals}
+        for s in new_signals:
+            signal_map[s["symbol"]] = s
+        
+        # Sort by confluence score descending (highest quality setups first)
+        self.recent_signals = sorted(
+            signal_map.values(),
+            key=lambda x: (x.get("confluence", 0), x.get("symbol", "")),
+            reverse=True,
+        )
 
-                ltf_sig = self.smc.analyze(ltf_df, symbol, tf, htf_bias=htf_bias)
-
-                # 3. Strategy evaluation
-                strat_res = self.strategy.evaluate(ltf_sig)
-                confluence = ltf_sig.confluence_score
-
-                # Trigger condition: Confluence >= 40 or strategy approved or clear bias
-                if strat_res.approved or confluence >= 40 or ltf_sig.bias in ("bullish", "bearish"):
-                    direction = strat_res.direction if strat_res.direction in ("long", "short") else ("long" if ltf_sig.bias == "bullish" else "short")
-                    entry = float(ltf_sig.current_price) if ltf_sig.current_price > 0 else float(ltf_df["close"].iloc[-1])
-                    sl = entry * 0.992 if direction == "long" else entry * 1.008
-                    sl_dist = abs(entry - sl)
-                    tp = entry + (sl_dist * 2.2) if direction == "long" else entry - (sl_dist * 2.2)
-
-                    zone_name = "Discount" if direction == "long" else "Premium"
-                    if confluence >= 80:
-                        grade = "A+"
-                        action_advice = f"[Grade A+ | Confluence {confluence}/100 🟢 HIGH CONVICTION]: เทรนด์ใหญ่สอดคล้อง + เกิดการ Sweep สภาพคล่องชัดเจน และราคาแตะ Order Block ในโซน {zone_name} แนะนำพิจารณาเข้าตามแผน Entry ${entry:.2f} SL ${sl:.2f} (ความเสี่ยง 1.0%)"
-                    elif confluence >= 65:
-                        grade = "B"
-                        action_advice = f"[Grade B | Confluence {confluence}/100 🟡 STANDARD SETUP]: โครงสร้าง {direction.upper()} แตะ Order Block ในโซน {zone_name} แต่ควรรอแท่งยืนยัน Rejection ก่อนเข้า หรือลดความเสี่ยงเหลือ 0.5%"
-                    else:
-                        grade = "C"
-                        action_advice = f"[Grade C | Confluence {confluence}/100 ⚠️ แนะนำให้ WAIT / ข้าม]: ยังไม่ควรเสี่ยงเข้าทันที แม้ราคาจะแตะ Order Block ในโซน {zone_name} แต่มีความเสี่ยงสวนเทรนด์ใหญ่หรือขาดตัวยืนยัน หากจะเข้าต้องรอแท่ง 15M/1H เบรกทำ CHoCH กลับตัวก่อนเสมอ"
-
-                    # 4. Invoke Apex AI Advisor for institutional summary
-                    try:
-                        ai_res = await self.ai.analyze(
-                            ltf_sig,
-                            portfolio_state={"balance": 10000.0, "drawdown_pct": 0.0},
-                        )
-                        ai_message = ai_res.message
-                        if not ai_message or "neutral" in ai_message.lower():
-                            ai_message = action_advice
-                    except Exception as ai_err:
-                        logger.warning(f"AI generation fallback: {ai_err}")
-                        ai_message = action_advice
-
-                    signal_payload = {
-                        "id": f"{symbol}_{tf}_{int(datetime.now(timezone.utc).timestamp())}",
-                        "symbol": symbol,
-                        "market_type": m_type,
-                        "timeframe": tf.upper(),
-                        "htf_timeframe": htf.upper(),
-                        "direction": direction.upper(),
-                        "confluence": confluence,
-                        "entry": round(entry, 2),
-                        "stop_loss": round(sl, 2),
-                        "take_profit": round(tp, 2),
-                        "rr": 2.2,
-                        "message": ai_message,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }
-
-                    # Deduplicate in recent signals
-                    if not any(s["symbol"] == symbol and s["direction"] == direction.upper() for s in self.recent_signals[:5]):
-                        self.recent_signals.insert(0, signal_payload)
-                        if len(self.recent_signals) > 30:
-                            self.recent_signals.pop()
-                        new_signals.append(signal_payload)
-
-                        # Broadcast to WebSocket
-                        await broadcast({"type": "signal", "data": signal_payload})
-
-                        # Send Push / Telegram / LINE alerts if high confluence
-                        if confluence >= 65:
-                            await self.notifier.send_signal_alert(
-                                symbol=symbol,
-                                timeframe=tf.upper(),
-                                direction=direction,
-                                message=ai_message,
-                                confluence_score=confluence,
-                                entry=entry,
-                                sl=sl,
-                                tp=tp,
-                                rr=2.2,
-                            )
-                            logger.info(f"📢 Alert sent for {symbol} ({direction.upper()}) Confluence: {confluence}")
-
-            except Exception as e:
-                logger.error(f"Error scanning {symbol} ({tf}): {e}")
-
-        logger.info(f"✅ Scan completed. {len(new_signals)} new high-probability setups identified.")
-        return new_signals
+        logger.info(f"✅ Parallel scan completed. {len(self.recent_signals)} total distinct symbols monitored.")
+        return self.recent_signals

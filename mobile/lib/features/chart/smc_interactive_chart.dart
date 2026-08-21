@@ -30,8 +30,11 @@ class SMCInteractiveChart extends StatefulWidget {
 class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
   double _candleWidth = 10.0;
   double _scrollOffset = 0.0;
+  double _priceScaleMultiplier = 1.0;
+  double _priceOffset = 0.0;
   Offset? _hoverOffset;
   double _lastScale = 1.0;
+  bool _isDraggingPriceScale = false;
 
   void _zoomIn() {
     setState(() {
@@ -49,6 +52,8 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
     setState(() {
       _candleWidth = 10.0;
       _scrollOffset = 0.0;
+      _priceScaleMultiplier = 1.0;
+      _priceOffset = 0.0;
       _hoverOffset = null;
     });
   }
@@ -62,9 +67,11 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final chartWidth = constraints.maxWidth - 70; // 70px right price axis
+        final isOverPriceScale = _hoverOffset != null && _hoverOffset!.dx >= chartWidth;
 
-        final maxScroll = math.max(0.0, (widget.candles.length * _candleWidth) - chartWidth * 0.5);
-        _scrollOffset = _scrollOffset.clamp(0.0, maxScroll);
+        final maxScrollRight = math.max(0.0, (widget.candles.length * _candleWidth) - chartWidth * 0.3);
+        final minScrollLeft = -chartWidth * 0.6; // Allow smooth panning into future space like TradingView
+        _scrollOffset = _scrollOffset.clamp(minScrollLeft, maxScrollRight);
 
         return Stack(
           children: [
@@ -74,33 +81,67 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
                 onPointerSignal: (pointerSignal) {
                   if (pointerSignal is PointerScrollEvent) {
                     setState(() {
-                      if (pointerSignal.scrollDelta.dy < 0) {
-                        _candleWidth = (_candleWidth + 1.2).clamp(4.0, 40.0);
+                      final isOverAxis = pointerSignal.localPosition.dx >= chartWidth;
+                      if (isOverAxis) {
+                        // Vertical price scale zoom (TradingView style)
+                        if (pointerSignal.scrollDelta.dy < 0) {
+                          _priceScaleMultiplier = (_priceScaleMultiplier * 1.12).clamp(0.1, 10.0);
+                        } else {
+                          _priceScaleMultiplier = (_priceScaleMultiplier / 1.12).clamp(0.1, 10.0);
+                        }
                       } else {
-                        _candleWidth = (_candleWidth - 1.2).clamp(4.0, 40.0);
+                        // Horizontal candle width zoom
+                        if (pointerSignal.scrollDelta.dy < 0) {
+                          _candleWidth = (_candleWidth + 1.2).clamp(4.0, 40.0);
+                        } else {
+                          _candleWidth = (_candleWidth - 1.2).clamp(4.0, 40.0);
+                        }
                       }
                     });
                   }
                 },
                 child: GestureDetector(
-                  onScaleStart: (_) {
+                  onDoubleTap: () {
+                    // Double-click on right price axis or chart to Auto-fit
+                    setState(() {
+                      _priceScaleMultiplier = 1.0;
+                      _priceOffset = 0.0;
+                    });
+                  },
+                  onScaleStart: (details) {
                     _lastScale = 1.0;
+                    _isDraggingPriceScale = details.localFocalPoint.dx >= chartWidth;
                   },
                   onScaleUpdate: (details) {
                     setState(() {
-                      // Pan
                       if (details.scale == 1.0) {
-                        _scrollOffset = (_scrollOffset - details.focalPointDelta.dx).clamp(0.0, maxScroll);
-                        _hoverOffset = details.localFocalPoint;
+                        if (_isDraggingPriceScale) {
+                          // Dragging right price axis up/down -> scale price vertically!
+                          // dy < 0 (drag up) -> stretch/zoom in; dy > 0 (drag down) -> compress/zoom out
+                          final dy = details.focalPointDelta.dy;
+                          if (dy != 0) {
+                            final factor = math.pow(0.985, dy).toDouble();
+                            _priceScaleMultiplier = (_priceScaleMultiplier * factor).clamp(0.1, 10.0);
+                          }
+                        } else {
+                          // Pan chart horizontally
+                          _scrollOffset = (_scrollOffset + details.focalPointDelta.dx).clamp(minScrollLeft, maxScrollRight);
+                          _hoverOffset = details.localFocalPoint;
+                        }
                       } else {
                         // Pinch Zoom
                         final scaleDelta = details.scale / _lastScale;
                         _lastScale = details.scale;
-                        _candleWidth = (_candleWidth * scaleDelta).clamp(4.0, 40.0);
+                        if (_isDraggingPriceScale) {
+                          _priceScaleMultiplier = (_priceScaleMultiplier * scaleDelta).clamp(0.1, 10.0);
+                        } else {
+                          _candleWidth = (_candleWidth * scaleDelta).clamp(4.0, 40.0);
+                        }
                       }
                     });
                   },
                   onScaleEnd: (_) {
+                    _isDraggingPriceScale = false;
                     setState(() {
                       _hoverOffset = null;
                     });
@@ -116,6 +157,7 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
                     });
                   },
                   child: MouseRegion(
+                    cursor: isOverPriceScale ? SystemMouseCursors.resizeUpDown : SystemMouseCursors.basic,
                     onHover: (event) {
                       setState(() {
                         _hoverOffset = event.localPosition;
@@ -137,6 +179,8 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
                         symbol: widget.symbol,
                         candleWidth: _candleWidth,
                         scrollOffset: _scrollOffset,
+                        priceScaleMultiplier: _priceScaleMultiplier,
+                        priceOffset: _priceOffset,
                         hoverOffset: _hoverOffset,
                       ),
                     ),
@@ -155,7 +199,7 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
                   const SizedBox(width: 6),
                   _controlBtn(icon: Icons.remove, tooltip: 'Zoom Out', onTap: _zoomOut),
                   const SizedBox(width: 6),
-                  _controlBtn(icon: Icons.restart_alt, tooltip: 'Reset Zoom & Pan', onTap: _resetView),
+                  _controlBtn(icon: Icons.restart_alt, tooltip: 'Reset Zoom & Pan (Auto-fit)', onTap: _resetView),
                 ],
               ),
             ),
@@ -199,6 +243,8 @@ class _SMCUnifiedPainter extends CustomPainter {
   final String symbol;
   final double candleWidth;
   final double scrollOffset;
+  final double priceScaleMultiplier;
+  final double priceOffset;
   final Offset? hoverOffset;
 
   _SMCUnifiedPainter({
@@ -210,6 +256,8 @@ class _SMCUnifiedPainter extends CustomPainter {
     required this.symbol,
     required this.candleWidth,
     required this.scrollOffset,
+    required this.priceScaleMultiplier,
+    required this.priceOffset,
     required this.hoverOffset,
   });
 
@@ -225,11 +273,12 @@ class _SMCUnifiedPainter extends CustomPainter {
 
     // 1. Calculate visible candle range based on scroll offset and candle width
     // Candles are ordered [0: newest, ..., N: oldest]
-    // Index 0 is displayed on the rightmost edge (chartWidth - scrollOffset)
+    // Index 0 is displayed at: chartWidth - rightPadding + scrollOffset
     final rightPadding = 20.0;
-    final startIndex = math.max(0, ((scrollOffset - rightPadding) / candleWidth).floor());
-    final visibleCount = ((chartWidth + rightPadding) / candleWidth).ceil() + 3;
-    final endIndex = math.min(candles.length - 1, startIndex + visibleCount);
+    final rawStart = ((scrollOffset - rightPadding) / candleWidth).floor() - 1;
+    final startIndex = rawStart.clamp(0, candles.length - 1);
+    final rawEnd = ((chartWidth - rightPadding + scrollOffset) / candleWidth).ceil() + 3;
+    final endIndex = rawEnd.clamp(startIndex, candles.length - 1);
 
     if (startIndex > endIndex || startIndex >= candles.length) return;
 
@@ -267,22 +316,30 @@ class _SMCUnifiedPainter extends CustomPainter {
       }
     }
 
-    // Add 6% top & bottom padding so candles don't touch the top/bottom edges
-    final priceSpan = maxPrice - minPrice;
-    final paddedMinPrice = minPrice - (priceSpan > 0 ? priceSpan * 0.06 : 1.0);
-    final paddedMaxPrice = maxPrice + (priceSpan > 0 ? priceSpan * 0.06 : 1.0);
-    final effectiveSpan = paddedMaxPrice - paddedMinPrice;
+    // Apply user vertical price scale multiplier & vertical pan offset
+    final basePriceSpan = maxPrice - minPrice;
+    final paddedMinPrice = minPrice - (basePriceSpan > 0 ? basePriceSpan * 0.06 : 1.0);
+    final paddedMaxPrice = maxPrice + (basePriceSpan > 0 ? basePriceSpan * 0.06 : 1.0);
+    final baseMidPrice = (paddedMaxPrice + paddedMinPrice) / 2.0;
+    final baseHalfSpan = (paddedMaxPrice - paddedMinPrice) / 2.0;
+
+    // With price scale multiplier (>1 = stretch candles / zoom in, <1 = compress candles / zoom out):
+    final scaledHalfSpan = baseHalfSpan / priceScaleMultiplier;
+    final effectiveMidPrice = baseMidPrice + priceOffset;
+    final effectiveMinPrice = effectiveMidPrice - scaledHalfSpan;
+    final effectiveMaxPrice = effectiveMidPrice + scaledHalfSpan;
+    final effectiveSpan = effectiveMaxPrice - effectiveMinPrice;
 
     // Coordinate conversion function
     double priceToY(double price) {
       if (effectiveSpan <= 0) return chartHeight * 0.5;
-      final ratio = (paddedMaxPrice - price) / effectiveSpan;
+      final ratio = (effectiveMaxPrice - price) / effectiveSpan;
       return ratio * chartHeight;
     }
 
     double yToPrice(double y) {
       final ratio = y / chartHeight;
-      return paddedMaxPrice - (ratio * effectiveSpan);
+      return effectiveMaxPrice - (ratio * effectiveSpan);
     }
 
     double candleIndexToX(int index) {

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Risk Engine
 Evaluates trade risk before execution: position sizing, R:R validation,
 daily loss limits, drawdown management, and portfolio correlation warnings.
@@ -154,14 +154,19 @@ class RiskEngine:
         # --- 5. Position sizing ---
         risk_pct = self._adjust_risk(drawdown_pct, assessment)
         risk_amount = account_balance * (risk_pct / 100)
-        position_size = risk_amount / sl_dist if sl_dist > 0 else 0.0
+        
+        # Hard cap: Max leverage 5x of account balance / entry price
+        max_notional = account_balance * 5.0
+        max_units = max_notional / signal.entry if signal.entry > 0 else 0.0
+        raw_size = risk_amount / sl_dist if sl_dist > 0 else 0.0
+        position_size = min(raw_size, max_units) if max_units > 0 else raw_size
 
         assessment.risk_pct = risk_pct
         assessment.risk_amount = round(risk_amount, 2)
         assessment.position_size = round(position_size, 6)
 
         # --- 6. Portfolio correlation warning ---
-        if open_positions >= self.cfg.max_open_positions // 2:
+        if open_positions >= max(1, self.cfg.max_open_positions // 2):
             assessment.warnings.append(
                 f"Portfolio concentration: {open_positions} positions open — watch correlation"
             )
@@ -203,8 +208,9 @@ class RiskEngine:
                 f"Drawdown {drawdown_pct:.1f}% — reducing risk to 0.75%"
             )
             return min(base * 0.75, 0.75)
-        elif drawdown_pct == 0:
+        elif drawdown_pct > 0:
+            assessment.tone = "cautious"
+            return round(base * 0.9, 2)
+        else:
             assessment.tone = "normal"
             return base
-
-        return base

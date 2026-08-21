@@ -43,6 +43,7 @@ class AnalyseRequest(BaseModel):
 
 
 @router.post("/analyse")
+@router.post("/analyze")
 async def analyse_signal(
     req: AnalyseRequest,
     _key: str = Depends(verify_api_key),
@@ -123,11 +124,11 @@ async def quick_signal(
 
 @router.get("/")
 async def list_signals(
-    limit: int = Query(20, le=50),
+    limit: int = Query(20, ge=1, le=50),
     _key: str = Depends(verify_api_key),
 ):
     """List recent high-confluence SMC signals detected by proactive monitor."""
-    from app.services.event_trigger import MarketMonitor
+    from app.services.event_trigger import MarketMonitor, _clean_message_text
     monitor = MarketMonitor.get_instance()
     signals = monitor.recent_signals[:limit]
 
@@ -135,12 +136,53 @@ async def list_signals(
     if not signals:
         signals = await monitor.scan_all()
 
+    for s in signals:
+        if "message" in s:
+            s["message"] = _clean_message_text(s["message"])
+
     return {
         "total": len(signals),
         "last_scan": monitor.last_scan_time,
         "running": monitor.running,
         "signals": signals,
     }
+
+
+@router.get("/live-prices")
+async def get_live_prices(_key: str = Depends(verify_api_key)):
+    """Fetch realtime live prices for all monitored symbols in a single fast batch."""
+    import asyncio
+    from app.services.event_trigger import MarketMonitor
+    monitor = MarketMonitor.get_instance()
+    
+    all_syms = set()
+    for s in monitor.recent_signals:
+        all_syms.add((s["symbol"], s.get("market_type", "crypto")))
+    for w in monitor.watchlist:
+        all_syms.add((w["symbol"], w.get("market_type", "crypto")))
+
+    if not all_syms:
+        all_syms = {
+            ("BTC/USDT", "crypto"), ("ETH/USDT", "crypto"), ("SOL/USDT", "crypto"),
+            ("EURUSD", "forex"), ("XAUUSD", "forex"), ("GBPUSD", "forex"),
+            ("NVDA", "stock"), ("AAPL", "stock")
+        }
+
+    prices = {}
+
+    async def fetch_one(sym, m_type):
+        try:
+            ticker = await _market.get_ticker_24h(sym, m_type)
+            return sym, float(ticker.get("price", 0.0)), float(ticker.get("change_24h", 0.0))
+        except Exception:
+            return sym, 0.0, 0.0
+
+    results = await asyncio.gather(*[fetch_one(sym, mt) for sym, mt in all_syms])
+    for sym, p, chg in results:
+        if p > 0:
+            prices[sym] = {"price": p, "change_24h": chg}
+
+    return {"status": "ok", "prices": prices}
 
 
 @router.post("/scan")

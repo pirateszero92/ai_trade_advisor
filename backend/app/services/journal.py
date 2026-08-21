@@ -1,6 +1,6 @@
-﻿"""Trade Journal and Weekly Review Service."""
+"""Trade Journal and Weekly Review Service."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +11,7 @@ class JournalService:
     @staticmethod
     async def get_performance_summary(db: AsyncSession, days: int = 30) -> dict:
         """Compute performance analytics for closed trades in the given period."""
-        since = datetime.utcnow() - timedelta(days=days)
+        since = datetime.now(timezone.utc) - timedelta(days=days)
 
         stmt = select(Trade).where(Trade.created_at >= since, Trade.status == "closed")
         res = await db.execute(stmt)

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Journal API
 Trade journaling with notes, screenshots, lessons, and performance stats.
 """
@@ -9,15 +9,36 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+import json
+from pathlib import Path
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.core.security import verify_api_key
 
 router = APIRouter()
 
-# In-memory journal store (replace with DB in production)
-_journal: dict[str, dict] = {}
+JOURNAL_STORE_FILE = Path(__file__).parent.parent.parent / "config" / "journal_store.json"
+
+
+def _load_journal() -> dict[str, dict]:
+    if JOURNAL_STORE_FILE.exists():
+        try:
+            return json.loads(JOURNAL_STORE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_journal():
+    try:
+        JOURNAL_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        JOURNAL_STORE_FILE.write_text(json.dumps(_journal, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+_journal: dict[str, dict] = _load_journal()
 
 
 class JournalEntry(BaseModel):
@@ -69,6 +90,7 @@ async def create_entry(
         **entry.model_dump(),
     }
     _journal[entry_id] = record
+    _save_journal()
     return record
 
 
@@ -76,7 +98,7 @@ async def create_entry(
 async def list_entries(
     outcome: Optional[str] = None,
     symbol: Optional[str] = None,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
     _key: str = Depends(verify_api_key),
 ):
     """List journal entries with optional filtering."""
@@ -115,6 +137,7 @@ async def update_entry(
     record.update(data)
     record["updated_at"] = datetime.now(timezone.utc).isoformat()
     _journal[entry_id] = record
+    _save_journal()
     return record
 
 
@@ -127,6 +150,7 @@ async def delete_entry(
     if entry_id not in _journal:
         raise HTTPException(status_code=404, detail="Journal entry not found")
     del _journal[entry_id]
+    _save_journal()
     return {"message": "Entry deleted", "id": entry_id}
 
 

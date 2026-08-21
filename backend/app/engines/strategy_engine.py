@@ -1,4 +1,4 @@
-﻿"""
+"""
 Strategy Engine
 Loads strategy rules from config/strategy.yaml and evaluates SMCSignals
 against those rules to produce a StrategyResult with a go/no-go decision.
@@ -258,8 +258,9 @@ class StrategyEngine:
             if STRATEGY_FILE.exists():
                 with open(STRATEGY_FILE, encoding="utf-8") as f:
                     data = yaml.safe_load(f)
-                logger.info(f"[Strategy] Loaded: {data.get('name', 'Unnamed')}")
-                return data
+                if isinstance(data, dict) and ("long" in data or "entry_rules" in data):
+                    logger.info(f"[Strategy] Loaded: {data.get('name', 'Unnamed')}")
+                    return data
         except Exception as exc:
             logger.warning(f"[Strategy] Could not load strategy.yaml: {exc}")
         return DEFAULT_STRATEGY
