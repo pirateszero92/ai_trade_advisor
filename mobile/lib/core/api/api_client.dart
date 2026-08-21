@@ -36,6 +36,11 @@ class AppApi {
   }
 
   static String get baseUrl {
+    // 1. User-configured custom URL takes top priority
+    if (_customBaseUrl != null && _customBaseUrl!.isNotEmpty) {
+      return _customBaseUrl!;
+    }
+    // 2. Web browser origin fallback
     if (kIsWeb) {
       try {
         final origin = Uri.base.origin;
@@ -45,10 +50,8 @@ class AppApi {
       } catch (_) {}
       return '';
     }
-    if (_customBaseUrl != null && _customBaseUrl!.isNotEmpty) {
-      return _customBaseUrl!;
-    }
-    return 'http://192.168.22.84:8000'; // Default to Raspberry Pi Server IP
+    // 3. Mobile default IP
+    return 'http://192.168.22.84:8000';
   }
 
   static String url(String path) {

@@ -230,14 +230,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     final prefs = await SharedPreferences.getInstance();
     const storage = FlutterSecureStorage();
 
-    // 1. Preload local SharedPreferences
-    if (kIsWeb) {
-      final origin = Uri.base.origin;
-      _apiUrlCtrl.text = (origin.isNotEmpty && !origin.startsWith('null')) ? origin : 'http://localhost:3000';
+    // 1. Preload local SharedPreferences & SecureStorage
+    final savedApiUrl = prefs.getString('api_base_url');
+    if (savedApiUrl != null && savedApiUrl.trim().isNotEmpty) {
+      _apiUrlCtrl.text = savedApiUrl.trim();
+      AppApi.setBaseUrl(savedApiUrl.trim());
     } else {
-      _apiUrlCtrl.text = prefs.getString('api_base_url') ?? 'http://192.168.22.84:8000';
+      final defaultUrl = kIsWeb
+          ? (Uri.base.origin.isNotEmpty && !Uri.base.origin.startsWith('null') ? Uri.base.origin : 'http://192.168.22.84:8000')
+          : 'http://192.168.22.84:8000';
+      _apiUrlCtrl.text = defaultUrl;
     }
-    _lmEndpointCtrl.text = prefs.getString('lm_studio_endpoint') ?? 'http://host.docker.internal:11434';
+
+    _lmEndpointCtrl.text = prefs.getString('lm_studio_endpoint') ?? 'http://home3.netbird.cloud:11434';
     _lmModelCtrl.text = prefs.getString('lm_studio_model') ?? 'gpt-oss:120b-cloud';
     _geminiModelCtrl.text = prefs.getString('gemini_model') ?? 'gemini-2.0-flash';
     _openRouterModelCtrl.text = prefs.getString('openrouter_model') ?? 'anthropic/claude-3.5-sonnet';
@@ -251,9 +256,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     final tabIndex = {'local': 0, 'lmstudio': 0, 'openai': 0, 'gemini': 1, 'openrouter': 2}[savedProvider] ?? 0;
     _aiTabController.animateTo(tabIndex);
 
-    // 2. Fetch live backend configuration to sync
+    // 2. Fetch live backend configuration to sync (only populate if controller is currently empty)
     try {
-      final dio = Dio();
+      final dio = AppApi.dio;
       final resp = await dio.get(AppApi.url('/api/v1/settings/llm/config'));
       final data = resp.data as Map<String, dynamic>;
       if (mounted) {
@@ -265,12 +270,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           final ok = data['openrouter_key'] as String?;
           final om = data['openrouter_model'] as String?;
 
-          if (ep != null && ep.isNotEmpty) _lmEndpointCtrl.text = ep;
-          if (m != null && m.isNotEmpty) _lmModelCtrl.text = m;
-          if (gk != null && gk.isNotEmpty) _geminiKeyCtrl.text = gk;
-          if (gm != null && gm.isNotEmpty) _geminiModelCtrl.text = gm;
-          if (ok != null && ok.isNotEmpty) _openRouterKeyCtrl.text = ok;
-          if (om != null && om.isNotEmpty) _openRouterModelCtrl.text = om;
+          if (_lmEndpointCtrl.text.isEmpty && ep != null && ep.isNotEmpty) _lmEndpointCtrl.text = ep;
+          if (_lmModelCtrl.text.isEmpty && m != null && m.isNotEmpty) _lmModelCtrl.text = m;
+          if (_geminiKeyCtrl.text.isEmpty && gk != null && gk.isNotEmpty && !gk.contains('*')) _geminiKeyCtrl.text = gk;
+          if (_geminiModelCtrl.text.isEmpty && gm != null && gm.isNotEmpty) _geminiModelCtrl.text = gm;
+          if (_openRouterKeyCtrl.text.isEmpty && ok != null && ok.isNotEmpty && !ok.contains('*')) _openRouterKeyCtrl.text = ok;
+          if (_openRouterModelCtrl.text.isEmpty && om != null && om.isNotEmpty) _openRouterModelCtrl.text = om;
         });
       }
 
@@ -279,17 +284,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       final bData = bResp.data as Map<String, dynamic>;
       if (mounted) {
         setState(() {
-          if (bData['mt5_login'] != null && bData['mt5_login'] != 0) _mt5LoginCtrl.text = bData['mt5_login'].toString();
-          if (bData['mt5_password'] != null) _mt5PasswordCtrl.text = bData['mt5_password'].toString();
-          if (bData['mt5_server'] != null) _mt5ServerCtrl.text = bData['mt5_server'].toString();
-          if (bData['mt5_path'] != null) _mt5PathCtrl.text = bData['mt5_path'].toString();
-          if (bData['binance_api_key'] != null) _binanceKeyCtrl.text = bData['binance_api_key'].toString();
-          if (bData['binance_api_secret'] != null) _binanceSecretCtrl.text = bData['binance_api_secret'].toString();
-          if (bData['bybit_api_key'] != null) _bybitKeyCtrl.text = bData['bybit_api_key'].toString();
-          if (bData['bybit_api_secret'] != null) _bybitSecretCtrl.text = bData['bybit_api_secret'].toString();
-          if (bData['alpaca_api_key'] != null) _alpacaKeyCtrl.text = bData['alpaca_api_key'].toString();
-          if (bData['alpaca_api_secret'] != null) _alpacaSecretCtrl.text = bData['alpaca_api_secret'].toString();
-          if (bData['alpaca_base_url'] != null) _alpacaBaseUrlCtrl.text = bData['alpaca_base_url'].toString();
+          if (_mt5LoginCtrl.text.isEmpty && bData['mt5_login'] != null && bData['mt5_login'] != 0) _mt5LoginCtrl.text = bData['mt5_login'].toString();
+          if (_mt5PasswordCtrl.text.isEmpty && bData['mt5_password'] != null) _mt5PasswordCtrl.text = bData['mt5_password'].toString();
+          if (_mt5ServerCtrl.text.isEmpty && bData['mt5_server'] != null) _mt5ServerCtrl.text = bData['mt5_server'].toString();
+          if (_mt5PathCtrl.text.isEmpty && bData['mt5_path'] != null) _mt5PathCtrl.text = bData['mt5_path'].toString();
+          if (_binanceKeyCtrl.text.isEmpty && bData['binance_api_key'] != null && !bData['binance_api_key'].toString().contains('*')) _binanceKeyCtrl.text = bData['binance_api_key'].toString();
+          if (_binanceSecretCtrl.text.isEmpty && bData['binance_api_secret'] != null && !bData['binance_api_secret'].toString().contains('*')) _binanceSecretCtrl.text = bData['binance_api_secret'].toString();
+          if (_bybitKeyCtrl.text.isEmpty && bData['bybit_api_key'] != null && !bData['bybit_api_key'].toString().contains('*')) _bybitKeyCtrl.text = bData['bybit_api_key'].toString();
+          if (_bybitSecretCtrl.text.isEmpty && bData['bybit_api_secret'] != null && !bData['bybit_api_secret'].toString().contains('*')) _bybitSecretCtrl.text = bData['bybit_api_secret'].toString();
+          if (_alpacaKeyCtrl.text.isEmpty && bData['alpaca_api_key'] != null && !bData['alpaca_api_key'].toString().contains('*')) _alpacaKeyCtrl.text = bData['alpaca_api_key'].toString();
+          if (_alpacaSecretCtrl.text.isEmpty && bData['alpaca_api_secret'] != null && !bData['alpaca_api_secret'].toString().contains('*')) _alpacaSecretCtrl.text = bData['alpaca_api_secret'].toString();
+          if (_alpacaBaseUrlCtrl.text.isEmpty && bData['alpaca_base_url'] != null) _alpacaBaseUrlCtrl.text = bData['alpaca_base_url'].toString();
         });
       }
     } catch (_) {}
@@ -468,38 +473,54 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   }
 
   Future<void> _save() async {
-    final notifier = ref.read(settingsProvider.notifier);
-    final current = ref.read(settingsProvider);
+    final apiUrl = _apiUrlCtrl.text.trim();
     final providers = ['lmstudio', 'gemini', 'openrouter'];
     final selectedProvider = providers[_aiTabController.index];
+    final lmEndpoint = _lmEndpointCtrl.text.trim();
+    final lmModel = _lmModelCtrl.text.trim();
+    final geminiKey = _geminiKeyCtrl.text.trim();
+    final geminiModel = _geminiModelCtrl.text.trim();
+    final openRouterKey = _openRouterKeyCtrl.text.trim();
+    final openRouterModel = _openRouterModelCtrl.text.trim();
+    final tgToken = _telegramTokenCtrl.text.trim();
+    final tgChatId = _telegramChatIdCtrl.text.trim();
+    final lineToken = _lineTokenCtrl.text.trim();
+
+    // 1. Immediately apply base URL to runtime API client
+    if (apiUrl.isNotEmpty) {
+      AppApi.setBaseUrl(apiUrl);
+    }
+
+    final notifier = ref.read(settingsProvider.notifier);
+    final current = ref.read(settingsProvider);
 
     await notifier.save(current.copyWith(
-      apiBaseUrl: _apiUrlCtrl.text.trim(),
+      apiBaseUrl: apiUrl,
       aiProvider: selectedProvider,
-      lmStudioEndpoint: _lmEndpointCtrl.text.trim(),
-      lmStudioModel: _lmModelCtrl.text.trim(),
-      geminiKey: _geminiKeyCtrl.text.trim(),
-      geminiModel: _geminiModelCtrl.text.trim(),
-      openRouterKey: _openRouterKeyCtrl.text.trim(),
-      openRouterModel: _openRouterModelCtrl.text.trim(),
-      telegramToken: _telegramTokenCtrl.text.trim(),
-      telegramChatId: _telegramChatIdCtrl.text.trim(),
-      lineToken: _lineTokenCtrl.text.trim(),
+      lmStudioEndpoint: lmEndpoint,
+      lmStudioModel: lmModel,
+      geminiKey: geminiKey,
+      geminiModel: geminiModel,
+      openRouterKey: openRouterKey,
+      openRouterModel: openRouterModel,
+      telegramToken: tgToken,
+      telegramChatId: tgChatId,
+      lineToken: lineToken,
     ));
 
-    // Synchronize active LLM configurations with FastAPI Backend runtime & .env
+    // 2. Synchronize active configurations with FastAPI Backend runtime & storage
     try {
-      final dio = Dio();
+      final dio = AppApi.dio;
       await dio.post(
         AppApi.url('/api/v1/settings/llm/config'),
         data: {
           'provider': selectedProvider,
-          'local_endpoint': _lmEndpointCtrl.text.trim(),
-          'local_model': _lmModelCtrl.text.trim(),
-          'gemini_key': _geminiKeyCtrl.text.trim(),
-          'gemini_model': _geminiModelCtrl.text.trim(),
-          'openrouter_key': _openRouterKeyCtrl.text.trim(),
-          'openrouter_model': _openRouterModelCtrl.text.trim(),
+          'local_endpoint': lmEndpoint,
+          'local_model': lmModel,
+          'gemini_key': geminiKey,
+          'gemini_model': geminiModel,
+          'openrouter_key': openRouterKey,
+          'openrouter_model': openRouterModel,
         },
       );
 
@@ -524,10 +545,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Settings & Broker connections saved ✓'),
+        SnackBar(
+          content: Text('✅ บันทึกการตั้งค่าทั้งหมดเรียบร้อยแล้ว (${apiUrl.isNotEmpty ? apiUrl : AppApi.baseUrl})'),
           backgroundColor: AppColors.bullish,
-          duration: Duration(seconds: 2),
+          duration: const Duration(seconds: 3),
         ),
       );
     }

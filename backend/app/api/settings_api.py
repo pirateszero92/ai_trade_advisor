@@ -35,6 +35,33 @@ ENV_FILE = Path(__file__).parent.parent.parent / ".env"
 if not ENV_FILE.exists():
     ENV_FILE = Path(__file__).parent.parent.parent / "backend" / ".env"
 
+RUNTIME_SETTINGS_FILE = Path(__file__).parent.parent.parent / "config" / "runtime_settings.json"
+
+
+def _load_runtime_settings():
+    if RUNTIME_SETTINGS_FILE.exists():
+        try:
+            import json
+            data = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
+            cfg = get_settings()
+            if "local_endpoint" in data and data["local_endpoint"]:
+                cfg.local_llm_endpoint = data["local_endpoint"]
+            if "local_model" in data and data["local_model"]:
+                cfg.local_llm_model = data["local_model"]
+            if "gemini_key" in data and data["gemini_key"]:
+                cfg.gemini_api_key = data["gemini_key"]
+            if "gemini_model" in data and data["gemini_model"]:
+                cfg.gemini_model = data["gemini_model"]
+            if "openrouter_key" in data and data["openrouter_key"]:
+                cfg.openrouter_api_key = data["openrouter_key"]
+            if "openrouter_model" in data and data["openrouter_model"]:
+                cfg.openrouter_model = data["openrouter_model"]
+        except Exception as e:
+            logger.warning(f"Failed to load runtime settings: {e}")
+
+
+_load_runtime_settings()
+
 
 class PromptSwitchRequest(BaseModel):
     prompt_file: str  # e.g. "advisor_v1.md"
@@ -181,6 +208,21 @@ async def update_llm_config(req: LLMConfigRequest, _key: str = Depends(verify_ap
             ENV_FILE.write_text("\n".join(new_lines), encoding="utf-8")
     except Exception:
         pass
+
+    # Persist to runtime JSON store
+    try:
+        import json
+        RUNTIME_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RUNTIME_SETTINGS_FILE.write_text(json.dumps({
+            "local_endpoint": cfg.local_llm_endpoint,
+            "local_model": cfg.local_llm_model,
+            "gemini_key": cfg.gemini_api_key,
+            "gemini_model": cfg.gemini_model,
+            "openrouter_key": cfg.openrouter_api_key,
+            "openrouter_model": cfg.openrouter_model,
+        }, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Failed to save runtime settings to JSON: {e}")
 
     return {
         "status": "ok",
