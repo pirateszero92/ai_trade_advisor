@@ -306,17 +306,24 @@ class MarketDataEngine:
     async def _get_yfinance(
         self, symbol: str, timeframe: str, market_type: str, limit: int
     ) -> pd.DataFrame:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._get_yfinance_sync, symbol, timeframe, market_type, limit)
+        try:
+            loop = asyncio.get_running_loop()
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, self._get_yfinance_sync, symbol, timeframe, market_type, limit),
+                timeout=3.5,
+            )
+        except Exception as e:
+            logger.debug(f"[MarketData] YFinance fetch timeout/error for {symbol}: {e}")
+            return pd.DataFrame()
 
     def _get_yfinance_sync(self, symbol: str, timeframe: str, market_type: str, limit: int) -> pd.DataFrame:
         yf_sym = normalize_yfinance_symbol(symbol, market_type)
         yf_tf = YF_TF_MAP.get(timeframe, "1h")
 
-        # Period calculation
-        period_map = {"1m": "7d", "2m": "7d", "5m": "60d", "15m": "60d", "30m": "60d",
-                      "1h": "730d", "1d": "2y", "1wk": "5y", "1mo": "10y"}
-        period = period_map.get(yf_tf, "1y")
+        # Period calculation - limit to 60d for intraday to prevent huge downloads
+        period_map = {"1m": "7d", "2m": "7d", "5m": "30d", "15m": "30d", "30m": "30d",
+                      "1h": "60d", "1d": "1y", "1wk": "2y", "1mo": "5y"}
+        period = period_map.get(yf_tf, "60d")
 
         ticker = yf.Ticker(yf_sym)
         df = ticker.history(period=period, interval=yf_tf)
@@ -329,7 +336,25 @@ class MarketDataEngine:
         return df[["open", "high", "low", "close", "volume"]].tail(limit)
 
     async def _get_forex_mt5(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
-        return pd.DataFrame()  # Will fallback to yfinance for XAUUSD/Forex if MT5 is not connected
+        """Fast Forex & Gold kline fetch via Binance Spot liquidity tokens."""
+        clean = symbol.upper().replace("/", "").replace("-", "")
+        if clean in ["XAUUSD", "GOLD"]:
+            spot_sym = "PAXGUSDT"
+        elif clean == "EURUSD":
+            spot_sym = "EURUSDT"
+        elif clean == "GBPUSD":
+            spot_sym = "GBPUSDT"
+        else:
+            spot_sym = None
+
+        if spot_sym:
+            try:
+                df = await self._get_crypto(spot_sym, timeframe, "binance", limit)
+                if not df.empty and len(df) >= 5:
+                    return df
+            except Exception:
+                pass
+        return pd.DataFrame()
 
     def _generate_fallback_data(self, symbol: str, limit: int) -> pd.DataFrame:
         base_price = 64000.0 if "BTC" in symbol.upper() else 2400.0 if "XAU" in symbol.upper() else 180.0

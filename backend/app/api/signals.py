@@ -132,10 +132,6 @@ async def list_signals(
     monitor = MarketMonitor.get_instance()
     signals = monitor.recent_signals[:limit]
 
-    # If empty, run an initial scan to populate
-    if not signals:
-        signals = await monitor.scan_all()
-
     for s in signals:
         if "message" in s:
             s["message"] = _clean_message_text(s["message"])
