@@ -61,6 +61,25 @@ class AppApi {
     return '$base$clean';
   }
 
+  static String wsUrl(String path) {
+    final clean = path.startsWith('/') ? path : '/$path';
+    final base = baseUrl;
+    if (base.isEmpty) {
+      if (kIsWeb) {
+        final loc = Uri.base;
+        final scheme = loc.scheme == 'https' ? 'wss' : 'ws';
+        final host = loc.host;
+        final port = loc.hasPort ? ':${loc.port}' : '';
+        return '$scheme://$host$port$clean';
+      }
+      return 'ws://192.168.22.84:8000$clean';
+    }
+    final wsBase = base
+        .replaceFirst(RegExp(r'^https://', caseSensitive: false), 'wss://')
+        .replaceFirst(RegExp(r'^http://', caseSensitive: false), 'ws://');
+    return '$wsBase$clean';
+  }
+
   static Dio? _dioInstance;
 
   static Dio get dio {
