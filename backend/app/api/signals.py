@@ -125,13 +125,26 @@ async def quick_signal(
 
 @router.get("/")
 async def list_signals(
-    limit: int = Query(20, ge=1, le=50),
+    limit: int = Query(50, ge=1, le=100),
+    market_type: Optional[str] = Query(None),
     _key: str = Depends(verify_api_key),
 ):
-    """List recent high-confluence SMC signals detected by proactive monitor."""
-    from app.services.event_trigger import MarketMonitor, _clean_message_text
+    """List recent high-confluence SMC signals detected by proactive monitor (strictly filtered to Settings watchlist)."""
+    from app.services.event_trigger import MarketMonitor, _clean_message_text, _compact_symbol
     monitor = MarketMonitor.get_instance()
-    signals = monitor.recent_signals[:limit]
+    active_norm_symbols = {
+        _compact_symbol(w.get("symbol", ""))
+        for w in monitor.watchlist if w.get("symbol")
+    }
+    signals = [
+        s for s in monitor.recent_signals
+        if _compact_symbol(s.get("symbol", "")) in active_norm_symbols
+    ]
+    if market_type and market_type.lower() != "all":
+        mt = market_type.lower()
+        signals = [s for s in signals if s.get("market_type", "crypto").lower() == mt]
+
+    signals = signals[:limit]
 
     for s in signals:
         if "message" in s:
@@ -147,23 +160,18 @@ async def list_signals(
 
 @router.get("/live-prices")
 async def get_live_prices(_key: str = Depends(verify_api_key)):
-    """Fetch realtime live prices for all monitored symbols in a single fast batch."""
+    """Fetch realtime live prices for Settings watchlist symbols only."""
     import asyncio
     from app.services.event_trigger import MarketMonitor
     monitor = MarketMonitor.get_instance()
     
     all_syms = set()
-    for s in monitor.recent_signals:
-        all_syms.add((s["symbol"], s.get("market_type", "crypto")))
     for w in monitor.watchlist:
-        all_syms.add((w["symbol"], w.get("market_type", "crypto")))
+        if w.get("symbol"):
+            all_syms.add((w["symbol"], w.get("market_type", "crypto")))
 
     if not all_syms:
-        all_syms = {
-            ("BTC/USDT", "crypto"), ("ETH/USDT", "crypto"), ("SOL/USDT", "crypto"),
-            ("EURUSD", "forex"), ("XAUUSD", "forex"), ("GBPUSD", "forex"),
-            ("NVDA", "stock"), ("AAPL", "stock")
-        }
+        return {"status": "ok", "prices": {}}
 
     prices = {}
 
@@ -186,13 +194,21 @@ async def get_live_prices(_key: str = Depends(verify_api_key)):
 async def trigger_scan(
     _key: str = Depends(verify_api_key),
 ):
-    """Trigger an immediate proactive scan across all watchlist markets."""
-    from app.services.event_trigger import MarketMonitor
+    """Trigger an immediate proactive scan of Settings watchlist markets only."""
+    from app.services.event_trigger import MarketMonitor, _compact_symbol
     monitor = MarketMonitor.get_instance()
     new_signals = await monitor.scan_all()
+    active_norm_symbols = {
+        _compact_symbol(w.get("symbol", ""))
+        for w in monitor.watchlist if w.get("symbol")
+    }
+    filtered_signals = [
+        s for s in new_signals
+        if _compact_symbol(s.get("symbol", "")) in active_norm_symbols
+    ]
     return {
-        "message": f"Scan complete. {len(new_signals)} new setups detected.",
-        "new_count": len(new_signals),
-        "total_signals": len(monitor.recent_signals),
-        "signals": monitor.recent_signals,
+        "message": f"Scan complete. {len(filtered_signals)} setups from Settings watchlist.",
+        "new_count": len(filtered_signals),
+        "total_signals": len(filtered_signals),
+        "signals": filtered_signals,
     }

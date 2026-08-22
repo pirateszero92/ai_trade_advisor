@@ -23,18 +23,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   String _selectedHtfTimeframe = '4h';
 
   final _timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w'];
-  List<String> _cryptoSymbols = [
-    'BTC/USDT',
-    'ETH/USDT',
-    'SOL/USDT',
-    'BTC/THB',
-    'ETH/THB',
-    'SOL/THB',
-    'USDT/THB',
-    'XRP/USDT',
-  ];
-  List<String> _forexSymbols = ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY'];
-  List<String> _stockSymbols = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMD', 'CCJ'];
+  List<String> _cryptoSymbols = [];
+  List<String> _forexSymbols = [];
+  List<String> _stockSymbols = [];
 
   bool _showSMCOverlay = true;
   bool _isLoading = true;
@@ -76,13 +67,23 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     }
   }
 
+  String get _currSym => _selectedSymbol.toUpperCase().contains('THB') ? '฿' : '\$';
+  String _fmtPrice(double v) => v > 0 && v < 10 ? v.toStringAsFixed(4) : v.toStringAsFixed(2);
+
   @override
   void initState() {
     super.initState();
-    _fetchWatchlist();
-    _fetchChartData();
+    _bootstrapFromWatchlist();
     _fetchOpenPositions();
     _startLiveTicker();
+  }
+
+  Future<void> _bootstrapFromWatchlist() async {
+    await _fetchWatchlist();
+    if (!mounted) return;
+    if (_cryptoSymbols.isNotEmpty || _forexSymbols.isNotEmpty || _stockSymbols.isNotEmpty) {
+      _fetchChartData();
+    }
   }
 
   @override
@@ -103,17 +104,37 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       if (resp.statusCode == 200 && resp.data != null) {
         final List<dynamic> list = resp.data['watchlist'] ?? [];
         if (!mounted) return;
+        final newCrypto = <String>[];
+        final newForex = <String>[];
+        final newStock = <String>[];
+
+        for (var item in list) {
+          final raw = item as Map;
+          final sym = raw['symbol']?.toString().trim().toUpperCase() ?? '';
+          final mType = raw['market_type']?.toString().toLowerCase() ?? 'crypto';
+          if (sym.isEmpty) continue;
+          if (mType == 'stock') {
+            if (!newStock.contains(sym)) newStock.add(sym);
+          } else if (mType == 'forex') {
+            if (!newForex.contains(sym)) newForex.add(sym);
+          } else {
+            if (!newCrypto.contains(sym)) newCrypto.add(sym);
+          }
+        }
         setState(() {
-          for (var item in list) {
-            final sym = item['symbol']?.toString().toUpperCase() ?? '';
-            final mType = item['market_type']?.toString().toLowerCase() ?? 'crypto';
-            if (sym.isEmpty) continue;
-            if (mType == 'stock') {
-              if (!_stockSymbols.contains(sym)) _stockSymbols.add(sym);
-            } else if (mType == 'forex') {
-              if (!_forexSymbols.contains(sym)) _forexSymbols.add(sym);
-            } else {
-              if (!_cryptoSymbols.contains(sym)) _cryptoSymbols.add(sym);
+          _cryptoSymbols = newCrypto;
+          _forexSymbols = newForex;
+          _stockSymbols = newStock;
+          if (!_symbols.contains(_selectedSymbol)) {
+            if (_cryptoSymbols.isNotEmpty) {
+              _selectedMarket = 'crypto';
+              _selectedSymbol = _cryptoSymbols.first;
+            } else if (_forexSymbols.isNotEmpty) {
+              _selectedMarket = 'forex';
+              _selectedSymbol = _forexSymbols.first;
+            } else if (_stockSymbols.isNotEmpty) {
+              _selectedMarket = 'stock';
+              _selectedSymbol = _stockSymbols.first;
             }
           }
         });
@@ -712,9 +733,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       onTap: () {
         setState(() {
           _selectedMarket = market;
-          _selectedSymbol = _symbols.first;
+          if (_symbols.isNotEmpty) {
+            _selectedSymbol = _symbols.first;
+          }
         });
-        _fetchChartData();
+        if (_symbols.isNotEmpty) _fetchChartData();
       },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -1238,7 +1261,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                               controller: modalTextCtrl,
                               style: const TextStyle(color: Colors.white, fontSize: 14),
                               decoration: InputDecoration(
-                                hintText: 'ถาม Apex เกี่ยวกับ $_selectedSymbol ณ ราคา \$${_lastPrice.toStringAsFixed(2)}...',
+                                hintText: 'ถาม Apex เกี่ยวกับ $_selectedSymbol ณ ราคา $_currSym${_fmtPrice(_lastPrice)}...',
                                 hintStyle: const TextStyle(color: Colors.white38),
                                 border: InputBorder.none,
                                 contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -1499,7 +1522,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   controller: _chatInputCtrl,
                   style: const TextStyle(color: Colors.white, fontSize: 13),
                   decoration: InputDecoration(
-                    hintText: 'ถาม Apex AI เกี่ยวกับ $_selectedSymbol (\$${_lastPrice.toStringAsFixed(2)})...',
+                    hintText: 'ถาม Apex AI เกี่ยวกับ $_selectedSymbol ($_currSym${_fmtPrice(_lastPrice)})...',
                     hintStyle: const TextStyle(color: Colors.white38, fontSize: 13),
                     border: InputBorder.none,
                     isDense: true,

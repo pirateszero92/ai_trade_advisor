@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     )
 
     app_env: Literal["development", "production"] = "development"
-    app_secret_key: str = "changeme"
+    app_secret_key: str = "ai_trade_sec_key_2026_x89a42f"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 

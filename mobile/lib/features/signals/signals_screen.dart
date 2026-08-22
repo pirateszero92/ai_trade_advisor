@@ -110,6 +110,8 @@ class _SignalsScreenState extends State<SignalsScreen> {
     }
   }
 
+  Set<String> _activeWatchlistNorm = {};
+
   Future<void> _fetchSignals() async {
     setState(() {
       _isLoading = true;
@@ -117,10 +119,22 @@ class _SignalsScreenState extends State<SignalsScreen> {
     });
     try {
       final dio = AppApi.dio;
+
+      // 1. Sync active Watchlist in parallel
+      try {
+        final wlResp = await dio.get(AppApi.url('/api/v1/settings/watchlist'));
+        final List<dynamic> wlList = wlResp.data['watchlist'] ?? [];
+        _activeWatchlistNorm = wlList
+            .map((e) => _normalizeSym((e['symbol'] ?? '').toString()))
+            .where((s) => s.isNotEmpty)
+            .toSet();
+      } catch (_) {}
+
+      // 2. Fetch signals
       final resp = await dio.get(AppApi.url('/api/v1/signals/'));
       final List<dynamic> list = resp.data['signals'] ?? [];
       setState(() {
-        _signals = list.map((e) {
+        final rawList = list.map((e) {
           final m = Map<String, dynamic>.from(e as Map);
           final rawSym = m['symbol']?.toString() ?? '';
           final normSym = _normalizeSym(rawSym);
@@ -129,6 +143,11 @@ class _SignalsScreenState extends State<SignalsScreen> {
           m['live_price'] = (m['live_price'] as num?)?.toDouble() ?? oldLive ?? (m['entry'] as num?)?.toDouble() ?? 100.0;
           return m;
         }).toList();
+
+        _signals = rawList
+            .where((s) => _activeWatchlistNorm.contains(_normalizeSym(s['symbol'] ?? '')))
+            .toList();
+
         _isLoading = false;
         _errorMessage = null;
       });
@@ -173,18 +192,34 @@ class _SignalsScreenState extends State<SignalsScreen> {
     setState(() => _isScanning = true);
     try {
       final dio = AppApi.dio;
+
+      // Sync active Watchlist
+      try {
+        final wlResp = await dio.get(AppApi.url('/api/v1/settings/watchlist'));
+        final List<dynamic> wlList = wlResp.data['watchlist'] ?? [];
+        _activeWatchlistNorm = wlList
+            .map((e) => _normalizeSym((e['symbol'] ?? '').toString()))
+            .where((s) => s.isNotEmpty)
+            .toSet();
+      } catch (_) {}
+
       final resp = await dio.post(
         AppApi.url('/api/v1/signals/scan'),
-        options: Options(receiveTimeout: const Duration(seconds: 30)),
+        options: Options(receiveTimeout: const Duration(seconds: 40)),
       );
       final List<dynamic> list = resp.data['signals'] ?? [];
       if (!mounted) return;
       setState(() {
-        _signals = list.map((e) {
+        final rawList = list.map((e) {
           final m = Map<String, dynamic>.from(e as Map);
           m['live_price'] = (m['entry'] as num?)?.toDouble() ?? 100.0;
           return m;
         }).toList();
+
+        _signals = rawList
+            .where((s) => _activeWatchlistNorm.contains(_normalizeSym(s['symbol'] ?? '')))
+            .toList();
+
         _isScanning = false;
         _errorMessage = null;
       });
@@ -194,6 +229,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
           content: Text('✅ ${resp.data['message'] ?? 'Scan complete'}', style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
         ),
       );
+      _fetchLivePrices();
     } catch (e) {
       if (!mounted) return;
       setState(() => _isScanning = false);
@@ -592,8 +628,11 @@ class _SignalsScreenState extends State<SignalsScreen> {
   }
 
   List<Map<String, dynamic>> get _filteredSignals {
-    if (_selectedFilter == 'all') return _signals;
-    return _signals.where((s) => (s['market_type'] ?? '') == _selectedFilter).toList();
+    var list = _signals
+        .where((s) => _activeWatchlistNorm.contains(_normalizeSym(s['symbol'] ?? '')))
+        .toList();
+    if (_selectedFilter == 'all') return list;
+    return list.where((s) => (s['market_type'] ?? '') == _selectedFilter).toList();
   }
 
   @override
@@ -603,10 +642,27 @@ class _SignalsScreenState extends State<SignalsScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const FittedBox(
-          fit: BoxFit.scaleDown,
-          alignment: Alignment.centerLeft,
-          child: Text('Proactive SMC Scanner', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+        title: Row(
+          children: [
+            const FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text('Proactive SMC Scanner', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            ),
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: AppColors.bullish.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppColors.bullish.withOpacity(0.4)),
+              ),
+              child: Text(
+                '${filtered.length} รายการ',
+                style: const TextStyle(fontSize: 11, color: AppColors.bullish, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
         ),
         backgroundColor: AppColors.surface,
         actions: [
@@ -688,7 +744,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
                                 const SizedBox(height: 12),
                                 const Text('No SMC setups detected in current regime.', style: TextStyle(color: Colors.white70)),
                                 const SizedBox(height: 8),
-                                const Text('Click "Scan Now" to scan all markets proactively.', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
+                                const Text('Scan จะตรวจเฉพาะสินทรัพย์ใน Watchlist ที่หน้า Settings', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
                                 const SizedBox(height: 16),
                                 ElevatedButton.icon(
                                   onPressed: _triggerScan,

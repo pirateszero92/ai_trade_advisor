@@ -55,6 +55,16 @@ def _get_cached_runtime_settings() -> dict:
     return {"entry_mode": "limit", "auto_invalidation": True}
 
 
+def invalidate_runtime_settings_cache() -> None:
+    global _RUNTIME_CFG_CACHE
+    _RUNTIME_CFG_CACHE = (0.0, {})
+
+
+def _compact_symbol(s: str) -> str:
+    """Match symbols across BTC/USDT, BTC-USDT, BTCUSDT."""
+    return str(s or "").strip().upper().replace("-", "").replace("/", "").replace("_", "")
+
+
 def _clean_message_text(raw: str) -> str:
     if not raw:
         return ""
@@ -103,7 +113,21 @@ class MarketMonitor:
         watchlist: Optional[list[dict]] = None,
         poll_interval_seconds: int = 45,
     ):
-        self.watchlist = watchlist or DEFAULT_WATCHLIST
+        if watchlist is not None:
+            self.watchlist = watchlist
+        else:
+            cfg = _get_cached_runtime_settings()
+            saved_wl = cfg.get("watchlist")
+            # Empty list is a valid user choice — only seed defaults when unset.
+            if isinstance(saved_wl, list):
+                self.watchlist = list(saved_wl)
+            else:
+                self.watchlist = list(DEFAULT_WATCHLIST)
+                try:
+                    from app.api.settings_api import _save_runtime_watchlist
+                    _save_runtime_watchlist(self.watchlist)
+                except Exception:
+                    pass
         self.interval = poll_interval_seconds
         self.market_data = MarketDataEngine()
         self.smc = SMCEngine()
@@ -464,9 +488,14 @@ class MarketMonitor:
             return None
 
     async def scan_all(self) -> list[dict]:
-        """Scan all watchlist symbols with bounded concurrency (Semaphore=4) to prevent rate limits."""
+        """Scan only Settings watchlist symbols with bounded concurrency."""
         self.last_scan_time = datetime.now(timezone.utc).isoformat()
-        logger.info(f"🔍 Proactive Scanner scanning {len(self.watchlist)} symbols in parallel...")
+        if not self.watchlist:
+            self.recent_signals = []
+            logger.info("🔍 Proactive Scanner skipped — Settings watchlist is empty.")
+            return []
+
+        logger.info(f"🔍 Proactive Scanner scanning {len(self.watchlist)} Settings watchlist symbols...")
         
         sem = asyncio.Semaphore(4)
 
@@ -481,10 +510,19 @@ class MarketMonitor:
         results = await asyncio.gather(*[_bounded_scan(item) for item in self.watchlist], return_exceptions=False)
         new_signals = [s for s in results if s is not None]
 
-        # 100% Strict Unique 1-Signal-Per-Symbol
-        signal_map = {s["symbol"]: s for s in self.recent_signals}
+        # Keep at most one signal per Settings-watchlist symbol
+        active_norm_symbols = {
+            _compact_symbol(w.get("symbol", ""))
+            for w in self.watchlist if w.get("symbol")
+        }
+        signal_map = {
+            _compact_symbol(s.get("symbol", "")): s for s in self.recent_signals
+            if _compact_symbol(s.get("symbol", "")) in active_norm_symbols
+        }
         for s in new_signals:
-            signal_map[s["symbol"]] = s
+            sym_norm = _compact_symbol(s.get("symbol", ""))
+            if sym_norm in active_norm_symbols:
+                signal_map[sym_norm] = s
         
         # Sort by confluence score descending (highest quality setups first)
         self.recent_signals = sorted(
@@ -493,5 +531,5 @@ class MarketMonitor:
             reverse=True,
         )
 
-        logger.info(f"✅ Parallel scan completed. {len(self.recent_signals)} total distinct symbols monitored.")
+        logger.info(f"✅ Parallel scan completed. {len(self.recent_signals)} active watchlist symbols monitored.")
         return self.recent_signals

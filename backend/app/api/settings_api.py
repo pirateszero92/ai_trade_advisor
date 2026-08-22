@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from loguru import logger
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.core.config import get_settings
@@ -420,22 +420,81 @@ class WatchlistAddRequest(BaseModel):
     exchange: str = "binance"
 
 
+def _save_runtime_watchlist(watchlist: list[dict]):
+    try:
+        import json
+        data = {}
+        if RUNTIME_SETTINGS_FILE.exists():
+            try:
+                data = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        data["watchlist"] = watchlist
+        RUNTIME_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RUNTIME_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            from app.services.event_trigger import invalidate_runtime_settings_cache
+            invalidate_runtime_settings_cache()
+        except Exception:
+            pass
+    except Exception as e:
+        logger.warning(f"[Settings] Failed to save watchlist to file: {e}")
+
+
+def _normalize_symbol(s: str) -> str:
+    import urllib.parse
+    if not s:
+        return ""
+    dec = urllib.parse.unquote(s).strip().upper()
+    return dec.replace("-", "").replace("/", "").replace("_", "")
+
+
+async def _do_remove_watchlist_item(symbol: str) -> dict:
+    from app.services.event_trigger import MarketMonitor
+    norm = _normalize_symbol(symbol)
+    monitor = MarketMonitor.get_instance()
+    before_len = len(monitor.watchlist)
+    monitor.watchlist = [
+        item for item in monitor.watchlist
+        if _normalize_symbol(item.get("symbol", "")) != norm
+    ]
+    after_len = len(monitor.watchlist)
+    
+    # Synchronously prune recent_signals
+    active_norm_symbols = {
+        _normalize_symbol(w.get("symbol", "")) for w in monitor.watchlist if "symbol" in w
+    }
+    monitor.recent_signals = [
+        s for s in monitor.recent_signals
+        if _normalize_symbol(s.get("symbol", "")) in active_norm_symbols
+    ]
+    
+    _save_runtime_watchlist(monitor.watchlist)
+    return {
+        "status": "removed" if after_len < before_len else "not_found",
+        "symbol": symbol,
+        "removed": after_len < before_len,
+        "remaining_count": after_len,
+    }
+
+
 @router.get("/watchlist")
 async def get_watchlist(_key: str = Depends(verify_api_key)):
-    from app.services.event_trigger import MarketMonitor, DEFAULT_WATCHLIST
+    from app.services.event_trigger import MarketMonitor
     try:
         monitor = MarketMonitor.get_instance()
         return {"watchlist": monitor.watchlist}
     except Exception:
-        return {"watchlist": DEFAULT_WATCHLIST}
+        return {"watchlist": []}
 
 
 @router.post("/watchlist")
 async def add_to_watchlist(item: WatchlistAddRequest, _key: str = Depends(verify_api_key)):
     from app.services.event_trigger import MarketMonitor
     monitor = MarketMonitor.get_instance()
+    norm_new = _normalize_symbol(item.symbol)
     for existing in monitor.watchlist:
-        if existing["symbol"] == item.symbol:
+        if _normalize_symbol(existing.get("symbol", "")) == norm_new:
             return {"status": "exists", "message": f"{item.symbol} is already in the watchlist"}
 
     new_item = {
@@ -446,19 +505,161 @@ async def add_to_watchlist(item: WatchlistAddRequest, _key: str = Depends(verify
         "exchange": item.exchange,
     }
     monitor.watchlist.append(new_item)
-    return {"status": "added", "item": new_item}
+    _save_runtime_watchlist(monitor.watchlist)
+    return {"status": "added", "item": new_item, "total_count": len(monitor.watchlist)}
 
 
-@router.delete("/watchlist/{symbol}")
-async def remove_from_watchlist(symbol: str, _key: str = Depends(verify_api_key)):
+@router.delete("/watchlist")
+async def remove_from_watchlist_query(symbol: Optional[str] = Query(None), _key: str = Depends(verify_api_key)):
+    if not symbol:
+        return {"status": "error", "message": "Symbol query parameter required"}
+    return await _do_remove_watchlist_item(symbol)
+
+
+@router.delete("/watchlist/{symbol:path}")
+async def remove_from_watchlist_path(symbol: str, _key: str = Depends(verify_api_key)):
+    return await _do_remove_watchlist_item(symbol)
+
+
+@router.post("/watchlist/reset-default")
+async def reset_watchlist_to_default(_key: str = Depends(verify_api_key)):
+    """Reset watchlist to default core 8 assets."""
+    import copy
+    from app.services.event_trigger import MarketMonitor, DEFAULT_WATCHLIST
+    monitor = MarketMonitor.get_instance()
+    monitor.watchlist = copy.deepcopy(DEFAULT_WATCHLIST)
+    
+    # Synchronously prune recent_signals
+    active_norm_symbols = {
+        _normalize_symbol(w.get("symbol", "")) for w in monitor.watchlist if "symbol" in w
+    }
+    monitor.recent_signals = [
+        s for s in monitor.recent_signals
+        if _normalize_symbol(s.get("symbol", "")) in active_norm_symbols
+    ]
+    
+    _save_runtime_watchlist(monitor.watchlist)
+    return {
+        "status": "ok",
+        "message": "Watchlist reset to default core assets",
+        "watchlist": monitor.watchlist,
+        "count": len(monitor.watchlist),
+    }
+
+
+@router.post("/watchlist/clear-innovestx")
+async def clear_innovestx_watchlist(_key: str = Depends(verify_api_key)):
+    """Remove all /THB InnovestX symbols from the watchlist in one click."""
     from app.services.event_trigger import MarketMonitor
     monitor = MarketMonitor.get_instance()
     before_len = len(monitor.watchlist)
     monitor.watchlist = [
-        item for item in monitor.watchlist if item["symbol"] != symbol
+        item for item in monitor.watchlist
+        if not (item.get("symbol", "").upper().endswith("/THB") or item.get("exchange") == "innovestx")
     ]
     after_len = len(monitor.watchlist)
-    return {"status": "removed" if after_len < before_len else "not_found", "symbol": symbol}
+    
+    # Synchronously prune recent_signals
+    active_norm_symbols = {
+        _normalize_symbol(w.get("symbol", "")) for w in monitor.watchlist if "symbol" in w
+    }
+    monitor.recent_signals = [
+        s for s in monitor.recent_signals
+        if _normalize_symbol(s.get("symbol", "")) in active_norm_symbols
+    ]
+    
+    _save_runtime_watchlist(monitor.watchlist)
+    return {
+        "status": "ok",
+        "message": f"Cleared {before_len - after_len} InnovestX /THB symbols from watchlist",
+        "removed_count": before_len - after_len,
+        "remaining_count": after_len,
+        "watchlist": monitor.watchlist,
+    }
+
+
+class WatchlistImportInnovestXRequest(BaseModel):
+    symbols: Optional[List[str]] = None
+    timeframe: str = "1h"
+    htf_timeframe: str = "4h"
+    api_key: Optional[str] = None
+    api_secret: Optional[str] = None
+
+
+@router.post("/watchlist/import-innovestx")
+async def import_innovestx_watchlist(
+    req: Optional[WatchlistImportInnovestXRequest] = None,
+    _key: str = Depends(verify_api_key),
+):
+    """Fetch all tradable THB asset pairs from InnovestX and automatically import to proactive watchlist."""
+    from app.services.event_trigger import MarketMonitor
+    from app.engines.innovestx_client import InnovestXClient
+    cfg = get_settings()
+
+    actual_req = req or WatchlistImportInnovestXRequest()
+    key = (actual_req.api_key or cfg.innovestx_api_key).strip()
+    sec = (actual_req.api_secret or cfg.innovestx_api_secret).strip()
+
+    client = InnovestXClient(api_key=key, api_secret=sec)
+    pairs = await client.get_formatted_symbols()
+
+    if not pairs:
+        fallback_symbols = [
+            "BTC/THB", "ETH/THB", "SOL/THB", "XRP/THB", "ADA/THB", "DOGE/THB",
+            "BNB/THB", "AVAX/THB", "DOT/THB", "POL/THB", "LINK/THB", "NEAR/THB",
+            "SUI/THB", "SEI/THB", "ARB/THB", "OP/THB", "USDT/THB", "USDC/THB",
+            "AAVE/THB", "UNI/THB", "SAND/THB", "GALA/THB", "PEPE/THB", "SHIB/THB",
+            "XLM/THB", "DYDX/THB", "CRV/THB", "PENDLE/THB", "LDO/THB", "WLD/THB",
+            "TIA/THB", "XAUT/THB", "ASTER/THB", "BLU/THB", "REALX/THB", "SUMX/THB",
+            "CHZ/THB", "SNX/THB", "AXS/THB", "BCH/THB"
+        ]
+        pairs = [{"symbol": s} for s in fallback_symbols]
+
+    monitor = MarketMonitor.get_instance()
+    existing_symbols = {_normalize_symbol(item["symbol"]) for item in monitor.watchlist}
+    added = []
+
+    target_pairs = req.symbols if req and req.symbols else [p["symbol"] for p in pairs]
+
+    for p_sym in target_pairs:
+        if _normalize_symbol(p_sym) not in existing_symbols:
+            new_item = {
+                "symbol": p_sym,
+                "timeframe": req.timeframe if req else "1h",
+                "htf_timeframe": req.htf_timeframe if req else "4h",
+                "market_type": "crypto",
+                "exchange": "innovestx",
+            }
+            monitor.watchlist.append(new_item)
+            existing_symbols.add(_normalize_symbol(p_sym))
+            added.append(new_item)
+
+    _save_runtime_watchlist(monitor.watchlist)
+
+    return {
+        "status": "ok",
+        "message": f"Successfully synced {len(added)} InnovestX THB digital asset pairs into watchlist!",
+        "added_count": len(added),
+        "total_watchlist_count": len(monitor.watchlist),
+        "added_symbols": [a["symbol"] for a in added],
+    }
+
+
+
+@router.get("/broker/innovestx/symbols")
+async def get_innovestx_symbols(
+    api_key: Optional[str] = None,
+    api_secret: Optional[str] = None,
+    _key: str = Depends(verify_api_key),
+):
+    """Get list of formatted InnovestX symbols."""
+    from app.engines.innovestx_client import InnovestXClient
+    cfg = get_settings()
+    key = (api_key or cfg.innovestx_api_key).strip()
+    sec = (api_secret or cfg.innovestx_api_secret).strip()
+    client = InnovestXClient(api_key=key, api_secret=sec)
+    pairs = await client.get_formatted_symbols()
+    return {"symbols": pairs, "count": len(pairs)}
 
 
 # ------------------------------------------------------------------
@@ -470,6 +671,9 @@ class BrokerConfigRequest(BaseModel):
     binance_api_secret: Optional[str] = None
     bybit_api_key: Optional[str] = None
     bybit_api_secret: Optional[str] = None
+    innovestx_api_key: Optional[str] = None
+    innovestx_api_secret: Optional[str] = None
+    innovestx_base_url: Optional[str] = None
     mt5_login: Optional[int] = None
     mt5_password: Optional[str] = None
     mt5_server: Optional[str] = None
@@ -484,6 +688,10 @@ async def get_broker_config(_key: str = Depends(verify_api_key)):
     """Get active runtime broker configuration with masked secrets."""
     cfg = get_settings()
     return {
+        "innovestx_api_key": _mask_secret(cfg.innovestx_api_key),
+        "innovestx_api_secret": _mask_secret(cfg.innovestx_api_secret),
+        "innovestx_base_url": cfg.innovestx_base_url,
+        "innovestx_configured": bool(cfg.innovestx_api_key and cfg.innovestx_api_secret),
         "binance_api_key": _mask_secret(cfg.binance_api_key),
         "binance_api_secret": _mask_secret(cfg.binance_api_secret),
         "binance_configured": bool(cfg.binance_api_key),
@@ -516,6 +724,13 @@ async def update_broker_config(req: BrokerConfigRequest, _key: str = Depends(ver
     if req.bybit_api_secret is not None:
         cfg.bybit_api_secret = req.bybit_api_secret.strip()
 
+    if req.innovestx_api_key is not None:
+        cfg.innovestx_api_key = req.innovestx_api_key.strip()
+    if req.innovestx_api_secret is not None:
+        cfg.innovestx_api_secret = req.innovestx_api_secret.strip()
+    if req.innovestx_base_url is not None:
+        cfg.innovestx_base_url = req.innovestx_base_url.strip()
+
     if req.mt5_login is not None:
         cfg.mt5_login = req.mt5_login
     if req.mt5_password is not None:
@@ -541,6 +756,9 @@ async def update_broker_config(req: BrokerConfigRequest, _key: str = Depends(ver
                 "BINANCE_API_SECRET": cfg.binance_api_secret,
                 "BYBIT_API_KEY": cfg.bybit_api_key,
                 "BYBIT_API_SECRET": cfg.bybit_api_secret,
+                "INNOVESTX_API_KEY": cfg.innovestx_api_key,
+                "INNOVESTX_API_SECRET": cfg.innovestx_api_secret,
+                "INNOVESTX_BASE_URL": cfg.innovestx_base_url,
                 "MT5_LOGIN": str(cfg.mt5_login),
                 "MT5_PASSWORD": cfg.mt5_password,
                 "MT5_SERVER": cfg.mt5_server,
@@ -582,9 +800,31 @@ class BrokerTestRequest(BaseModel):
 async def test_broker_connection(req: BrokerTestRequest, _key: str = Depends(verify_api_key)):
     """Test connection to specified broker or exchange."""
     import httpx
+    from app.engines.innovestx_client import InnovestXClient
     cfg = get_settings()
 
-    if req.broker_type == "binance":
+    if req.broker_type == "innovestx":
+        key = (req.api_key or cfg.innovestx_api_key).strip()
+        sec = (req.api_secret or cfg.innovestx_api_secret).strip()
+        base = "https://api.innovestxonline.com"
+        if req.base_url and "innovestx" in req.base_url:
+            base = req.base_url.strip()
+        elif cfg.innovestx_base_url and "innovestx" in cfg.innovestx_base_url:
+            base = cfg.innovestx_base_url.strip()
+
+        client = InnovestXClient(api_key=key, api_secret=sec, base_url=base)
+        res = await client.test_connection()
+        if res.get("connected"):
+            return {
+                "status": "ok",
+                "message": f"Connected to InnovestX (SCBX)! Found {res.get('total_assets', 39)} digital asset pairs",
+            }
+        return {
+            "status": "error",
+            "message": f"InnovestX Connection failed: {res.get('error') or res.get('message')}",
+        }
+
+    elif req.broker_type == "binance":
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get("https://api.binance.com/api/v3/ping")
@@ -655,9 +895,11 @@ class TradingModeRequest(BaseModel):
 @router.post("/trading-mode")
 async def set_trading_mode(req: TradingModeRequest, _key: str = Depends(verify_api_key)):
     """Set global trading mode (paper or live)."""
+    import os
+    os.environ["TRADING_MODE"] = req.mode
+    get_settings.cache_clear()
     cfg = get_settings()
     cfg.trading_mode = req.mode
-    get_settings.cache_clear()
 
     # Update .env
     try:

@@ -1,4 +1,4 @@
-﻿"""
+"""
 InnovestX Digital Asset Client
 Official REST API integration for InnovestX (SCBX) Digital Asset Exchange (Thailand SEC Regulated).
 Docs: https://api-docs.innovestxonline.com/#apikey-setup
@@ -140,9 +140,39 @@ class InnovestXClient:
     # Public & Market Data Endpoints
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def format_pair(symbol: str) -> str:
+        """Format raw InnovestX symbol like 'BTCTHB' to 'BTC/THB'."""
+        s = symbol.upper()
+        if s.endswith("THB"):
+            base = s[:-3]
+            return f"{base}/THB"
+        elif s.endswith("USDT"):
+            base = s[:-4]
+            return f"{base}/USDT"
+        return s
+
     async def get_symbols(self) -> Dict[str, Any]:
         """Fetch list of all tradable symbols on InnovestX."""
         return await self._request("GET", "/api/v1/digital-asset/symbols")
+
+    async def get_formatted_symbols(self) -> List[Dict[str, Any]]:
+        """Fetch list of symbols formatted for trading and charting."""
+        res = await self.get_symbols()
+        pairs = []
+        if isinstance(res, dict) and res.get("code") == "0000":
+            for item in res.get("data", []):
+                raw = item.get("symbol", "")
+                formatted = self.format_pair(raw)
+                pairs.append({
+                    "raw_symbol": raw,
+                    "symbol": formatted,
+                    "base": formatted.split("/")[0],
+                    "quote": formatted.split("/")[1] if "/" in formatted else "THB",
+                    "price_increment": item.get("priceIncrement"),
+                    "quantity_increment": item.get("quantityIncrement"),
+                })
+        return pairs
 
     async def get_products(self) -> Dict[str, Any]:
         """Fetch list of all supported currencies and digital assets."""

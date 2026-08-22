@@ -47,11 +47,42 @@ YF_TF_MAP = {
 }
 
 
+_USD_THB_CACHE: tuple[float, float] = (0.0, 34.0)
+
+
+async def _get_usd_thb_rate_cached() -> float:
+    global _USD_THB_CACHE
+    import time
+    now = time.time()
+    last_time, rate = _USD_THB_CACHE
+    if now - last_time < 120.0 and rate > 0:
+        return rate
+    try:
+        client = get_shared_http_client()
+        r = await client.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/USDTHB=X?interval=1d&range=1d",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=2.5,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            new_rate = float(data["chart"]["result"][0]["meta"]["regularMarketPrice"])
+            if new_rate > 20.0:
+                _USD_THB_CACHE = (now, new_rate)
+                return new_rate
+    except Exception:
+        pass
+    return rate or 34.0
+
+
 def normalize_yfinance_symbol(symbol: str, market_type: str) -> str:
     """Normalize any symbol format to Yahoo Finance ticker."""
     s = symbol.upper().replace("/", "").replace("-", "")
 
-    if market_type == "forex" or s in ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD"]:
+    if "THB" in s and market_type == "crypto":
+        base = s.replace("THB", "")
+        return f"{base}-USD"
+    elif market_type == "forex" or s in ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD"]:
         if s == "XAUUSD":
             return "GC=F"
         return f"{s}=X"
@@ -88,6 +119,9 @@ class MarketDataEngine:
         self.cfg = get_settings()
         self._ccxt_exchanges: dict = {}
 
+    async def get_usd_thb_rate(self) -> float:
+        return await _get_usd_thb_rate_cached()
+
     async def get_ohlcv(
         self,
         symbol: str,
@@ -112,7 +146,7 @@ class MarketDataEngine:
 
         # 1. Try Primary Source
         try:
-            if market_type == "crypto":
+            if market_type == "crypto" or "THB" in symbol.upper():
                 df = await self._get_crypto(symbol, tf, exchange, limit)
             elif market_type == "forex":
                 df = await self._get_forex_mt5(symbol, tf, limit)
@@ -154,10 +188,16 @@ class MarketDataEngine:
                 return cached_data
 
         client = get_shared_http_client()
-        clean_sym = symbol.replace("/", "").replace("-", "").upper()
+        clean_sym = symbol.replace("/", "").replace("-", "").replace("_", "").upper()
+        is_thb = "THB" in clean_sym
+        if is_thb and (market_type == "crypto" or "THB" in symbol.upper()):
+            base = clean_sym.replace("THB", "")
+            query_sym = f"{base}USDT"
+        else:
+            query_sym = clean_sym
 
         # 2. Crypto lookups (Binance / Bybit)
-        if market_type == "crypto" or ("/" in symbol and "USD" in clean_sym and clean_sym not in ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY"]):
+        if market_type == "crypto" or is_thb or ("/" in symbol and "USD" in clean_sym and clean_sym not in ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY"]):
             binance_hosts = [
                 "https://api.binance.com",
                 "https://api1.binance.com",
@@ -167,15 +207,23 @@ class MarketDataEngine:
             ]
             for host in binance_hosts:
                 try:
-                    resp = await client.get(f"{host}/api/v3/ticker/24hr", params={"symbol": clean_sym}, timeout=2.0)
+                    resp = await client.get(f"{host}/api/v3/ticker/24hr", params={"symbol": query_sym}, timeout=2.0)
                     if resp.status_code == 200:
                         data = resp.json()
+                        p = float(data["lastPrice"])
+                        h = float(data["highPrice"])
+                        l = float(data["lowPrice"])
+                        if is_thb:
+                            rate = await _get_usd_thb_rate_cached()
+                            p = round(p * rate, 4 if p * rate < 100 else 2)
+                            h = round(h * rate, 4 if h * rate < 100 else 2)
+                            l = round(l * rate, 4 if l * rate < 100 else 2)
                         res = {
                             "symbol": symbol,
-                            "price": float(data["lastPrice"]),
+                            "price": p,
                             "change_24h": float(data["priceChangePercent"]),
-                            "high_24h": float(data["highPrice"]),
-                            "low_24h": float(data["lowPrice"]),
+                            "high_24h": h,
+                            "low_24h": l,
                             "volume_24h": float(data["volume"]),
                         }
                         _TICKER_CACHE[cache_key] = (now, res)
@@ -242,6 +290,11 @@ class MarketDataEngine:
                         day_v = float(hist["Volume"].sum())
 
                 if last_p > 0.0:
+                    if is_thb:
+                        rate = _USD_THB_CACHE[1] or 34.0
+                        last_p = round(last_p * rate, 4 if last_p * rate < 100 else 2)
+                        day_h = round(day_h * rate, 4 if day_h * rate < 100 else 2)
+                        day_l = round(day_l * rate, 4 if day_l * rate < 100 else 2)
                     chg = ((last_p - prev_c) / prev_c) * 100 if prev_c > 0 else 0.0
                     return {
                         "symbol": symbol,
@@ -264,7 +317,7 @@ class MarketDataEngine:
 
         try:
             loop = asyncio.get_running_loop()
-            yf_res = await asyncio.wait_for(loop.run_in_executor(None, _get_yf_fast), timeout=2.0)
+            yf_res = await asyncio.wait_for(loop.run_in_executor(_YF_EXECUTOR, _get_yf_fast), timeout=2.0)
             if yf_res and yf_res.get("price", 0.0) > 0.0:
                 _TICKER_CACHE[cache_key] = (now, yf_res)
                 return yf_res
@@ -284,7 +337,14 @@ class MarketDataEngine:
     async def _get_crypto(
         self, symbol: str, timeframe: str, exchange_name: str, limit: int
     ) -> pd.DataFrame:
-        clean_sym = symbol.replace("/", "").replace("-", "").upper()
+        clean_sym = symbol.replace("/", "").replace("-", "").replace("_", "").upper()
+        is_thb = "THB" in clean_sym
+        if is_thb:
+            base = clean_sym.replace("THB", "")
+            query_sym = f"{base}USDT"
+        else:
+            query_sym = clean_sym
+
         tf = CCXT_TF_MAP.get(timeframe, "1h")
         client = get_shared_http_client()
 
@@ -296,12 +356,13 @@ class MarketDataEngine:
             "https://data-api.binance.vision",
         ]
 
+        df = pd.DataFrame()
         for host in binance_hosts:
             try:
                 resp = await client.get(
                     f"{host}/api/v3/klines",
-                    params={"symbol": clean_sym, "interval": tf, "limit": limit},
-                    timeout=2.0,
+                    params={"symbol": query_sym, "interval": tf, "limit": limit},
+                    timeout=2.5,
                 )
                 if resp.status_code == 200:
                     raw = resp.json()
@@ -318,37 +379,50 @@ class MarketDataEngine:
                         df.set_index("timestamp", inplace=True)
                         for col in ["open", "high", "low", "close", "volume"]:
                             df[col] = pd.to_numeric(df[col], errors="coerce")
-                        return df[["open", "high", "low", "close", "volume"]].dropna()
+                        df = df[["open", "high", "low", "close", "volume"]].dropna()
+                        break
             except Exception as e:
                 logger.debug(f"[MarketData] Host {host} failed: {e}")
                 continue
 
         # Try Bybit Spot API
-        try:
-            bybit_tf_map = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "1h": "60", "4h": "240", "1d": "D", "1w": "W"}
-            b_tf = bybit_tf_map.get(tf, "60")
-            async with httpx.AsyncClient(timeout=3.5) as client:
-                resp = await client.get(
-                    "https://api.bybit.com/v5/market/kline",
-                    params={"category": "spot", "symbol": clean_sym, "interval": b_tf, "limit": limit},
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    klist = data.get("result", {}).get("list", [])
-                    if klist and len(klist) >= 5:
-                        # Bybit returns reverse order [start_time, open, high, low, close, volume, ...]
-                        df = pd.DataFrame(
-                            klist,
-                            columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"],
-                        )
-                        df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
-                        df.set_index("timestamp", inplace=True)
-                        for col in ["open", "high", "low", "close", "volume"]:
-                            df[col] = pd.to_numeric(df[col], errors="coerce")
-                        df.sort_index(inplace=True)
-                        return df[["open", "high", "low", "close", "volume"]].dropna()
-        except Exception as e:
-            logger.warning(f"[MarketData] Bybit fetch failed: {e}")
+        if df.empty:
+            try:
+                bybit_tf_map = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "1h": "60", "4h": "240", "1d": "D", "1w": "W"}
+                b_tf = bybit_tf_map.get(tf, "60")
+                async with httpx.AsyncClient(timeout=3.5) as client:
+                    resp = await client.get(
+                        "https://api.bybit.com/v5/market/kline",
+                        params={"category": "spot", "symbol": query_sym, "interval": b_tf, "limit": limit},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        klist = data.get("result", {}).get("list", [])
+                        if klist and len(klist) >= 5:
+                            # Bybit returns reverse order [start_time, open, high, low, close, volume, ...]
+                            df = pd.DataFrame(
+                                klist,
+                                columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"],
+                            )
+                            df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
+                            df.set_index("timestamp", inplace=True)
+                            for col in ["open", "high", "low", "close", "volume"]:
+                                df[col] = pd.to_numeric(df[col], errors="coerce")
+                            df.sort_index(inplace=True)
+                            df = df[["open", "high", "low", "close", "volume"]].dropna()
+            except Exception as e:
+                logger.warning(f"[MarketData] Bybit fetch failed: {e}")
+
+        if not df.empty:
+            if is_thb:
+                usd_thb = await _get_usd_thb_rate_cached()
+                for col in ["open", "high", "low", "close"]:
+                    df[col] = df[col] * usd_thb
+                last_c = df["close"].iloc[-1]
+                dec = 4 if last_c < 100 else 2
+                for col in ["open", "high", "low", "close"]:
+                    df[col] = df[col].round(dec)
+            return df
 
         raise ValueError(f"All crypto data sources failed for {symbol}")
 
@@ -366,6 +440,8 @@ class MarketDataEngine:
             return pd.DataFrame()
 
     def _get_yfinance_sync(self, symbol: str, timeframe: str, market_type: str, limit: int) -> pd.DataFrame:
+        clean_sym = symbol.replace("/", "").replace("-", "").replace("_", "").upper()
+        is_thb = "THB" in clean_sym and (market_type == "crypto" or "THB" in symbol.upper())
         yf_sym = normalize_yfinance_symbol(symbol, market_type)
         is_4h = timeframe.lower() == "4h"
         yf_tf = "1h" if is_4h else YF_TF_MAP.get(timeframe, "1h")
@@ -394,9 +470,19 @@ class MarketDataEngine:
                 "close": "last",
                 "volume": "sum",
             }).dropna()
-            return df_4h.tail(limit)
+            res_df = df_4h.tail(limit)
+        else:
+            res_df = df[["open", "high", "low", "close", "volume"]].tail(limit)
 
-        return df[["open", "high", "low", "close", "volume"]].tail(limit)
+        if is_thb and not res_df.empty:
+            rate = _USD_THB_CACHE[1] or 34.0
+            for col in ["open", "high", "low", "close"]:
+                res_df[col] = res_df[col] * rate
+            last_c = res_df["close"].iloc[-1]
+            dec = 4 if last_c < 100 else 2
+            for col in ["open", "high", "low", "close"]:
+                res_df[col] = res_df[col].round(dec)
+        return res_df
 
     async def _get_forex_mt5(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
         """Fast Forex & Gold kline fetch via Binance Spot liquidity tokens."""

@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from loguru import logger
 
 from app.core.security import verify_api_key
+from app.core.config import get_settings
 from app.engines.execution_engine import ExecutionEngine
 
 from pathlib import Path
@@ -347,13 +348,31 @@ async def close_trade(
 @router.get("/account")
 async def get_account_portfolio(_key: str = Depends(verify_api_key)):
     """Return active broker or paper trading account details, initial capital, equity, and net worth."""
-    from app.core.config import get_settings
+    from app.core.config import Settings, get_settings
     from loguru import logger
-    cfg = get_settings()
+    import os
+    from pathlib import Path
 
-    alpaca_key = cfg.alpaca_api_key
-    alpaca_sec = cfg.alpaca_api_secret
-    alpaca_base = cfg.alpaca_base_url.rstrip("/").removesuffix("/v2").removesuffix("/v1")
+    # Determine effective trading mode from .env or os.environ
+    env_mode = None
+    env_file = Path(__file__).parent.parent.parent / ".env"
+    if env_file.exists():
+        try:
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                if line.startswith("TRADING_MODE="):
+                    env_mode = line.split("=", 1)[1].strip()
+        except Exception:
+            pass
+
+    cfg = get_settings()
+    effective_mode = env_mode or os.environ.get("TRADING_MODE") or cfg.trading_mode or "paper"
+
+    alpaca_key = cfg.alpaca_api_key or os.environ.get("ALPACA_API_KEY", "")
+    alpaca_sec = cfg.alpaca_api_secret or os.environ.get("ALPACA_API_SECRET", "")
+    alpaca_base = (cfg.alpaca_base_url or os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")).rstrip("/").removesuffix("/v2").removesuffix("/v1")
+
+    innovestx_key = cfg.innovestx_api_key or os.environ.get("INNOVESTX_API_KEY", "")
+    innovestx_sec = cfg.innovestx_api_secret or os.environ.get("INNOVESTX_API_SECRET", "")
 
     paper_cfg = _load_paper_config()
     paper_init_cap = float(paper_cfg.get("initial_capital", 100000.0))
@@ -367,39 +386,82 @@ async def get_account_portfolio(_key: str = Depends(verify_api_key)):
         "cash": paper_init_cap,
         "buying_power": paper_init_cap * 4,
         "equity": paper_init_cap,
-        "mode": cfg.trading_mode,
+        "mode": effective_mode,
     }
 
-    if cfg.trading_mode == "live" and alpaca_key and alpaca_sec:
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=6.0) as client:
-                resp = await client.get(
-                    f"{alpaca_base}/v2/account",
-                    headers={"APCA-API-KEY-ID": alpaca_key, "APCA-API-SECRET-KEY": alpaca_sec},
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    equity = float(data.get("equity", 100000.0))
-                    cash = float(data.get("cash", equity))
-                    bp = float(data.get("buying_power", equity * 4))
-                    acc_num = data.get("account_number", "PA3QEVYDQV6I")
-                    status = data.get("status", "ACTIVE")
-                    currency = data.get("currency", "USD")
+    if effective_mode == "live":
+        # 1. Check InnovestX (Thailand Digital Asset Exchange)
+        if innovestx_key and innovestx_sec:
+            try:
+                from app.engines.innovestx_client import InnovestXClient
+                client = InnovestXClient(api_key=innovestx_key, api_secret=innovestx_sec)
+                bal_res = await client.get_account_balances()
+                if bal_res.get("code") == "0000":
+                    bal_list = bal_res.get("data", [])
+                    thb_cash = 0.0
+                    thb_hold = 0.0
+                    non_zero_assets = []
+
+                    for item in bal_list:
+                        prod = str(item.get("product", "")).upper()
+                        amt = float(item.get("amount", 0.0))
+                        hld = float(item.get("hold", 0.0))
+                        if prod == "THB":
+                            thb_cash += amt
+                            thb_hold += hld
+                        elif (amt + hld) > 0:
+                            non_zero_assets.append({"symbol": prod, "amount": amt, "hold": hld})
+
+                    total_equity = thb_cash + thb_hold
+                    masked_id = f"INVX-{innovestx_key[:6].upper()}...{innovestx_key[-4:].upper()}"
 
                     account_info = {
-                        "broker": "Alpaca Markets (" + ("Paper" if "paper" in alpaca_base else "Live") + ")",
-                        "account_id": acc_num,
-                        "status": status,
-                        "currency": currency,
-                        "initial_capital": equity,
-                        "cash": cash,
-                        "buying_power": bp,
-                        "equity": equity,
-                        "mode": cfg.trading_mode,
+                        "broker": "InnovestX (SCBX Digital Asset)",
+                        "account_id": masked_id,
+                        "status": "ACTIVE",
+                        "currency": "THB",
+                        "initial_capital": round(total_equity, 2),
+                        "cash": round(thb_cash, 2),
+                        "buying_power": round(thb_cash, 2),
+                        "equity": round(total_equity, 2),
+                        "mode": "live",
+                        "hold_cash": round(thb_hold, 2),
+                        "asset_count": len(non_zero_assets),
                     }
-        except Exception as e:
-            logger.warning(f"Error fetching Alpaca account in trades API: {e}")
+            except Exception as e:
+                logger.warning(f"Error fetching InnovestX account in trades API: {e}")
+
+        # 2. Check Alpaca Markets if configured and InnovestX was not used
+        elif alpaca_key and alpaca_sec:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=6.0) as client:
+                    resp = await client.get(
+                        f"{alpaca_base}/v2/account",
+                        headers={"APCA-API-KEY-ID": alpaca_key, "APCA-API-SECRET-KEY": alpaca_sec},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        equity = float(data.get("equity", 100000.0))
+                        cash = float(data.get("cash", equity))
+                        bp = float(data.get("buying_power", equity * 4))
+                        acc_num = data.get("account_number", "PA3QEVYDQV6I")
+                        status = data.get("status", "ACTIVE")
+                        currency = data.get("currency", "USD")
+
+                        account_info = {
+                            "broker": "Alpaca Markets (" + ("Paper" if "paper" in alpaca_base else "Live") + ")",
+                            "account_id": acc_num,
+                            "status": status,
+                            "currency": currency,
+                            "initial_capital": equity,
+                            "cash": cash,
+                            "buying_power": bp,
+                            "equity": equity,
+                            "mode": "live",
+                        }
+            except Exception as e:
+                logger.warning(f"Error fetching Alpaca account in trades API: {e}")
 
     # Calculate aggregate realized PnL and open unrealized PnL from trades
     closed_trades = [t for t in _trades.values() if t.get("status") == "closed"]
@@ -443,71 +505,79 @@ async def get_account_portfolio(_key: str = Depends(verify_api_key)):
     return account_info
 
 
-@router.get("/{trade_id}")
-async def get_trade(
-    trade_id: str,
-    _key: str = Depends(verify_api_key),
-):
-    trade = _trades.get(trade_id)
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-    return trade
-
-
-@router.patch("/{trade_id}")
-async def update_trade(
-    trade_id: str,
-    req: UpdateTradeRequest,
-    _key: str = Depends(verify_api_key),
-):
-    global _trades
-    _trades = _load_trades()
-    trade = _trades.get(trade_id)
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-    if req.stop_loss is not None:
-        trade["stop_loss"] = float(req.stop_loss)
-    if req.take_profit is not None:
-        trade["take_profit"] = float(req.take_profit)
-    if req.notes is not None:
-        trade["notes"] = req.notes
-    if req.status is not None:
-        trade["status"] = req.status
-    _trades[trade_id] = trade
-    _save_trades()
-    return trade
-
-
-@router.delete("/{trade_id}")
-async def cancel_trade(
-    trade_id: str,
-    _key: str = Depends(verify_api_key),
-):
-    global _trades
-    _trades = _load_trades()
-    trade = _trades.get(trade_id)
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-    trade["status"] = "cancelled"
-    _trades[trade_id] = trade
-    _save_trades()
-    return {"message": "Trade cancelled", "trade_id": trade_id}
-
-
 # ---------------------------------------------------------------------------
 # InnovestX (SCBX) Live Broker Endpoints
 # ---------------------------------------------------------------------------
 
+class InnovestXCredsRequest(BaseModel):
+    api_key: Optional[str] = None
+    api_secret: Optional[str] = None
+
+
 @router.get("/broker/innovestx/status")
-async def get_innovestx_status(_key: str = Depends(verify_api_key)):
-    """Check connection and authentication status with InnovestX Digital Asset Exchange."""
-    return await _execution.innovestx.test_connection()
+async def get_innovestx_status_get(
+    api_key: Optional[str] = None,
+    api_secret: Optional[str] = None,
+    _key: str = Depends(verify_api_key),
+):
+    """Check connection and authentication status with InnovestX Digital Asset Exchange (GET)."""
+    from app.engines.innovestx_client import InnovestXClient
+    cfg = get_settings()
+    eff_key = (api_key or cfg.innovestx_api_key or "").strip()
+    eff_sec = (api_secret or cfg.innovestx_api_secret or "").strip()
+    if not eff_key or not eff_sec:
+        return {"connected": False, "message": "InnovestX API Key and Secret are required"}
+    client = InnovestXClient(api_key=eff_key, api_secret=eff_sec)
+    return await client.test_connection()
+
+
+@router.post("/broker/innovestx/status")
+async def get_innovestx_status_post(
+    req: Optional[InnovestXCredsRequest] = None,
+    _key: str = Depends(verify_api_key),
+):
+    """Check connection and authentication status with InnovestX Digital Asset Exchange (POST)."""
+    from app.engines.innovestx_client import InnovestXClient
+    cfg = get_settings()
+    eff_key = ((req.api_key if req else None) or cfg.innovestx_api_key or "").strip()
+    eff_sec = ((req.api_secret if req else None) or cfg.innovestx_api_secret or "").strip()
+    if not eff_key or not eff_sec:
+        return {"connected": False, "message": "InnovestX API Key and Secret are required"}
+    client = InnovestXClient(api_key=eff_key, api_secret=eff_sec)
+    return await client.test_connection()
 
 
 @router.get("/broker/innovestx/balances")
-async def get_innovestx_balances(_key: str = Depends(verify_api_key)):
-    """Fetch live account balances from InnovestX."""
-    return await _execution.innovestx.get_account_balances()
+async def get_innovestx_balances_get(
+    api_key: Optional[str] = None,
+    api_secret: Optional[str] = None,
+    _key: str = Depends(verify_api_key),
+):
+    """Fetch live account balances from InnovestX (GET)."""
+    from app.engines.innovestx_client import InnovestXClient
+    cfg = get_settings()
+    eff_key = (api_key or cfg.innovestx_api_key or "").strip()
+    eff_sec = (api_secret or cfg.innovestx_api_secret or "").strip()
+    if not eff_key or not eff_sec:
+        return {"code": "4001", "message": "InnovestX API Key and Secret are required", "data": []}
+    client = InnovestXClient(api_key=eff_key, api_secret=eff_sec)
+    return await client.get_account_balances()
+
+
+@router.post("/broker/innovestx/balances")
+async def get_innovestx_balances_post(
+    req: Optional[InnovestXCredsRequest] = None,
+    _key: str = Depends(verify_api_key),
+):
+    """Fetch live account balances from InnovestX (POST)."""
+    from app.engines.innovestx_client import InnovestXClient
+    cfg = get_settings()
+    eff_key = ((req.api_key if req else None) or cfg.innovestx_api_key or "").strip()
+    eff_sec = ((req.api_secret if req else None) or cfg.innovestx_api_secret or "").strip()
+    if not eff_key or not eff_sec:
+        return {"code": "4001", "message": "InnovestX API Key and Secret are required", "data": []}
+    client = InnovestXClient(api_key=eff_key, api_secret=eff_sec)
+    return await client.get_account_balances()
 
 
 @router.get("/broker/innovestx/open-orders")
@@ -567,3 +637,58 @@ async def cancel_innovestx_order(
     if isinstance(res, dict) and res.get("code") == "0000":
         return {"success": True, "message": f"Order #{req.order_id} cancelled"}
     raise HTTPException(status_code=400, detail=res.get("message", "InnovestX order cancellation failed"))
+
+
+# ---------------------------------------------------------------------------
+# Parameterized Trade Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/{trade_id}")
+async def get_trade(
+    trade_id: str,
+    _key: str = Depends(verify_api_key),
+):
+    trade = _trades.get(trade_id)
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    return trade
+
+
+@router.patch("/{trade_id}")
+async def update_trade(
+    trade_id: str,
+    req: UpdateTradeRequest,
+    _key: str = Depends(verify_api_key),
+):
+    global _trades
+    _trades = _load_trades()
+    trade = _trades.get(trade_id)
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    if req.stop_loss is not None:
+        trade["stop_loss"] = float(req.stop_loss)
+    if req.take_profit is not None:
+        trade["take_profit"] = float(req.take_profit)
+    if req.notes is not None:
+        trade["notes"] = req.notes
+    if req.status is not None:
+        trade["status"] = req.status
+    _trades[trade_id] = trade
+    _save_trades()
+    return trade
+
+
+@router.delete("/{trade_id}")
+async def cancel_trade(
+    trade_id: str,
+    _key: str = Depends(verify_api_key),
+):
+    global _trades
+    _trades = _load_trades()
+    trade = _trades.get(trade_id)
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    trade["status"] = "cancelled"
+    _trades[trade_id] = trade
+    _save_trades()
+    return {"message": "Trade cancelled", "trade_id": trade_id}

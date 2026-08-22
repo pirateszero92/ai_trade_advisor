@@ -776,6 +776,11 @@ class _JournalScreenState extends State<JournalScreen> {
     final mode = acc['mode']?.toString() ?? 'paper';
     final isLive = mode == 'live';
 
+    final currency = (acc['currency'] ?? 'USD').toString().toUpperCase();
+    final currSym = currency == 'THB' ? '฿' : '\$';
+    final holdCash = (acc['hold_cash'] as num?)?.toDouble() ?? 0.0;
+    final isInnovestX = brokerName.toLowerCase().contains('innovestx');
+
     final netWorth = initialCap + realizedPnl + unrealizedPnl;
     final totalPnl = realizedPnl + unrealizedPnl;
     final totalPnlPct = initialCap > 0 ? (totalPnl / initialCap) * 100 : 0.0;
@@ -788,8 +793,8 @@ class _JournalScreenState extends State<JournalScreen> {
         color: const Color(0xFF141926),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: isLive ? AppColors.bearish.withValues(alpha: 0.4) : const Color(0xFF2E384D),
-          width: 1,
+          color: isLive ? (isInnovestX ? const Color(0xFF9B59B6) : AppColors.bearish).withValues(alpha: 0.6) : const Color(0xFF2E384D),
+          width: isLive ? 1.2 : 1,
         ),
       ),
       child: Column(
@@ -801,12 +806,12 @@ class _JournalScreenState extends State<JournalScreen> {
               Container(
                 padding: const EdgeInsets.all(6),
                 decoration: BoxDecoration(
-                  color: isLive ? AppColors.bearish.withValues(alpha: 0.15) : AppColors.bullish.withValues(alpha: 0.15),
+                  color: isLive ? (isInnovestX ? const Color(0xFF9B59B6).withValues(alpha: 0.2) : AppColors.bearish.withValues(alpha: 0.15)) : AppColors.bullish.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Icon(
-                  isLive ? Icons.bolt : Icons.account_balance_wallet_outlined,
-                  color: isLive ? AppColors.bearish : AppColors.bullish,
+                  isLive ? (isInnovestX ? Icons.account_balance_wallet : Icons.bolt) : Icons.account_balance_wallet_outlined,
+                  color: isLive ? (isInnovestX ? const Color(0xFF9B59B6) : AppColors.bearish) : AppColors.bullish,
                   size: 16,
                 ),
               ),
@@ -832,19 +837,19 @@ class _JournalScreenState extends State<JournalScreen> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
                 decoration: BoxDecoration(
-                  color: isLive ? AppColors.bearish.withValues(alpha: 0.2) : const Color(0xFF252540),
+                  color: isLive ? (isInnovestX ? const Color(0xFF9B59B6).withValues(alpha: 0.25) : AppColors.bearish.withValues(alpha: 0.2)) : const Color(0xFF252540),
                   borderRadius: BorderRadius.circular(4),
                   border: Border.all(
-                    color: isLive ? AppColors.bearish : const Color(0xFF00E5FF),
+                    color: isLive ? (isInnovestX ? const Color(0xFF9B59B6) : AppColors.bearish) : const Color(0xFF00E5FF),
                     width: 0.8,
                   ),
                 ),
                 child: Text(
-                  isLive ? '⚡ LIVE' : '🧪 PAPER',
+                  isLive ? (isInnovestX ? '🟣 LIVE (INNOVESTX)' : '⚡ LIVE') : '🧪 PAPER',
                   style: TextStyle(
                     fontSize: 9,
                     fontWeight: FontWeight.bold,
-                    color: isLive ? AppColors.bearish : const Color(0xFF00E5FF),
+                    color: isLive ? (isInnovestX ? const Color(0xFFD4AC0D) : AppColors.bearish) : const Color(0xFF00E5FF),
                   ),
                 ),
               ),
@@ -853,7 +858,7 @@ class _JournalScreenState extends State<JournalScreen> {
 
           const SizedBox(height: 6),
 
-          // Row 2: Reset & Configure Button (if paper)
+          // Row 2: Reset & Configure Button (if paper) or Live Broker Sync (if live)
           if (!isLive) ...[
             InkWell(
               onTap: () => _showResetPaperDialog(initialCap),
@@ -877,21 +882,44 @@ class _JournalScreenState extends State<JournalScreen> {
               ),
             ),
             const SizedBox(height: 6),
+          ] else if (isInnovestX) ...[
+            InkWell(
+              onTap: () => context.go('/settings'),
+              borderRadius: BorderRadius.circular(6),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF9B59B6).withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: const Color(0xFF9B59B6).withValues(alpha: 0.4), width: 0.8),
+                ),
+                child: const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.verified, color: Color(0xFF9B59B6), size: 12),
+                    SizedBox(width: 4),
+                    Text('เชื่อมต่อ InnovestX Exchange สำเร็จ (แตะเพื่อจัดการ)', style: TextStyle(fontSize: 10, color: Color(0xFFD4AC0D), fontWeight: FontWeight.bold)),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
           ],
 
           // Row 3: 3 Column Financial Metrics (Initial Cap, Balance, Total PnL) with Expanded
           Row(
             children: [
               Expanded(
-                child: _accountStat('Initial Cap', '\$${_formatCurrency(initialCap)}', Colors.white70),
+                child: _accountStat('Total Equity', '$currSym${_formatCurrency(initialCap)}', Colors.white70),
               ),
               Expanded(
-                child: _accountStat('Balance', '\$${_formatCurrency(netWorth)}', Colors.white),
+                child: _accountStat('Net Balance', '$currSym${_formatCurrency(netWorth)}', Colors.white),
               ),
               Expanded(
                 child: _accountStat(
                   'Total PnL',
-                  '${isPnlPositive ? '+' : ''}\$${_formatCurrency(totalPnl)} (${isPnlPositive ? '+' : ''}${totalPnlPct.toStringAsFixed(1)}%)',
+                  '${isPnlPositive ? '+' : ''}$currSym${_formatCurrency(totalPnl)} (${isPnlPositive ? '+' : ''}${totalPnlPct.toStringAsFixed(1)}%)',
                   isPnlPositive ? AppColors.bullish : AppColors.bearish,
                 ),
               ),
@@ -911,13 +939,13 @@ class _JournalScreenState extends State<JournalScreen> {
                   const Icon(Icons.flash_on, size: 11, color: Color(0xFFFFD700)),
                   const SizedBox(width: 2),
                   Text(
-                    'Buying Power: \$${_formatCurrency(buyingPower)}',
+                    'Buying Power: $currSym${_formatCurrency(buyingPower)}',
                     style: const TextStyle(fontSize: 9, color: Colors.white54, fontFamily: 'monospace'),
                   ),
                 ],
               ),
               Text(
-                'Cash: \$${_formatCurrency(cash)}',
+                'Available Cash: $currSym${_formatCurrency(cash)}${holdCash > 0 ? ' (Hold: $currSym${_formatCurrency(holdCash)})' : ''}',
                 style: const TextStyle(fontSize: 9, color: Colors.white38, fontFamily: 'monospace'),
               ),
             ],
@@ -966,6 +994,8 @@ class _JournalScreenState extends State<JournalScreen> {
   Widget _buildSummaryBar(String winRate, double realizedPnl, double unrealizedPnl, int openCount, int closedCount, {bool isLandscape = false}) {
     final isRealPos = realizedPnl >= 0;
     final isUnrealPos = unrealizedPnl >= 0;
+    final currency = (_accountInfo?['currency'] ?? 'USD').toString().toUpperCase();
+    final currSym = currency == 'THB' ? '฿' : '\$';
 
     if (isLandscape) {
       return Container(
@@ -1000,14 +1030,14 @@ class _JournalScreenState extends State<JournalScreen> {
                 Expanded(
                   child: _stat(
                     'Unrealized PnL',
-                    '${isUnrealPos ? '+' : ''}\$${unrealizedPnl.toStringAsFixed(2)}',
+                    '${isUnrealPos ? '+' : ''}$currSym${unrealizedPnl.toStringAsFixed(2)}',
                     isUnrealPos ? AppColors.bullish : AppColors.bearish,
                   ),
                 ),
                 Expanded(
                   child: _stat(
                     'Realized PnL',
-                    '${isRealPos ? '+' : ''}\$${realizedPnl.toStringAsFixed(2)}',
+                    '${isRealPos ? '+' : ''}$currSym${realizedPnl.toStringAsFixed(2)}',
                     isRealPos ? AppColors.bullish : AppColors.bearish,
                   ),
                 ),
@@ -1032,14 +1062,14 @@ class _JournalScreenState extends State<JournalScreen> {
           Expanded(
             child: _stat(
               'Unrealized',
-              '${isUnrealPos ? '+' : ''}\$${unrealizedPnl.toStringAsFixed(2)}',
+              '${isUnrealPos ? '+' : ''}$currSym${unrealizedPnl.toStringAsFixed(2)}',
               isUnrealPos ? AppColors.bullish : AppColors.bearish,
             ),
           ),
           Expanded(
             child: _stat(
               'Realized',
-              '${isRealPos ? '+' : ''}\$${realizedPnl.toStringAsFixed(2)}',
+              '${isRealPos ? '+' : ''}$currSym${realizedPnl.toStringAsFixed(2)}',
               isRealPos ? AppColors.bullish : AppColors.bearish,
             ),
           ),
