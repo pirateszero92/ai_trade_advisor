@@ -83,13 +83,29 @@ class AppApi {
   static Dio? _dioInstance;
 
   static Dio get dio {
-    _dioInstance ??= Dio(
-      BaseOptions(
-        connectTimeout: const Duration(seconds: 25),
-        receiveTimeout: const Duration(seconds: 30),
-        sendTimeout: const Duration(seconds: 25),
-      ),
-    );
+    if (_dioInstance == null) {
+      final d = Dio(
+        BaseOptions(
+          connectTimeout: const Duration(seconds: 25),
+          receiveTimeout: const Duration(seconds: 30),
+          sendTimeout: const Duration(seconds: 25),
+        ),
+      );
+      d.interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (options, handler) async {
+            try {
+              final key = await ApiConfig.getApiKey();
+              if (key != null && key.isNotEmpty) {
+                options.headers['X-API-Key'] = key;
+              }
+            } catch (_) {}
+            return handler.next(options);
+          },
+        ),
+      );
+      _dioInstance = d;
+    }
     return _dioInstance!;
   }
 }

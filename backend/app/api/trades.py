@@ -26,6 +26,8 @@ _execution = ExecutionEngine()
 PAPER_CONFIG_FILE = Path(__file__).parent.parent.parent / "config" / "paper_portfolio.json"
 TRADES_STORE_FILE = Path(__file__).parent.parent.parent / "config" / "trades_store.json"
 
+_trades_lock = asyncio.Lock()
+
 
 def _load_trades() -> dict[str, dict]:
     if TRADES_STORE_FILE.exists():
@@ -36,7 +38,7 @@ def _load_trades() -> dict[str, dict]:
     return {}
 
 
-def _save_trades():
+def _save_trades_sync():
     try:
         import tempfile, os
         TRADES_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -47,6 +49,13 @@ def _save_trades():
     except Exception as e:
         logger.error(f"Failed to save trades atomically: {e}")
 
+
+async def _save_trades_async():
+    async with _trades_lock:
+        _save_trades_sync()
+
+
+_save_trades = _save_trades_sync
 
 _trades: dict[str, dict] = _load_trades()
 
@@ -174,21 +183,19 @@ async def place_order(
     sl = float(req.stop_loss)
     tp = float(req.take_profit)
 
-    # Sanity checks for TP & SL relative to Entry
+    # Strict sanity checks for TP & SL relative to Entry
     if dir_ == "long":
-        # SL must be below Entry, TP must be above Entry
-        if sl >= entry or sl <= 0:
-            sl = round(entry * 0.99, 4)  # 1% default SL below entry
-        sl_dist = abs(entry - sl)
-        if tp <= entry or tp <= 0:
-            tp = round(entry + (sl_dist * 2.0), 4)  # Minimum 2.0x RR above entry
+        if sl >= entry or sl <= 0 or tp <= entry or tp <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid SL/TP for LONG: Stop Loss ({sl}) must be below Entry ({entry}) and Take Profit ({tp}) must be above Entry",
+            )
     else:
-        # SHORT: SL must be above Entry, TP must be below Entry
-        if sl <= entry or sl <= 0:
-            sl = round(entry * 1.01, 4)  # 1% default SL above entry
-        sl_dist = abs(sl - entry)
-        if tp >= entry or tp <= 0:
-            tp = round(entry - (sl_dist * 2.0), 4)  # Minimum 2.0x RR below entry
+        if sl <= entry or sl <= 0 or tp >= entry or tp <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid SL/TP for SHORT: Stop Loss ({sl}) must be above Entry ({entry}) and Take Profit ({tp}) must be below Entry",
+            )
 
     result = await _execution.place_order(
         symbol=req.symbol,
@@ -295,6 +302,8 @@ async def close_trade(
     trade = _trades.get(trade_id)
     if not trade:
         raise HTTPException(status_code=404, detail="Trade not found")
+    if trade.get("status") != "open":
+        raise HTTPException(status_code=409, detail=f"Trade {trade_id} is already closed with status '{trade.get('status')}'")
 
     close_p = req.close_price
     if not close_p or close_p <= 0:

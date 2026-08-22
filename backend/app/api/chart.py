@@ -179,7 +179,20 @@ async def get_quote(
     exchange: str = Query("binance"),
     _key: str = Depends(verify_api_key),
 ):
-    """Return fast live price quote for realtime ticker."""
+    """Return fast live price quote for realtime ticker using 24h market stats."""
+    ticker_data = await _market.get_ticker_24h(symbol=symbol, market_type=market_type)
+    if ticker_data and ticker_data.get("price", 0) > 0:
+        import datetime
+        return {
+            "symbol": symbol,
+            "price": ticker_data.get("price", 0.0),
+            "change_24h": round(ticker_data.get("change_24h", 0.0), 2),
+            "high": ticker_data.get("high", 0.0),
+            "low": ticker_data.get("low", 0.0),
+            "volume": ticker_data.get("volume", 0.0),
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+
     df = await _market.get_ohlcv(
         symbol=symbol,
         timeframe="1m",

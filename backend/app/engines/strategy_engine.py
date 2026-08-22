@@ -21,12 +21,12 @@ DEFAULT_STRATEGY: dict[str, Any] = {
     "name": "SMC Default",
     "version": "1.0",
     "filters": {
-        "min_confluence": 4,
+        "min_confluence": 65,
         "require_bos": False,
         "require_ob": True,
         "require_fvg": False,
         "require_liquidity_sweep": False,
-        "min_rr": 1.5,
+        "min_rr": 2.0,
         "allowed_directions": ["long", "short"],
         "htf_alignment_required": False,
     },
@@ -203,13 +203,14 @@ class StrategyEngine:
         self, signal: SMCSignal, filters: dict, result: StrategyResult
     ) -> None:
         """Apply filters that apply to both long and short trades."""
-        min_conf = filters.get("min_confluence", 60)
-        if signal.confluence < min_conf:
+        min_conf = filters.get("min_confluence", 65)
+        conf = getattr(signal, "confluence_score", getattr(signal, "confluence", 0))
+        if conf < min_conf:
             result.rejection_reasons.append(
-                f"Confluence {signal.confluence} < minimum {min_conf}"
+                f"Confluence {conf} < minimum {min_conf}"
             )
         else:
-            result.passed_checks.append(f"Confluence {signal.confluence}/{min_conf} OK")
+            result.passed_checks.append(f"Confluence {conf}/{min_conf} OK")
             result.score += 1
 
         if filters.get("require_bos") and not signal.bos:

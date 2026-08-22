@@ -20,20 +20,25 @@ async def lifespan(app: FastAPI):
     await monitor.start()
     yield
     monitor.stop()
-    logger.info("Shutting down.")
+    try:
+        from app.engines.market_data import close_shared_http_client
+        await close_shared_http_client()
+    except Exception:
+        pass
+    logger.info("Shutting down cleanly.")
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
         title="AI Trade Advisor API",
-        version="1.0.0",
+        version="1.0.1",
         description="SMC-based AI trading advisor",
         lifespan=lifespan,
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origin_regex=r"^https?://.*$",
-        allow_credentials=True,
+        allow_origins=["*"],
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -47,7 +52,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "version": "1.0.0"}
+        return {"status": "ok", "version": "1.0.1"}
 
     return app
 

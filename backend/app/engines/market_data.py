@@ -27,6 +27,13 @@ def get_shared_http_client() -> httpx.AsyncClient:
     return _HTTP_CLIENT
 
 
+async def close_shared_http_client() -> None:
+    global _HTTP_CLIENT
+    if _HTTP_CLIENT is not None and not _HTTP_CLIENT.is_closed:
+        await _HTTP_CLIENT.aclose()
+        _HTTP_CLIENT = None
+
+
 CCXT_TF_MAP = {
     "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
     "1h": "1h", "1H": "1h", "2h": "2h", "4h": "4h", "4H": "4h",
@@ -360,7 +367,7 @@ class MarketDataEngine:
 
     def _get_yfinance_sync(self, symbol: str, timeframe: str, market_type: str, limit: int) -> pd.DataFrame:
         yf_sym = normalize_yfinance_symbol(symbol, market_type)
-        is_4h = timeframe.lower() in ("4h", "4h")
+        is_4h = timeframe.lower() == "4h"
         yf_tf = "1h" if is_4h else YF_TF_MAP.get(timeframe, "1h")
 
         # Period calculation - limit to 60d for intraday to prevent huge downloads

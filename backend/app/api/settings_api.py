@@ -215,18 +215,25 @@ async def update_llm_config(req: LLMConfigRequest, _key: str = Depends(verify_ap
     except Exception:
         pass
 
-    # Persist to runtime JSON store
+    # Persist to runtime JSON store with safe Load-Merge-Write
     try:
         import json
         RUNTIME_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        RUNTIME_SETTINGS_FILE.write_text(json.dumps({
+        current_data = {}
+        if RUNTIME_SETTINGS_FILE.exists():
+            try:
+                current_data = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        current_data.update({
             "local_endpoint": cfg.local_llm_endpoint,
             "local_model": cfg.local_llm_model,
             "gemini_key": cfg.gemini_api_key,
             "gemini_model": cfg.gemini_model,
             "openrouter_key": cfg.openrouter_api_key,
             "openrouter_model": cfg.openrouter_model,
-        }, indent=2), encoding="utf-8")
+        })
+        RUNTIME_SETTINGS_FILE.write_text(json.dumps(current_data, indent=2), encoding="utf-8")
     except Exception as e:
         logger.warning(f"Failed to save runtime settings to JSON: {e}")
 

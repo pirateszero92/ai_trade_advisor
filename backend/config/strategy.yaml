@@ -1,4 +1,4 @@
-﻿# Strategy Configuration
+# Strategy Configuration
 # Defines the rules the StrategyEngine uses to approve/reject trade setups.
 # Reload at runtime via POST /api/v1/settings/strategy/reload
 
@@ -7,12 +7,12 @@ version: "1.1"
 description: >
   Conservative Smart Money Concepts strategy.
   Requires an Order Block + BOS/CHoCH confirmation.
-  Minimum confluence score of 5/10.
+  Minimum confluence score of 65/100.
   R:R must be at least 2.0.
 
 # Universal filters applied to ALL trades
 filters:
-  min_confluence: 5           # SMC confluence score (0-10)
+  min_confluence: 65          # SMC confluence score (0-100)
   require_bos: false          # Require Break of Structure
   require_ob: true            # Require Order Block
   require_fvg: false          # Require Fair Value Gap

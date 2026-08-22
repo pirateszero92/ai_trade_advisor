@@ -1,4 +1,4 @@
-﻿"""
+"""
 Chat History API
 Persistent chat memory stored in SQLite - sessions grouped by day, messages with timestamps.
 Endpoints:
@@ -14,10 +14,12 @@ Endpoints:
 
 from __future__ import annotations
 
+import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, date
 from pathlib import Path
-from typing import Literal, Optional
+from typing import AsyncGenerator, Literal, Optional
 
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,8 +29,24 @@ from app.core.security import verify_api_key
 
 router = APIRouter()
 
-DB_PATH = Path("/app/data/chat_history.db")
+# Dynamic database path resolution (supports Docker /app/data and local OS)
+_data_dir = os.getenv("DATA_DIR")
+if _data_dir:
+    DB_PATH = Path(_data_dir) / "chat_history.db"
+elif Path("/app/data").exists() and os.name != "nt":
+    DB_PATH = Path("/app/data/chat_history.db")
+else:
+    DB_PATH = Path(__file__).parent.parent.parent / "data" / "chat_history.db"
+
 MEMORY_WINDOW = 15  # last N messages sent to LLM as context
+
+
+@asynccontextmanager
+async def _get_db() -> AsyncGenerator[aiosqlite.Connection, None]:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON;")
+        yield db
 
 
 # ---------------------------------------------------------------------------
@@ -36,8 +54,7 @@ MEMORY_WINDOW = 15  # last N messages sent to LLM as context
 # ---------------------------------------------------------------------------
 
 async def init_db() -> None:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _get_db() as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS chat_sessions (
                 id            TEXT PRIMARY KEY,
@@ -110,7 +127,7 @@ class BulkSaveRequest(BaseModel):
 
 @router.get("/sessions")
 async def list_sessions(_key: str = Depends(verify_api_key)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _get_db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT * FROM chat_sessions ORDER BY updated_at DESC")
         rows = await cursor.fetchall()
@@ -139,7 +156,7 @@ async def create_session(req: NewSessionRequest, _key: str = Depends(verify_api_
     day_label = _today_label()
     title = req.title or f"Chat {day_label}"
     now = _now_iso()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _get_db() as db:
         await db.execute(
             "INSERT INTO chat_sessions (id, title, day_label, created_at, updated_at, message_count) VALUES (?,?,?,?,?,0)",
             (session_id, title, day_label, now, now),
@@ -155,7 +172,7 @@ async def create_session(req: NewSessionRequest, _key: str = Depends(verify_api_
 @router.get("/sessions/today")
 async def get_or_create_today(_key: str = Depends(verify_api_key)):
     day_label = _today_label()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _get_db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM chat_sessions WHERE day_label=? ORDER BY created_at DESC LIMIT 1", (day_label,)
@@ -187,7 +204,7 @@ async def get_or_create_today(_key: str = Depends(verify_api_key)):
 
 @router.get("/sessions/{session_id}")
 async def get_session(session_id: str, _key: str = Depends(verify_api_key)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _get_db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT * FROM chat_sessions WHERE id=?", (session_id,))
         row = await cursor.fetchone()
@@ -204,7 +221,7 @@ async def get_session(session_id: str, _key: str = Depends(verify_api_key)):
 
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: str, _key: str = Depends(verify_api_key)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _get_db() as db:
         await db.execute("DELETE FROM chat_sessions WHERE id=?", (session_id,))
         await db.commit()
     return {"deleted": session_id}
@@ -214,7 +231,7 @@ async def delete_session(session_id: str, _key: str = Depends(verify_api_key)):
 async def append_message(session_id: str, req: AppendMessageRequest, _key: str = Depends(verify_api_key)):
     msg_id = str(uuid.uuid4())
     now = _now_iso()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _get_db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT id FROM chat_sessions WHERE id=?", (session_id,))
         if not await cursor.fetchone():
@@ -236,7 +253,7 @@ async def bulk_save(req: BulkSaveRequest, _key: str = Depends(verify_api_key)):
     now = _now_iso()
     user_id = str(uuid.uuid4())
     ai_id = str(uuid.uuid4())
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _get_db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT id FROM chat_sessions WHERE id=?", (req.session_id,))
         if not await cursor.fetchone():
@@ -259,7 +276,7 @@ async def bulk_save(req: BulkSaveRequest, _key: str = Depends(verify_api_key)):
 
 @router.get("/context")
 async def get_context_window(session_id: str, window: int = MEMORY_WINDOW, _key: str = Depends(verify_api_key)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _get_db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT role, content FROM chat_messages WHERE session_id=? ORDER BY created_at DESC LIMIT ?",

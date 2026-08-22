@@ -12,7 +12,9 @@ from typing import Literal
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
+import os
 from app.core.config import get_settings
+from app.core.security import is_valid_api_key
 from app.engines.ai_engine import AIEngine
 from app.engines.market_data import MarketDataEngine
 from app.engines.smc_engine import SMCEngine
@@ -28,10 +30,14 @@ _connections: set[WebSocket] = set()
 
 def _is_ws_authenticated(websocket: WebSocket) -> bool:
     cfg = get_settings()
-    if cfg.app_env == "development":
+    if cfg.app_env == "development" and os.getenv("ALLOW_INSECURE_DEV_AUTH") == "1":
         return True
-    key = websocket.query_params.get("api_key") or websocket.query_params.get("token")
-    return bool(key and key == cfg.app_secret_key)
+    key = (
+        websocket.headers.get("X-API-Key")
+        or websocket.query_params.get("api_key")
+        or websocket.query_params.get("token")
+    )
+    return is_valid_api_key(key)
 
 
 async def broadcast(message: dict) -> None:
@@ -55,6 +61,7 @@ async def ws_signals(websocket: WebSocket):
     WebSocket endpoint for real-time signal streaming.
     """
     if not _is_ws_authenticated(websocket):
+        await websocket.accept()
         await websocket.close(code=4001, reason="Unauthorized")
         return
 
