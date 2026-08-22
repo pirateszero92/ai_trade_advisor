@@ -23,7 +23,16 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   String _selectedHtfTimeframe = '4h';
 
   final _timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w'];
-  List<String> _cryptoSymbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT'];
+  List<String> _cryptoSymbols = [
+    'BTC/USDT',
+    'ETH/USDT',
+    'SOL/USDT',
+    'BTC/THB',
+    'ETH/THB',
+    'SOL/THB',
+    'USDT/THB',
+    'XRP/USDT',
+  ];
   List<String> _forexSymbols = ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY'];
   List<String> _stockSymbols = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMD', 'CCJ'];
 

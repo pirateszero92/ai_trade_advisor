@@ -208,6 +208,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   late TextEditingController _lineTokenCtrl;
 
   // Broker & Exchange controllers
+  late TextEditingController _innovestxKeyCtrl;
+  late TextEditingController _innovestxSecretCtrl;
   late TextEditingController _mt5LoginCtrl;
   late TextEditingController _mt5PasswordCtrl;
   late TextEditingController _mt5ServerCtrl;
@@ -226,7 +228,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   void initState() {
     super.initState();
     _aiTabController = TabController(length: 3, vsync: this);
-    _brokerTabController = TabController(length: 3, vsync: this);
+    _brokerTabController = TabController(length: 4, vsync: this);
     _apiUrlCtrl = TextEditingController();
     _lmEndpointCtrl = TextEditingController();
     _lmModelCtrl = TextEditingController();
@@ -238,6 +240,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     _telegramChatIdCtrl = TextEditingController();
     _lineTokenCtrl = TextEditingController();
 
+    _innovestxKeyCtrl = TextEditingController();
+    _innovestxSecretCtrl = TextEditingController();
     _mt5LoginCtrl = TextEditingController();
     _mt5PasswordCtrl = TextEditingController();
     _mt5ServerCtrl = TextEditingController();
@@ -310,6 +314,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       final bData = bResp.data as Map<String, dynamic>;
       if (mounted) {
         setState(() {
+          if (_innovestxKeyCtrl.text.isEmpty && bData['innovestx_api_key'] != null && !bData['innovestx_api_key'].toString().contains('*')) _innovestxKeyCtrl.text = bData['innovestx_api_key'].toString();
+          if (_innovestxSecretCtrl.text.isEmpty && bData['innovestx_api_secret'] != null && !bData['innovestx_api_secret'].toString().contains('*')) _innovestxSecretCtrl.text = bData['innovestx_api_secret'].toString();
           if (_mt5LoginCtrl.text.isEmpty && bData['mt5_login'] != null && bData['mt5_login'] != 0) _mt5LoginCtrl.text = bData['mt5_login'].toString();
           if (_mt5PasswordCtrl.text.isEmpty && bData['mt5_password'] != null) _mt5PasswordCtrl.text = bData['mt5_password'].toString();
           if (_mt5ServerCtrl.text.isEmpty && bData['mt5_server'] != null) _mt5ServerCtrl.text = bData['mt5_server'].toString();
@@ -503,58 +509,47 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     final apiUrl = _apiUrlCtrl.text.trim();
     final providers = ['lmstudio', 'gemini', 'openrouter'];
     final selectedProvider = providers[_aiTabController.index];
-    final lmEndpoint = _lmEndpointCtrl.text.trim();
-    final lmModel = _lmModelCtrl.text.trim();
-    final geminiKey = _geminiKeyCtrl.text.trim();
-    final geminiModel = _geminiModelCtrl.text.trim();
-    final openRouterKey = _openRouterKeyCtrl.text.trim();
-    final openRouterModel = _openRouterModelCtrl.text.trim();
-    final tgToken = _telegramTokenCtrl.text.trim();
-    final tgChatId = _telegramChatIdCtrl.text.trim();
-    final lineToken = _lineTokenCtrl.text.trim();
 
-    // 1. Immediately apply base URL to runtime API client
-    if (apiUrl.isNotEmpty) {
-      AppApi.setBaseUrl(apiUrl);
-    }
-
-    final notifier = ref.read(settingsProvider.notifier);
     final current = ref.read(settingsProvider);
-
-    await notifier.save(current.copyWith(
+    final newState = current.copyWith(
       apiBaseUrl: apiUrl,
       aiProvider: selectedProvider,
-      lmStudioEndpoint: lmEndpoint,
-      lmStudioModel: lmModel,
-      geminiKey: geminiKey,
-      geminiModel: geminiModel,
-      openRouterKey: openRouterKey,
-      openRouterModel: openRouterModel,
-      telegramToken: tgToken,
-      telegramChatId: tgChatId,
-      lineToken: lineToken,
-    ));
+      lmStudioEndpoint: _lmEndpointCtrl.text.trim(),
+      lmStudioModel: _lmModelCtrl.text.trim(),
+      geminiKey: _geminiKeyCtrl.text.trim(),
+      geminiModel: _geminiModelCtrl.text.trim(),
+      openRouterKey: _openRouterKeyCtrl.text.trim(),
+      openRouterModel: _openRouterModelCtrl.text.trim(),
+      telegramToken: _telegramTokenCtrl.text.trim(),
+      telegramChatId: _telegramChatIdCtrl.text.trim(),
+      lineToken: _lineTokenCtrl.text.trim(),
+    );
 
-    // 2. Synchronize active configurations with FastAPI Backend runtime & storage
+    await ref.read(settingsProvider.notifier).save(newState);
+
     try {
       final dio = AppApi.dio;
+
+      // Save LLM configuration
       await dio.post(
         AppApi.url('/api/v1/settings/llm/config'),
         data: {
           'provider': selectedProvider,
-          'local_endpoint': lmEndpoint,
-          'local_model': lmModel,
-          'gemini_key': geminiKey,
-          'gemini_model': geminiModel,
-          'openrouter_key': openRouterKey,
-          'openrouter_model': openRouterModel,
+          'local_endpoint': _lmEndpointCtrl.text.trim(),
+          'local_model': _lmModelCtrl.text.trim(),
+          'gemini_api_key': _geminiKeyCtrl.text.trim(),
+          'gemini_model': _geminiModelCtrl.text.trim(),
+          'openrouter_api_key': _openRouterKeyCtrl.text.trim(),
+          'openrouter_model': _openRouterModelCtrl.text.trim(),
         },
       );
 
-      // Save Broker & Exchange settings
+      // Save Broker configuration
       await dio.post(
         AppApi.url('/api/v1/settings/brokers/config'),
         data: {
+          'innovestx_api_key': _innovestxKeyCtrl.text.trim(),
+          'innovestx_api_secret': _innovestxSecretCtrl.text.trim(),
           'mt5_login': int.tryParse(_mt5LoginCtrl.text.trim()) ?? 0,
           'mt5_password': _mt5PasswordCtrl.text.trim(),
           'mt5_server': _mt5ServerCtrl.text.trim(),
@@ -729,12 +724,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'login': int.tryParse(_mt5LoginCtrl.text.trim()),
           'server': _mt5ServerCtrl.text.trim(),
           'password': _mt5PasswordCtrl.text.trim(),
-          'api_key': brokerType == 'binance'
-              ? _binanceKeyCtrl.text.trim()
-              : (brokerType == 'bybit' ? _bybitKeyCtrl.text.trim() : _alpacaKeyCtrl.text.trim()),
-          'api_secret': brokerType == 'binance'
-              ? _binanceSecretCtrl.text.trim()
-              : (brokerType == 'bybit' ? _bybitSecretCtrl.text.trim() : _alpacaSecretCtrl.text.trim()),
+          'api_key': brokerType == 'innovestx'
+              ? _innovestxKeyCtrl.text.trim()
+              : (brokerType == 'binance'
+                  ? _binanceKeyCtrl.text.trim()
+                  : (brokerType == 'bybit' ? _bybitKeyCtrl.text.trim() : _alpacaKeyCtrl.text.trim())),
+          'api_secret': brokerType == 'innovestx'
+              ? _innovestxSecretCtrl.text.trim()
+              : (brokerType == 'binance'
+                  ? _binanceSecretCtrl.text.trim()
+                  : (brokerType == 'bybit' ? _bybitSecretCtrl.text.trim() : _alpacaSecretCtrl.text.trim())),
           'base_url': _alpacaBaseUrlCtrl.text.trim(),
         },
       );
@@ -761,6 +760,72 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         );
       }
     }
+  }
+
+  Future<void> _checkInnovestxBalances() async {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A2E),
+        title: const Row(
+          children: [
+            Icon(Icons.account_balance_wallet, color: Color(0xFF9B59B6)),
+            SizedBox(width: 8),
+            Text('InnovestX Balances', style: TextStyle(color: Colors.white, fontSize: 16)),
+          ],
+        ),
+        content: FutureBuilder(
+          future: AppApi.dio.get(AppApi.url('/api/v1/trades/broker/innovestx/balances')),
+          builder: (ctx, snap) {
+            if (snap.connectionState == ConnectionState.waiting) {
+              return const SizedBox(
+                height: 100,
+                child: Center(child: CircularProgressIndicator(color: Color(0xFF9B59B6))),
+              );
+            }
+            if (snap.hasError || snap.data?.statusCode != 200) {
+              return Text('Failed to load balances: ${snap.error ?? snap.data?.statusMessage}', style: const TextStyle(color: AppColors.bearish));
+            }
+            final data = snap.data?.data?['data'] as List<dynamic>? ?? [];
+            if (data.isEmpty) {
+              return const Padding(
+                padding: EdgeInsets.all(16.0),
+                child: Text('No assets or zero balance.', style: TextStyle(color: Colors.white70)),
+              );
+            }
+            return SizedBox(
+              width: double.maxFinite,
+              height: 300,
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: data.length,
+                itemBuilder: (c, i) {
+                  final item = data[i];
+                  final product = item['product'] ?? '';
+                  final amount = double.tryParse(item['amount']?.toString() ?? '0') ?? 0.0;
+                  final hold = double.tryParse(item['hold']?.toString() ?? '0') ?? 0.0;
+                  return ListTile(
+                    dense: true,
+                    title: Text(product, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+                    subtitle: Text('Hold: $hold', style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                    trailing: Text(
+                      amount.toStringAsFixed(product == 'THB' ? 2 : 4),
+                      style: const TextStyle(color: AppColors.bullish, fontWeight: FontWeight.bold, fontSize: 14),
+                    ),
+                  );
+                },
+              ),
+            );
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close', style: TextStyle(color: AppColors.bullish)),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -1128,7 +1193,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               indicatorColor: AppColors.bullish,
               labelColor: AppColors.bullish,
               unselectedLabelColor: Colors.white38,
+              isScrollable: true,
               tabs: const [
+                Tab(text: '🟣 InnovestX (TH)'),
                 Tab(text: '💱 MetaTrader 5'),
                 Tab(text: '🪙 Binance/Bybit'),
                 Tab(text: '📈 Alpaca'),
@@ -1136,10 +1203,63 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             ),
             const SizedBox(height: 16),
             SizedBox(
-              height: 290,
+              height: 310,
               child: TabBarView(
                 controller: _brokerTabController,
                 children: [
+                  // 0. InnovestX (Thailand Digital Asset Exchange)
+                  SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.verified, color: Color(0xFF9B59B6), size: 16),
+                            SizedBox(width: 6),
+                            Text('InnovestX (SCBX) Digital Asset Exchange (THB)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white)),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        _textField(
+                          'InnovestX API Key (64 chars)',
+                          _innovestxKeyCtrl,
+                          hint: '3d593da38986... or API Key',
+                        ),
+                        const SizedBox(height: 10),
+                        _textField(
+                          'API Secret Key',
+                          _innovestxSecretCtrl,
+                          hint: '••••••••',
+                          obscure: true,
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: () => _testBrokerConnection('innovestx'),
+                                icon: const Icon(Icons.cable, size: 16),
+                                label: const Text('Test InnovestX'),
+                                style: OutlinedButton.styleFrom(foregroundColor: AppColors.bullish),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: ElevatedButton.icon(
+                                onPressed: _checkInnovestxBalances,
+                                icon: const Icon(Icons.account_balance_wallet, size: 16),
+                                label: const Text('Check Balance'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFF9B59B6),
+                                  foregroundColor: Colors.white,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
                   // 1. MetaTrader 5 Tab
                   SingleChildScrollView(
                     child: Column(

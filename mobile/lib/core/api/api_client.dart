@@ -25,6 +25,22 @@ class ApiConfig {
   static Future<void> setApiKey(String key) async {
     await _storage.write(key: 'api_key', value: key);
   }
+
+  static Future<String?> getInnovestxKey() async {
+    return _storage.read(key: 'innovestx_key');
+  }
+
+  static Future<void> setInnovestxKey(String key) async {
+    await _storage.write(key: 'innovestx_key', value: key);
+  }
+
+  static Future<String?> getInnovestxSecret() async {
+    return _storage.read(key: 'innovestx_secret');
+  }
+
+  static Future<void> setInnovestxSecret(String secret) async {
+    await _storage.write(key: 'innovestx_secret', value: secret);
+  }
 }
 
 class AppApi {
