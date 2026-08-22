@@ -1,4 +1,4 @@
-﻿from functools import lru_cache
+from functools import lru_cache
 from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     binance_api_secret: str = ""
     bybit_api_key: str = ""
     bybit_api_secret: str = ""
+
+    innovestx_api_key: str = ""
+    innovestx_api_secret: str = ""
+    innovestx_base_url: str = "https://api.innovestxonline.com"
 
     mt5_login: int = 0
     mt5_password: str = ""

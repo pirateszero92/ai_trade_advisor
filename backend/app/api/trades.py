@@ -492,3 +492,78 @@ async def cancel_trade(
     _trades[trade_id] = trade
     _save_trades()
     return {"message": "Trade cancelled", "trade_id": trade_id}
+
+
+# ---------------------------------------------------------------------------
+# InnovestX (SCBX) Live Broker Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/broker/innovestx/status")
+async def get_innovestx_status(_key: str = Depends(verify_api_key)):
+    """Check connection and authentication status with InnovestX Digital Asset Exchange."""
+    return await _execution.innovestx.test_connection()
+
+
+@router.get("/broker/innovestx/balances")
+async def get_innovestx_balances(_key: str = Depends(verify_api_key)):
+    """Fetch live account balances from InnovestX."""
+    return await _execution.innovestx.get_account_balances()
+
+
+@router.get("/broker/innovestx/open-orders")
+async def get_innovestx_open_orders(_key: str = Depends(verify_api_key)):
+    """Fetch live working orders from InnovestX."""
+    return await _execution.innovestx.get_open_orders()
+
+
+@router.get("/broker/innovestx/history")
+async def get_innovestx_order_history(
+    symbol: Optional[str] = None,
+    _key: str = Depends(verify_api_key),
+):
+    """Fetch order history from InnovestX."""
+    return await _execution.innovestx.get_order_history(symbol=symbol)
+
+
+class InnovestXOrderRequest(BaseModel):
+    symbol: str
+    side: Literal["BUY", "SELL", "buy", "sell"]
+    order_type: Literal["LIMIT", "MARKET", "limit", "market"] = "LIMIT"
+    price: float
+    quantity: Optional[float] = None
+    value_thb: Optional[float] = None
+
+
+@router.post("/broker/innovestx/order")
+async def place_innovestx_order(
+    req: InnovestXOrderRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Directly send a live order to InnovestX Digital Asset Exchange."""
+    res = await _execution.innovestx.place_order(
+        symbol=req.symbol,
+        side=req.side,
+        order_type=req.order_type,
+        price=req.price,
+        quantity=req.quantity,
+        value_thb=req.value_thb,
+    )
+    if isinstance(res, dict) and res.get("code") == "0000":
+        return {"success": True, "broker": "InnovestX", "data": res.get("data")}
+    raise HTTPException(status_code=400, detail=res.get("message", "InnovestX order placement failed"))
+
+
+class InnovestXCancelRequest(BaseModel):
+    order_id: int
+
+
+@router.post("/broker/innovestx/cancel")
+async def cancel_innovestx_order(
+    req: InnovestXCancelRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Cancel an active open order on InnovestX."""
+    res = await _execution.innovestx.cancel_order(order_id=req.order_id)
+    if isinstance(res, dict) and res.get("code") == "0000":
+        return {"success": True, "message": f"Order #{req.order_id} cancelled"}
+    raise HTTPException(status_code=400, detail=res.get("message", "InnovestX order cancellation failed"))

@@ -36,5 +36,25 @@
     "closed_at": "2026-08-22T03:05:00.809453+00:00",
     "close_price": 52000.0,
     "close_reason": "TP target reached"
+  },
+  "c81d3c76-8b4d-4f7c-9e0e-88a7a2262ea7": {
+    "mode": "paper",
+    "symbol": "BTC/USDT",
+    "direction": "long",
+    "entry": 50000.0,
+    "stop_loss": 49000.0,
+    "take_profit": 53000.0,
+    "size": 1.0,
+    "status": "closed",
+    "filled_at": 1787378810.110514,
+    "id": "c81d3c76-8b4d-4f7c-9e0e-88a7a2262ea7",
+    "tag": "POS-c81d3c76",
+    "opened_at": "2026-08-22T06:06:50.110514+00:00",
+    "notes": "",
+    "pnl": 2000.0,
+    "pnl_pct": 4.0,
+    "closed_at": "2026-08-22T06:06:50.113142+00:00",
+    "close_price": 52000.0,
+    "close_reason": "TP target reached"
   }
 }
