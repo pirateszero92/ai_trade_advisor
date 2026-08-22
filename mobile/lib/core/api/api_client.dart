@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiConfig {
   static const _storage = FlutterSecureStorage();
-  static const _defaultBaseUrl = kIsWeb ? '' : 'http://192.168.251.23:8000'; // Default to PC LAN IP on mobile
+  static const _defaultBaseUrl = kIsWeb ? '' : 'http://192.168.1.40:8000'; // Default to Pi LAN IP on mobile
 
   static Future<String> getBaseUrl() async {
     if (kIsWeb) return '';
@@ -85,9 +85,9 @@ class AppApi {
   static Dio get dio {
     _dioInstance ??= Dio(
       BaseOptions(
-        connectTimeout: const Duration(seconds: 15),
-        receiveTimeout: const Duration(seconds: 20),
-        sendTimeout: const Duration(seconds: 15),
+        connectTimeout: const Duration(seconds: 25),
+        receiveTimeout: const Duration(seconds: 30),
+        sendTimeout: const Duration(seconds: 25),
       ),
     );
     return _dioInstance!;

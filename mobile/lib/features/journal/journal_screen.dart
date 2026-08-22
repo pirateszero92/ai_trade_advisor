@@ -37,6 +37,8 @@ class _JournalScreenState extends State<JournalScreen> {
   static String _normalizeSym(String s) =>
       s.replaceAll('/', '').replaceAll('-', '').replaceAll('_', '').toUpperCase();
 
+  bool _isPriceFetching = false;
+
   void _startLiveTicker() {
     _liveTimer = Timer.periodic(const Duration(milliseconds: 1000), (timer) {
       if (!mounted) return;
@@ -49,6 +51,8 @@ class _JournalScreenState extends State<JournalScreen> {
   }
 
   Future<void> _fetchLivePrices() async {
+    if (_isPriceFetching) return;
+    _isPriceFetching = true;
     try {
       final dio = AppApi.dio;
       final resp = await dio.get(AppApi.url('/api/v1/signals/live-prices'));
@@ -80,7 +84,10 @@ class _JournalScreenState extends State<JournalScreen> {
           }
         }
       });
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      _isPriceFetching = false;
+    }
   }
 
   Future<void> _fetchAccountInfo() async {
@@ -116,6 +123,7 @@ class _JournalScreenState extends State<JournalScreen> {
       final dio = AppApi.dio;
       final resp = await dio.get(AppApi.url('/api/v1/trades/'));
       final List<dynamic> list = resp.data['trades'] ?? [];
+      if (!mounted) return;
       setState(() {
         _trades = list.map((e) {
           final m = Map<String, dynamic>.from(e as Map);
@@ -202,14 +210,15 @@ class _JournalScreenState extends State<JournalScreen> {
     }
   }
 
-  void _showResetPaperDialog(double currentCapital) {
+  Future<void> _showResetPaperDialog(double currentCapital) async {
     final capCtrl = TextEditingController(text: currentCapital.toStringAsFixed(0));
     bool clearTrades = true;
     final presets = [10000.0, 50000.0, 100000.0, 250000.0, 500000.0, 1000000.0];
 
-    showDialog(
-      context: context,
-      builder: (dialogCtx) => StatefulBuilder(
+    try {
+      await showDialog(
+        context: context,
+        builder: (dialogCtx) => StatefulBuilder(
         builder: (dialogCtx, setDlgState) => AlertDialog(
           backgroundColor: AppColors.surface,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -329,6 +338,9 @@ class _JournalScreenState extends State<JournalScreen> {
         ),
       ),
     );
+    } finally {
+      capCtrl.dispose();
+    }
   }
 
   @override
@@ -1123,40 +1135,49 @@ class _TradeCard extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Direction Badge
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: sideColor.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(4),
-                        border: Border.all(color: sideColor, width: 0.8),
+                Expanded(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Direction Badge
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: sideColor.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: sideColor, width: 0.8),
+                        ),
+                        child: Text(direction, style: TextStyle(color: sideColor, fontWeight: FontWeight.bold, fontSize: 11)),
                       ),
-                      child: Text(direction, style: TextStyle(color: sideColor, fontWeight: FontWeight.bold, fontSize: 11)),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(symbol, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: statusColor.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(4),
-                        border: Border.all(color: statusColor.withValues(alpha: 0.5), width: 0.8),
-                      ),
-                      child: Text(
-                        statusLabel,
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold,
-                          color: statusColor,
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          symbol,
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: statusColor.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: statusColor.withValues(alpha: 0.5), width: 0.8),
+                        ),
+                        child: Text(
+                          statusLabel,
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: statusColor,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
+                const SizedBox(width: 8),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(

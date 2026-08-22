@@ -50,8 +50,7 @@ def test_smc_analysis_structure():
     assert signal.timeframe == "1h"
     assert signal.htf_bias == "bullish"
     assert signal.confluence >= 0
-    assert signal.confluence <= 10
-
+    assert signal.confluence <= 100
 
 def test_premium_discount_calculation():
     df = generate_synthetic_ohlcv(bars=100)

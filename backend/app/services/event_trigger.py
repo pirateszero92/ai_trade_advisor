@@ -33,6 +33,27 @@ DEFAULT_WATCHLIST = [
     {"symbol": "NVDA", "timeframe": "1d", "htf_timeframe": "1w", "market_type": "stock", "exchange": "alpaca"},
 ]
 
+_ALERT_HISTORY: dict[str, float] = {}
+_RUNTIME_CFG_CACHE: tuple[float, dict] = (0.0, {})
+
+
+def _get_cached_runtime_settings() -> dict:
+    import time, json
+    from app.api.settings_api import RUNTIME_SETTINGS_FILE
+    global _RUNTIME_CFG_CACHE
+    now = time.time()
+    last_ts, cached = _RUNTIME_CFG_CACHE
+    if now - last_ts < 5.0 and cached:
+        return cached
+    if RUNTIME_SETTINGS_FILE.exists():
+        try:
+            data = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
+            _RUNTIME_CFG_CACHE = (now, data)
+            return data
+        except Exception:
+            pass
+    return {"entry_mode": "limit", "auto_invalidation": True}
+
 
 def _clean_message_text(raw: str) -> str:
     if not raw:
@@ -180,19 +201,17 @@ class MarketMonitor:
                 if current_price <= 0.0:
                     continue
 
-                # Check TP / SL hit with strict directional safety
+                # Check TP / SL hit with full trailing & breakeven support
                 hit_reason = None
                 if dir_ == "long":
-                    # For LONG: TP must be STRICTLY above entry; SL must be STRICTLY below entry
-                    if tp > entry and current_price >= tp:
+                    if tp > 0 and current_price >= tp:
                         hit_reason = "Take Profit (TP Hit) 🎯"
-                    elif 0 < sl < entry and current_price <= sl:
+                    elif sl > 0 and current_price <= sl:
                         hit_reason = "Stop Loss (SL Hit) 🛑"
                 else:
-                    # For SHORT: TP must be STRICTLY below entry; SL must be STRICTLY above entry
-                    if 0 < tp < entry and current_price <= tp:
+                    if tp > 0 and current_price <= tp:
                         hit_reason = "Take Profit (TP Hit) 🎯"
-                    elif sl > entry and current_price >= sl:
+                    elif sl > 0 and current_price >= sl:
                         hit_reason = "Stop Loss (SL Hit) 🛑"
 
                 if hit_reason:
@@ -238,17 +257,9 @@ class MarketMonitor:
                 htf_bias = htf_sig.bias
 
             # Load user-configured risk & entry settings
-            entry_mode = "limit"
-            auto_invalidation = True
-            try:
-                from app.api.settings_api import RUNTIME_SETTINGS_FILE
-                if RUNTIME_SETTINGS_FILE.exists():
-                    import json
-                    r_cfg = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
-                    entry_mode = r_cfg.get("entry_mode", "limit")
-                    auto_invalidation = r_cfg.get("auto_invalidation", True)
-            except Exception:
-                pass
+            r_cfg = _get_cached_runtime_settings()
+            entry_mode = r_cfg.get("entry_mode", "limit")
+            auto_invalidation = r_cfg.get("auto_invalidation", True)
 
             ltf_sig = self.smc.analyze(ltf_df, symbol, tf, htf_bias=htf_bias, entry_mode=entry_mode)
 
@@ -257,7 +268,7 @@ class MarketMonitor:
             confluence = ltf_sig.confluence_score
 
             # Determine smart SMC setup direction
-            direction = "long"
+            direction = "wait"
             if ltf_sig.liquidity_swept and ltf_sig.in_premium:
                 direction = "short"  # Sweep of highs -> Short pullback
             elif ltf_sig.liquidity_swept and ltf_sig.in_discount:
@@ -268,6 +279,8 @@ class MarketMonitor:
                 direction = "long"
             elif strat_res.direction in ("long", "short"):
                 direction = strat_res.direction
+            elif ltf_sig.direction in ("long", "short"):
+                direction = ltf_sig.direction
 
             live_price = float(ltf_sig.current_price) if ltf_sig.current_price > 0 else float(ltf_df["close"].iloc[-1])
 
@@ -278,8 +291,8 @@ class MarketMonitor:
                 for t in all_t.values():
                     if t.get("status") == "open" and t.get("symbol") == symbol:
                         t_dir = str(t.get("direction", "")).lower()
-                        # If open short and new structure is strong bullish or bullish CHoCH
-                        if t_dir == "short" and (direction == "long" and (confluence >= 65 or ltf_sig.choch)):
+                        # If open short and new confirmed structure is strong bullish with CHoCH
+                        if t_dir == "short" and (direction == "long" and ltf_sig.choch):
                             closed = auto_close_trade_sync(t["id"], "Structure Invalidation (Market turned Bullish) ⚠️", live_price)
                             if closed:
                                 logger.info(f"⚡ AUTO CUT LOSS: {symbol} Short position closed due to bullish invalidation")
@@ -294,8 +307,8 @@ class MarketMonitor:
                                     sl=t.get("stop_loss", 0),
                                     tp=t.get("take_profit", 0),
                                 )
-                        # If open long and new structure is strong bearish or bearish CHoCH
-                        elif t_dir == "long" and (direction == "short" and (confluence >= 65 or ltf_sig.choch)):
+                        # If open long and new confirmed structure is strong bearish with CHoCH
+                        elif t_dir == "long" and (direction == "short" and ltf_sig.choch):
                             closed = auto_close_trade_sync(t["id"], "Structure Invalidation (Market turned Bearish) ⚠️", live_price)
                             if closed:
                                 logger.info(f"⚡ AUTO CUT LOSS: {symbol} Long position closed due to bearish invalidation")
@@ -421,20 +434,28 @@ class MarketMonitor:
             # Broadcast to WebSocket
             await broadcast({"type": "signal", "data": signal_payload})
 
-            # Send Push / Telegram / LINE alerts if high confluence
-            if confluence >= 65:
-                await self.notifier.send_signal_alert(
-                    symbol=symbol,
-                    timeframe=tf.upper(),
-                    direction=direction,
-                    message=f"{structure_summary} | {advice_text}",
-                    confluence_score=confluence,
-                    entry=entry,
-                    sl=sl,
-                    tp=tp,
-                    rr=2.2,
-                )
-                logger.info(f"📢 Alert sent for {symbol} ({direction.upper()}) Confluence: {confluence}")
+            # Send Push / Telegram / LINE alerts if high confluence with 30-min debounce cooldown
+            if confluence >= 65 and direction in ("long", "short"):
+                alert_key = f"{symbol}:{direction.upper()}"
+                now_ts = asyncio.get_event_loop().time()
+                last_alert_ts = _ALERT_HISTORY.get(alert_key, 0.0)
+
+                if now_ts - last_alert_ts > 1800.0:  # 30-min cooldown
+                    _ALERT_HISTORY[alert_key] = now_ts
+                    await self.notifier.send_signal_alert(
+                        symbol=symbol,
+                        timeframe=tf.upper(),
+                        direction=direction,
+                        message=f"{structure_summary} | {advice_text}",
+                        confluence_score=confluence,
+                        entry=entry,
+                        sl=sl,
+                        tp=tp,
+                        rr=2.2,
+                    )
+                    logger.info(f"📢 Alert sent for {symbol} ({direction.upper()}) Confluence: {confluence}")
+                else:
+                    logger.debug(f"Alert for {alert_key} skipped due to 30m cooldown")
 
             return signal_payload
 

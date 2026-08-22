@@ -73,7 +73,17 @@ async def ws_signals(websocket: WebSocket):
                 bias = subscription.get("htf_bias", "neutral")
                 interval = max(5, int(subscription.get("interval", 60)))
 
-                df = await _market.get_ohlcv(symbol=sym, timeframe=tf)
+                s_up = sym.upper().replace("/", "").replace("-", "")
+                if "market_type" in subscription:
+                    m_type = subscription["market_type"]
+                elif any(f in s_up for f in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]):
+                    m_type = "forex"
+                elif "/" in sym or "USDT" in s_up:
+                    m_type = "crypto"
+                else:
+                    m_type = "stock"
+
+                df = await _market.get_ohlcv(symbol=sym, timeframe=tf, market_type=m_type)
                 if not df.empty:
                     signal = _smc.analyze(df, sym, tf, bias)
                     await websocket.send_text(

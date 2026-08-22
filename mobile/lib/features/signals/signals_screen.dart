@@ -47,6 +47,8 @@ class _SignalsScreenState extends State<SignalsScreen> {
     return '\$${price.toStringAsFixed(2)}';
   }
 
+  bool _isPriceFetching = false;
+
   void _startLiveTicker() {
     _liveTimer = Timer.periodic(const Duration(milliseconds: 1000), (timer) {
       if (!mounted) return;
@@ -58,6 +60,8 @@ class _SignalsScreenState extends State<SignalsScreen> {
   }
 
   Future<void> _fetchLivePrices() async {
+    if (_isPriceFetching) return;
+    _isPriceFetching = true;
     try {
       final dio = AppApi.dio;
       final resp = await dio.get(AppApi.url('/api/v1/signals/live-prices'));
@@ -100,7 +104,10 @@ class _SignalsScreenState extends State<SignalsScreen> {
           }
         }
       });
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      _isPriceFetching = false;
+    }
   }
 
   Future<void> _fetchSignals() async {
@@ -171,6 +178,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
         options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
       final List<dynamic> list = resp.data['signals'] ?? [];
+      if (!mounted) return;
       setState(() {
         _signals = list.map((e) {
           final m = Map<String, dynamic>.from(e as Map);
@@ -180,21 +188,18 @@ class _SignalsScreenState extends State<SignalsScreen> {
         _isScanning = false;
         _errorMessage = null;
       });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: AppColors.bullish,
-            content: Text('✅ ${resp.data['message'] ?? 'Scan complete'}', style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-          ),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: AppColors.bullish,
+          content: Text('✅ ${resp.data['message'] ?? 'Scan complete'}', style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+        ),
+      );
     } catch (e) {
+      if (!mounted) return;
       setState(() => _isScanning = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(backgroundColor: AppColors.bearish, content: Text('Scan failed: $e')),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(backgroundColor: AppColors.bearish, content: Text('Scan failed: $e')),
+      );
     }
   }
 
@@ -905,103 +910,112 @@ class _SignalCard extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Interactive Buy / Sell Button on the Direction Badge
-                    ElevatedButton.icon(
-                      onPressed: onExecuteTrade,
-                      icon: Icon(
-                        isLong ? Icons.arrow_upward : Icons.arrow_downward,
-                        size: 13,
-                        color: Colors.black,
+                Expanded(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Interactive Buy / Sell Button on the Direction Badge
+                      ElevatedButton.icon(
+                        onPressed: onExecuteTrade,
+                        icon: Icon(
+                          isLong ? Icons.arrow_upward : Icons.arrow_downward,
+                          size: 13,
+                          color: Colors.black,
+                        ),
+                        label: Text(
+                          isLong ? 'BUY / LONG' : 'SELL / SHORT',
+                          style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 11),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: color,
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
                       ),
-                      label: Text(
-                        isLong ? 'BUY / LONG' : 'SELL / SHORT',
-                        style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 11),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          symbol,
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: color,
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(symbol, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                  ],
+                    ],
+                  ),
                 ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (squeezeStatus == 'squeeze_fire') ...[
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: AppColors.bullish.withValues(alpha: 0.15),
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: AppColors.bullish.withValues(alpha: 0.8), width: 0.8),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Wrap(
+                        alignment: WrapAlignment.end,
+                        spacing: 4,
+                        runSpacing: 3,
+                        children: [
+                          if (squeezeStatus == 'squeeze_fire') ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: AppColors.bullish.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(color: AppColors.bullish.withValues(alpha: 0.8), width: 0.8),
+                              ),
+                              child: const Text('⚡ SQUEEZE FIRE', style: TextStyle(fontSize: 8, fontWeight: FontWeight.bold, color: AppColors.bullish)),
                             ),
-                            child: const Text('⚡ SQUEEZE FIRE', style: TextStyle(fontSize: 8, fontWeight: FontWeight.bold, color: AppColors.bullish)),
-                          ),
-                          const SizedBox(width: 4),
-                        ] else if (squeezeStatus == 'squeeze_on') ...[
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFF9900).withValues(alpha: 0.15),
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: const Color(0xFFFF9900).withValues(alpha: 0.8), width: 0.8),
+                          ] else if (squeezeStatus == 'squeeze_on') ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFF9900).withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(color: const Color(0xFFFF9900).withValues(alpha: 0.8), width: 0.8),
+                              ),
+                              child: const Text('⚫ SQUEEZING', style: TextStyle(fontSize: 8, fontWeight: FontWeight.bold, color: Color(0xFFFF9900))),
                             ),
-                            child: const Text('⚫ SQUEEZING', style: TextStyle(fontSize: 8, fontWeight: FontWeight.bold, color: Color(0xFFFF9900))),
+                          ],
+                          if (deltaAbsorption) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF00E5FF).withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(color: const Color(0xFF00E5FF).withValues(alpha: 0.8), width: 0.8),
+                              ),
+                              child: const Text('🌊 ABSORPTION', style: TextStyle(fontSize: 8, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))),
+                            ),
+                          ],
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: gradeColor.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: gradeColor.withValues(alpha: 0.6), width: 0.8),
+                            ),
+                            child: Text(
+                              gradeText,
+                              style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: gradeColor),
+                            ),
                           ),
-                          const SizedBox(width: 4),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF252540),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(timeframe, style: const TextStyle(fontSize: 10, color: Colors.white70, fontWeight: FontWeight.bold)),
+                          ),
                         ],
-                        if (deltaAbsorption) ...[
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF00E5FF).withValues(alpha: 0.15),
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: const Color(0xFF00E5FF).withValues(alpha: 0.8), width: 0.8),
-                            ),
-                            child: const Text('🌊 ABSORPTION', style: TextStyle(fontSize: 8, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))),
-                          ),
-                          const SizedBox(width: 4),
-                        ],
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: gradeColor.withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(4),
-                            border: Border.all(color: gradeColor.withValues(alpha: 0.6), width: 0.8),
-                          ),
-                          child: Text(
-                            gradeText,
-                            style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: gradeColor),
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF252540),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Text(timeframe, style: const TextStyle(fontSize: 10, color: Colors.white70, fontWeight: FontWeight.bold)),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      time,
-                      style: const TextStyle(fontSize: 10, color: Colors.white38, fontWeight: FontWeight.w500),
-                    ),
-                  ],
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        time,
+                        style: const TextStyle(fontSize: 10, color: Colors.white38, fontWeight: FontWeight.w500),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),

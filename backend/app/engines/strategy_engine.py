@@ -203,7 +203,7 @@ class StrategyEngine:
         self, signal: SMCSignal, filters: dict, result: StrategyResult
     ) -> None:
         """Apply filters that apply to both long and short trades."""
-        min_conf = filters.get("min_confluence", 4)
+        min_conf = filters.get("min_confluence", 60)
         if signal.confluence < min_conf:
             result.rejection_reasons.append(
                 f"Confluence {signal.confluence} < minimum {min_conf}"
@@ -258,7 +258,7 @@ class StrategyEngine:
             if STRATEGY_FILE.exists():
                 with open(STRATEGY_FILE, encoding="utf-8") as f:
                     data = yaml.safe_load(f)
-                if isinstance(data, dict) and ("long" in data or "entry_rules" in data):
+                if isinstance(data, dict) and ("long" in data or "long_conditions" in data or "entry_rules" in data):
                     logger.info(f"[Strategy] Loaded: {data.get('name', 'Unnamed')}")
                     return data
         except Exception as exc:

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from loguru import logger
 
 from app.core.security import verify_api_key
 from app.engines.execution_engine import ExecutionEngine
@@ -37,10 +38,14 @@ def _load_trades() -> dict[str, dict]:
 
 def _save_trades():
     try:
+        import tempfile, os
         TRADES_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TRADES_STORE_FILE.write_text(json.dumps(_trades, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+        with tempfile.NamedTemporaryFile("w", dir=TRADES_STORE_FILE.parent, delete=False, encoding="utf-8") as tf:
+            json.dump(_trades, tf, indent=2)
+            tempname = tf.name
+        os.replace(tempname, TRADES_STORE_FILE)
+    except Exception as e:
+        logger.error(f"Failed to save trades atomically: {e}")
 
 
 _trades: dict[str, dict] = _load_trades()
@@ -93,10 +98,14 @@ def _load_paper_config() -> dict:
 
 def _save_paper_config(data: dict):
     try:
+        import tempfile, os
         PAPER_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        PAPER_CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+        with tempfile.NamedTemporaryFile("w", dir=PAPER_CONFIG_FILE.parent, delete=False, encoding="utf-8") as tf:
+            json.dump(data, tf, indent=2)
+            tempname = tf.name
+        os.replace(tempname, PAPER_CONFIG_FILE)
+    except Exception as e:
+        logger.error(f"Failed to save paper config atomically: {e}")
 
 
 class ResetAccountRequest(BaseModel):
@@ -436,13 +445,41 @@ async def get_trade(
     return trade
 
 
+@router.patch("/{trade_id}")
+async def update_trade(
+    trade_id: str,
+    req: UpdateTradeRequest,
+    _key: str = Depends(verify_api_key),
+):
+    global _trades
+    _trades = _load_trades()
+    trade = _trades.get(trade_id)
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    if req.stop_loss is not None:
+        trade["stop_loss"] = float(req.stop_loss)
+    if req.take_profit is not None:
+        trade["take_profit"] = float(req.take_profit)
+    if req.notes is not None:
+        trade["notes"] = req.notes
+    if req.status is not None:
+        trade["status"] = req.status
+    _trades[trade_id] = trade
+    _save_trades()
+    return trade
+
+
 @router.delete("/{trade_id}")
 async def cancel_trade(
     trade_id: str,
     _key: str = Depends(verify_api_key),
 ):
+    global _trades
+    _trades = _load_trades()
     trade = _trades.get(trade_id)
     if not trade:
         raise HTTPException(status_code=404, detail="Trade not found")
     trade["status"] = "cancelled"
+    _trades[trade_id] = trade
+    _save_trades()
     return {"message": "Trade cancelled", "trade_id": trade_id}

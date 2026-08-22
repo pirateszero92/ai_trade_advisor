@@ -3,13 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from typing import Literal, Optional
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import httpx
 from loguru import logger
 
 from app.core.config import get_settings
+
+_YF_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="yf_worker")
+_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
+
+
+def get_shared_http_client() -> httpx.AsyncClient:
+    global _HTTP_CLIENT
+    if _HTTP_CLIENT is None or _HTTP_CLIENT.is_closed:
+        _HTTP_CLIENT = httpx.AsyncClient(
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+            timeout=httpx.Timeout(4.0, connect=1.5),
+        )
+    return _HTTP_CLIENT
 
 
 CCXT_TF_MAP = {
@@ -43,7 +58,22 @@ def normalize_yfinance_symbol(symbol: str, market_type: str) -> str:
 
 
 _TICKER_CACHE: dict[str, tuple[float, dict]] = {}
+_OHLCV_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
 CACHE_TTL_SECONDS = 5.0
+CACHE_OHLCV_TTL = 8.0
+
+
+def _prune_caches(now: float) -> None:
+    """Keep in-memory cache bounded by evicting expired entries."""
+    if len(_TICKER_CACHE) > 300:
+        expired_ticker = [k for k, (ts, _) in _TICKER_CACHE.items() if now - ts > CACHE_TTL_SECONDS * 3]
+        for k in expired_ticker:
+            _TICKER_CACHE.pop(k, None)
+
+    if len(_OHLCV_CACHE) > 300:
+        expired_ohlcv = [k for k, (ts, _) in _OHLCV_CACHE.items() if now - ts > CACHE_OHLCV_TTL * 3]
+        for k in expired_ohlcv:
+            _OHLCV_CACHE.pop(k, None)
 
 
 class MarketDataEngine:
@@ -59,33 +89,41 @@ class MarketDataEngine:
         exchange: str = "binance",
         limit: int = 300,
     ) -> pd.DataFrame:
-        """Fetch OHLCV dataframe with automatic fallback chain."""
+        """Fetch OHLCV dataframe with automatic caching and fallback chain."""
+        import time
+        now = time.time()
+        _prune_caches(now)
         tf = timeframe.lower()
+        cache_key = f"{symbol}:{tf}:{market_type}:{limit}"
+
+        if cache_key in _OHLCV_CACHE:
+            ts, cached_df = _OHLCV_CACHE[cache_key]
+            if now - ts < CACHE_OHLCV_TTL and not cached_df.empty:
+                return cached_df.copy()
+
+        df = pd.DataFrame()
 
         # 1. Try Primary Source
         try:
             if market_type == "crypto":
                 df = await self._get_crypto(symbol, tf, exchange, limit)
-                if not df.empty and len(df) >= 5:
-                    return df
             elif market_type == "forex":
                 df = await self._get_forex_mt5(symbol, tf, limit)
-                if not df.empty and len(df) >= 5:
-                    return df
             elif market_type == "stock":
                 df = await self._get_yfinance(symbol, tf, market_type, limit)
-                if not df.empty and len(df) >= 5:
-                    return df
         except Exception as e:
             logger.warning(f"[MarketData] Primary fetch failed for {symbol} ({e}), trying yfinance fallback...")
 
         # 2. Fallback to Yahoo Finance
-        try:
-            df = await self._get_yfinance(symbol, tf, market_type, limit)
-            if not df.empty and len(df) >= 5:
-                return df
-        except Exception as e:
-            logger.warning(f"[MarketData] Yahoo Finance fallback failed for {symbol}: {e}")
+        if df.empty or len(df) < 5:
+            try:
+                df = await self._get_yfinance(symbol, tf, market_type, limit)
+            except Exception as e:
+                logger.warning(f"[MarketData] Yahoo Finance fallback failed for {symbol}: {e}")
+
+        if not df.empty and len(df) >= 5:
+            _OHLCV_CACHE[cache_key] = (now, df)
+            return df
 
         # 3. Final Fallback: Return empty dataframe safely (no fake data into strategy)
         logger.warning(f"[MarketData] All market data providers failed for {symbol}")
@@ -99,6 +137,7 @@ class MarketDataEngine:
         """Fetch exact 24h ticker with fast caching and non-blocking executors."""
         import time
         now = time.time()
+        _prune_caches(now)
         cache_key = f"{symbol}:{market_type}"
 
         # 1. Return from memory cache if fresh
@@ -107,37 +146,38 @@ class MarketDataEngine:
             if now - ts < CACHE_TTL_SECONDS:
                 return cached_data
 
-        import httpx
+        client = get_shared_http_client()
         clean_sym = symbol.replace("/", "").replace("-", "").upper()
 
         # 2. Crypto lookups (Binance / Bybit)
         if market_type == "crypto" or ("/" in symbol and "USD" in clean_sym and clean_sym not in ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY"]):
             binance_hosts = [
-                "https://data-api.binance.vision",
-                "https://api1.binance.com",
                 "https://api.binance.com",
+                "https://api1.binance.com",
+                "https://api2.binance.com",
+                "https://api3.binance.com",
+                "https://data-api.binance.vision",
             ]
             for host in binance_hosts:
                 try:
-                    async with httpx.AsyncClient(timeout=1.2) as client:
-                        resp = await client.get(f"{host}/api/v3/ticker/24hr", params={"symbol": clean_sym})
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            res = {
-                                "symbol": symbol,
-                                "price": float(data["lastPrice"]),
-                                "change_24h": float(data["priceChangePercent"]),
-                                "high_24h": float(data["highPrice"]),
-                                "low_24h": float(data["lowPrice"]),
-                                "volume_24h": float(data["volume"]),
-                            }
-                            _TICKER_CACHE[cache_key] = (now, res)
-                            return res
+                    resp = await client.get(f"{host}/api/v3/ticker/24hr", params={"symbol": clean_sym}, timeout=2.0)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        res = {
+                            "symbol": symbol,
+                            "price": float(data["lastPrice"]),
+                            "change_24h": float(data["priceChangePercent"]),
+                            "high_24h": float(data["highPrice"]),
+                            "low_24h": float(data["lowPrice"]),
+                            "volume_24h": float(data["volume"]),
+                        }
+                        _TICKER_CACHE[cache_key] = (now, res)
+                        return res
                 except Exception:
                     continue
 
         # 3. Fast Fallback for Forex & Gold via Binance Spot tokens (PAXGUSDT, EURUSDT, GBPUSDT)
-        if clean_sym in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "GOLD"]:
+        if clean_sym in ["EURUSD", "GBPUSD", "XAUUSD", "GOLD"]:
             try:
                 if clean_sym in ["XAUUSD", "GOLD"]:
                     spot_sym = "PAXGUSDT"
@@ -146,9 +186,10 @@ class MarketDataEngine:
                 elif clean_sym == "GBPUSD":
                     spot_sym = "GBPUSDT"
                 else:
-                    spot_sym = "USDCAD"
-                async with httpx.AsyncClient(timeout=1.5) as client:
-                    resp = await client.get("https://data-api.binance.vision/api/v3/ticker/24hr", params={"symbol": spot_sym})
+                    spot_sym = None
+
+                if spot_sym:
+                    resp = await client.get("https://api.binance.com/api/v3/ticker/24hr", params={"symbol": spot_sym}, timeout=2.0)
                     if resp.status_code == 200:
                         data = resp.json()
                         res = {
@@ -236,40 +277,41 @@ class MarketDataEngine:
     async def _get_crypto(
         self, symbol: str, timeframe: str, exchange_name: str, limit: int
     ) -> pd.DataFrame:
-        import httpx
         clean_sym = symbol.replace("/", "").replace("-", "").upper()
         tf = CCXT_TF_MAP.get(timeframe, "1h")
+        client = get_shared_http_client()
 
         binance_hosts = [
-            "https://data-api.binance.vision",
-            "https://api1.binance.com",
             "https://api.binance.com",
+            "https://api1.binance.com",
             "https://api2.binance.com",
+            "https://api3.binance.com",
+            "https://data-api.binance.vision",
         ]
 
         for host in binance_hosts:
             try:
-                async with httpx.AsyncClient(timeout=3.5) as client:
-                    resp = await client.get(
-                        f"{host}/api/v3/klines",
-                        params={"symbol": clean_sym, "interval": tf, "limit": limit},
-                    )
-                    if resp.status_code == 200:
-                        raw = resp.json()
-                        if raw and len(raw) >= 5:
-                            # Binance kline format: [open_time, open, high, low, close, volume, ...]
-                            df = pd.DataFrame(
-                                raw,
-                                columns=[
-                                    "timestamp", "open", "high", "low", "close", "volume",
-                                    "close_time", "qav", "trades", "tb_base", "tb_quote", "ignore"
-                                ],
-                            )
-                            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-                            df.set_index("timestamp", inplace=True)
-                            for col in ["open", "high", "low", "close", "volume"]:
-                                df[col] = pd.to_numeric(df[col], errors="coerce")
-                            return df[["open", "high", "low", "close", "volume"]].dropna()
+                resp = await client.get(
+                    f"{host}/api/v3/klines",
+                    params={"symbol": clean_sym, "interval": tf, "limit": limit},
+                    timeout=2.0,
+                )
+                if resp.status_code == 200:
+                    raw = resp.json()
+                    if raw and len(raw) >= 5:
+                        # Binance kline format: [open_time, open, high, low, close, volume, ...]
+                        df = pd.DataFrame(
+                            raw,
+                            columns=[
+                                "timestamp", "open", "high", "low", "close", "volume",
+                                "close_time", "qav", "trades", "tb_base", "tb_quote", "ignore"
+                            ],
+                        )
+                        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+                        df.set_index("timestamp", inplace=True)
+                        for col in ["open", "high", "low", "close", "volume"]:
+                            df[col] = pd.to_numeric(df[col], errors="coerce")
+                        return df[["open", "high", "low", "close", "volume"]].dropna()
             except Exception as e:
                 logger.debug(f"[MarketData] Host {host} failed: {e}")
                 continue
@@ -309,8 +351,8 @@ class MarketDataEngine:
         try:
             loop = asyncio.get_running_loop()
             return await asyncio.wait_for(
-                loop.run_in_executor(None, self._get_yfinance_sync, symbol, timeframe, market_type, limit),
-                timeout=3.5,
+                loop.run_in_executor(_YF_EXECUTOR, self._get_yfinance_sync, symbol, timeframe, market_type, limit),
+                timeout=4.5,
             )
         except Exception as e:
             logger.debug(f"[MarketData] YFinance fetch timeout/error for {symbol}: {e}")
@@ -318,7 +360,8 @@ class MarketDataEngine:
 
     def _get_yfinance_sync(self, symbol: str, timeframe: str, market_type: str, limit: int) -> pd.DataFrame:
         yf_sym = normalize_yfinance_symbol(symbol, market_type)
-        yf_tf = YF_TF_MAP.get(timeframe, "1h")
+        is_4h = timeframe.lower() in ("4h", "4h")
+        yf_tf = "1h" if is_4h else YF_TF_MAP.get(timeframe, "1h")
 
         # Period calculation - limit to 60d for intraday to prevent huge downloads
         period_map = {"1m": "7d", "2m": "7d", "5m": "30d", "15m": "30d", "30m": "30d",
@@ -326,6 +369,7 @@ class MarketDataEngine:
         period = period_map.get(yf_tf, "60d")
 
         ticker = yf.Ticker(yf_sym)
+        fetch_limit = (limit * 4) if is_4h else limit
         df = ticker.history(period=period, interval=yf_tf)
         if df.empty:
             return pd.DataFrame()
@@ -333,6 +377,18 @@ class MarketDataEngine:
         df.columns = [c.lower() for c in df.columns]
         df.index = pd.to_datetime(df.index, utc=True)
         df.index.name = "timestamp"
+
+        if is_4h:
+            # Resample 1h bars to clean 4h bars
+            df_4h = df[["open", "high", "low", "close", "volume"]].resample("4h").agg({
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }).dropna()
+            return df_4h.tail(limit)
+
         return df[["open", "high", "low", "close", "volume"]].tail(limit)
 
     async def _get_forex_mt5(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:

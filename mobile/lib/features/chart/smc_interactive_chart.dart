@@ -66,11 +66,11 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final chartWidth = constraints.maxWidth - 70; // 70px right price axis
+        final chartWidth = math.max(10.0, constraints.maxWidth - 70); // 70px right price axis
         final isOverPriceScale = _hoverOffset != null && _hoverOffset!.dx >= chartWidth;
 
         final maxScrollRight = math.max(0.0, (widget.candles.length * _candleWidth) - chartWidth * 0.3);
-        final minScrollLeft = -chartWidth * 0.6; // Allow smooth panning into future space like TradingView
+        final minScrollLeft = math.min(-chartWidth * 0.6, maxScrollRight); // Allow smooth panning into future space
         _scrollOffset = _scrollOffset.clamp(minScrollLeft, maxScrollRight);
 
         return Stack(
@@ -731,8 +731,11 @@ class _SMCUnifiedPainter extends CustomPainter {
         oldDelegate.openPositions != openPositions ||
         oldDelegate.currentPrice != currentPrice ||
         oldDelegate.showOverlay != showOverlay ||
+        oldDelegate.symbol != symbol ||
         oldDelegate.candleWidth != candleWidth ||
         oldDelegate.scrollOffset != scrollOffset ||
+        oldDelegate.priceScaleMultiplier != priceScaleMultiplier ||
+        oldDelegate.priceOffset != priceOffset ||
         oldDelegate.hoverOffset != hoverOffset;
   }
 }

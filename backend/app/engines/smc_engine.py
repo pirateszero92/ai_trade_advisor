@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from app.engines.indicators import AdvancedIndicatorsEngine
+
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -226,7 +228,7 @@ class SMCEngine:
 
         try:
             # 1. Swing points
-            swing_highs, swing_lows = self._detect_swing_points(df, self.DEFAULT_SWING_LENGTH)
+            swing_highs, swing_lows = self._detect_swing_points(df, self.swing_length)
             signal.swing_highs = swing_highs
             signal.swing_lows = swing_lows
 
@@ -255,7 +257,6 @@ class SMCEngine:
 
             # 8. Squeeze Momentum & Volume Delta quantitative analysis
             try:
-                from app.engines.indicators import AdvancedIndicatorsEngine
                 sq = AdvancedIndicatorsEngine.compute_squeeze_momentum(df)
                 vd = AdvancedIndicatorsEngine.compute_volume_delta(df)
 
@@ -594,16 +595,20 @@ class SMCEngine:
         if not swing_highs or not swing_lows:
             return
 
-        last_high = swing_highs[-1].price if swing_highs else df["high"].max()
-        last_low = swing_lows[-1].price if swing_lows else df["low"].min()
-        range_size = last_high - last_low
+        # Use the active structural swing range across recent swing clusters
+        recent_highs = [sp.price for sp in swing_highs[-3:]]
+        recent_lows = [sp.price for sp in swing_lows[-3:]]
+        high_bound = max(recent_highs) if recent_highs else float(df["high"].max())
+        low_bound = min(recent_lows) if recent_lows else float(df["low"].min())
+
+        range_size = high_bound - low_bound
         if range_size <= 0:
             return
 
         price = signal.current_price
-        eq = last_low + range_size * 0.5
-        premium_line = last_low + range_size * 0.618
-        discount_line = last_low + range_size * 0.382
+        eq = low_bound + range_size * 0.5
+        premium_line = low_bound + range_size * 0.618
+        discount_line = low_bound + range_size * 0.382
 
         signal.equilibrium = round(eq, 6)
         signal.in_premium = price > premium_line
@@ -752,12 +757,27 @@ class SMCEngine:
         # ---- Layer 1: SMC Location (Max 40 pts) ----
         if signal.htf_bias != "neutral" and signal.htf_bias == signal.bias:
             score += 8
+
+        # Direction-aligned Order Block
         if signal.order_block:
-            score += 10
+            if (signal.direction == "long" and signal.order_block.direction == "bullish") or \
+               (signal.direction == "short" and signal.order_block.direction == "bearish"):
+                score += 10
+
+        # Direction-aligned Fair Value Gap
         if signal.fvg:
-            score += 6
+            if (signal.direction == "long" and signal.fvg.direction == "bullish") or \
+               (signal.direction == "short" and signal.fvg.direction == "bearish"):
+                score += 6
+
+        # Direction-aligned Liquidity Sweep
         if signal.liquidity_swept:
-            score += 8
+            # Bullish sweep: swept below prior low -> Long confluence
+            # Bearish sweep: swept above prior high -> Short confluence
+            if (signal.direction == "long" and signal.sweep_direction == "low") or \
+               (signal.direction == "short" and signal.sweep_direction == "high"):
+                score += 8
+
         if signal.direction == "long" and signal.in_discount:
             score += 5
         elif signal.direction == "short" and signal.in_premium:

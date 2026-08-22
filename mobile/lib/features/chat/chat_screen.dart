@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
@@ -52,11 +52,11 @@ class ChatSession {
   });
 
   factory ChatSession.fromJson(Map<String, dynamic> json) => ChatSession(
-        id: json['id'] as String,
-        title: json['title'] as String? ?? '',
-        dayLabel: json['day_label'] as String? ?? '',
-        dayTitle: json['day_title'] as String? ?? '',
-        messageCount: json['message_count'] as int? ?? 0,
+        id: json['id']?.toString() ?? '',
+        title: json['title']?.toString() ?? '',
+        dayLabel: json['day_label']?.toString() ?? '',
+        dayTitle: json['day_title']?.toString() ?? '',
+        messageCount: (json['message_count'] as num?)?.toInt() ?? 0,
       );
 }
 
@@ -75,7 +75,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
 
-  late Dio _dio;
+  Dio get _dio => AppApi.dio;
   String? _sessionId;
   String _sessionTitle = '';
   final List<ChatMessage> _messages = [];
@@ -87,11 +87,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    _dio = Dio(BaseOptions(
-      connectTimeout: const Duration(seconds: 30),
-      receiveTimeout: const Duration(seconds: 120),
-      sendTimeout: const Duration(seconds: 30),
-    ));
     _loadTodaySession();
   }
 
@@ -112,6 +107,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       _sessionId = data['id'] as String;
       _sessionTitle = data['title'] as String? ?? 'Chat';
       final rawMsgs = data['messages'] as List<dynamic>? ?? [];
+      if (!mounted) return;
       setState(() {
         _messages.clear();
         _messages.addAll(rawMsgs
@@ -130,6 +126,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       });
       _scrollToBottom();
     } catch (e) {
+      if (!mounted) return;
       setState(() => _isHistoryLoading = false);
     }
   }
@@ -139,9 +136,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     try {
       final resp = await _dio.get(AppApi.url('/api/v1/chat/sessions/$sessionId'));
       final data = resp.data as Map<String, dynamic>;
-      _sessionId = data['id'] as String;
+      _sessionId = data['id']?.toString();
       _sessionTitle = data['title'] as String? ?? 'Chat';
       final rawMsgs = data['messages'] as List<dynamic>? ?? [];
+      if (!mounted) return;
       setState(() {
         _messages.clear();
         _messages.addAll(rawMsgs
@@ -159,6 +157,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       });
       _scrollToBottom();
     } catch (e) {
+      if (!mounted) return;
       setState(() => _isHistoryLoading = false);
     }
   }
@@ -261,6 +260,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         createdAt: DateTime.now().toUtc(),
       );
 
+      if (!mounted) return;
       setState(() {
         _messages.removeLast(); // remove thinking
         _messages.add(aiMsg);
@@ -270,15 +270,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
       // Persist to DB
       if (_sessionId != null) {
-        _dio
-            .post(AppApi.url('/api/v1/chat/messages/bulk-save'), data: {
-          'session_id': _sessionId,
-          'user_content': text,
-          'assistant_content': reply,
-        })
-            .catchError((_) {}); // fire-and-forget, don't block UI
+        () async {
+          try {
+            await _dio.post(AppApi.url('/api/v1/chat/messages/bulk-save'), data: {
+              'session_id': _sessionId,
+              'user_content': text,
+              'assistant_content': reply,
+            });
+          } catch (_) {}
+        }();
       }
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _messages.removeLast();
         _messages.add(ChatMessage(

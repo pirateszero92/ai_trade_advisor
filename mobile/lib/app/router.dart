@@ -11,14 +11,36 @@ final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
     initialLocation: '/chart',
     routes: [
-      ShellRoute(
-        builder: (context, state, child) => MainScaffold(child: child),
-        routes: [
-          GoRoute(path: '/chart', builder: (c, s) => const ChartScreen()),
-          GoRoute(path: '/signals', builder: (c, s) => const SignalsScreen()),
-          GoRoute(path: '/journal', builder: (c, s) => const JournalScreen()),
-          GoRoute(path: '/chat', builder: (c, s) => const ChatScreen()),
-          GoRoute(path: '/settings', builder: (c, s) => const SettingsScreen()),
+      StatefulShellRoute.indexedStack(
+        builder: (context, state, navigationShell) => MainScaffold(
+          navigationShell: navigationShell,
+        ),
+        branches: [
+          StatefulShellBranch(
+            routes: [
+              GoRoute(path: '/chart', builder: (c, s) => const ChartScreen()),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(path: '/signals', builder: (c, s) => const SignalsScreen()),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(path: '/journal', builder: (c, s) => const JournalScreen()),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(path: '/chat', builder: (c, s) => const ChatScreen()),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(path: '/settings', builder: (c, s) => const SettingsScreen()),
+            ],
+          ),
         ],
       ),
     ],

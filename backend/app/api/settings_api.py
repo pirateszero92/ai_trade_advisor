@@ -56,6 +56,12 @@ def _load_runtime_settings():
                 cfg.openrouter_api_key = data["openrouter_key"]
             if "openrouter_model" in data and data["openrouter_model"]:
                 cfg.openrouter_model = data["openrouter_model"]
+            if "risk_per_trade" in data and data["risk_per_trade"]:
+                cfg.default_risk_per_trade = float(data["risk_per_trade"])
+            if "max_daily_loss" in data and data["max_daily_loss"]:
+                cfg.max_daily_loss = float(data["max_daily_loss"])
+            if "max_open_positions" in data and data["max_open_positions"]:
+                cfg.max_open_positions = int(data["max_open_positions"])
         except Exception as e:
             logger.warning(f"Failed to load runtime settings: {e}")
 

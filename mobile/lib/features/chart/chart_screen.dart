@@ -196,8 +196,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     try {
       final dio = AppApi.dio;
 
-      // 1. Fetch OHLCV candles
-      final ohlcvResp = await dio.get(
+      // 1. Fetch OHLCV candles and SMC Overlay concurrently
+      final ohlcvFuture = dio.get(
         AppApi.url('/api/v1/chart/ohlcv'),
         queryParameters: {
           'symbol': _selectedSymbol,
@@ -207,6 +207,20 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           'limit': 200,
         },
       );
+
+      final overlayFuture = dio.get(
+        AppApi.url('/api/v1/chart/overlay'),
+        queryParameters: {
+          'symbol': _selectedSymbol,
+          'timeframe': _selectedTimeframe,
+          'market_type': _selectedMarket,
+          'exchange': _selectedExchange,
+        },
+      ).catchError((_) => Response(requestOptions: RequestOptions(path: ''), data: <String, dynamic>{}));
+
+      final results = await Future.wait([ohlcvFuture, overlayFuture]);
+      final ohlcvResp = results[0];
+      final overlayResp = results[1];
 
       final List<dynamic> rawCandles = ohlcvResp.data['candles'] ?? [];
       final List<Candle> parsedCandles = [];
@@ -226,30 +240,20 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
       parsedCandles.sort((a, b) => b.date.compareTo(a.date));
 
-      // 2. Fetch live ticker stats
       if (parsedCandles.isNotEmpty) {
         _lastPrice = parsedCandles.first.close;
         _symbolLivePrices[_selectedSymbol] = _lastPrice;
       }
-      await _fetchLiveTicker();
+      _fetchLiveTicker();
 
-      // 2. Fetch SMC Overlay
-      final overlayResp = await dio.get(
-        AppApi.url('/api/v1/chart/overlay'),
-        queryParameters: {
-          'symbol': _selectedSymbol,
-          'timeframe': _selectedTimeframe,
-          'market_type': _selectedMarket,
-          'exchange': _selectedExchange,
-        },
-      );
-
+      if (!mounted) return;
       setState(() {
         _candles = parsedCandles;
-        _smcOverlayData = overlayResp.data as Map<String, dynamic>?;
+        _smcOverlayData = (overlayResp.data is Map<String, dynamic>) ? overlayResp.data as Map<String, dynamic> : null;
         _isLoading = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _errorMessage = 'Failed to load live data: $e';
         _isLoading = false;
@@ -259,9 +263,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   Future<void> _fetchOpenPositions() async {
     try {
-      final dio = Dio();
-      final resp = await dio.get(AppApi.url('/api/v1/trades/'), queryParameters: {'status': 'open'});
+      final resp = await AppApi.dio.get(AppApi.url('/api/v1/trades/'), queryParameters: {'status': 'open'});
       final List<dynamic> list = resp.data['trades'] ?? [];
+      if (!mounted) return;
       setState(() {
         _openPositions = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
       });
@@ -747,9 +751,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     final symbolCtrl = TextEditingController();
     String selectedMarket = _selectedMarket;
 
-    await showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
+    try {
+      await showDialog(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
         builder: (context, setDlgState) {
           return AlertDialog(
             backgroundColor: AppColors.surface,
@@ -809,6 +814,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         },
       ),
     );
+    } finally {
+      symbolCtrl.dispose();
+    }
   }
 
   Widget _dlgMarketChip(String label, String market, String selectedMarket, Function(String) onSelect) {
@@ -1083,14 +1091,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   // --------------------------------------------------------------------------
   // Fullscreen Apex AI Chat Assistant Dialog
   // --------------------------------------------------------------------------
-  void _openApexChatDialog() {
+  Future<void> _openApexChatDialog() async {
     final modalTextCtrl = TextEditingController();
     final modalScrollCtrl = ScrollController();
 
-    showDialog(
-      context: context,
-      barrierColor: Colors.black.withOpacity(0.7),
-      builder: (ctx) {
+    try {
+      await showDialog(
+        context: context,
+        barrierColor: Colors.black.withOpacity(0.7),
+        builder: (ctx) {
         return StatefulBuilder(
           builder: (dialogCtx, setModalState) {
             return Dialog(
@@ -1249,6 +1258,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         );
       },
     );
+    } finally {
+      modalTextCtrl.dispose();
+      modalScrollCtrl.dispose();
+    }
   }
 
   Widget _modalQuickChip(String title, VoidCallback onTap) {
@@ -1552,109 +1565,117 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
         // Correct symbol-specific live Mark Price (not the currently viewed chart symbol)
         final markPrice = _getMarkPriceForSymbol(sym, entry);
-        final pnlPct = isLong ? ((markPrice - entry) / entry) * 100 : ((entry - markPrice) / entry) * 100;
+        final pnlPct = entry > 0
+            ? (isLong ? ((markPrice - entry) / entry) * 100 : ((entry - markPrice) / entry) * 100)
+            : 0.0;
         final pnlVal = isLong ? (markPrice - entry) * size : (entry - markPrice) * size;
         final isProfit = pnlVal >= 0;
 
-        return Row(
-          children: [
-            // Side Badge
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: color.withOpacity(0.15),
-                borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: color),
-              ),
-              child: Text(
-                dir.toUpperCase(),
-                style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold),
-              ),
-            ),
-            const SizedBox(width: 8),
-            // Symbol (Clickable to switch chart to this symbol)
-            GestureDetector(
-              onTap: () => _switchToSymbol(sym),
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      sym,
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF93C5FD), decoration: TextDecoration.underline),
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minWidth: math.max(340.0, MediaQuery.of(context).size.width - 32)),
+            child: Row(
+              children: [
+                // Side Badge
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: color),
+                  ),
+                  child: Text(
+                    dir.toUpperCase(),
+                    style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                // Symbol (Clickable to switch chart to this symbol)
+                GestureDetector(
+                  onTap: () => _switchToSymbol(sym),
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          sym,
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF93C5FD), decoration: TextDecoration.underline),
+                        ),
+                        const SizedBox(width: 3),
+                        const Icon(Icons.arrow_outward, size: 11, color: Color(0xFF93C5FD)),
+                      ],
                     ),
-                    const SizedBox(width: 3),
-                    const Icon(Icons.arrow_outward, size: 11, color: Color(0xFF93C5FD)),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                // Size
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Size', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                    Text('$size', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
                   ],
                 ),
-              ),
-            ),
-            const SizedBox(width: 16),
-            // Size
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('Size', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
-                Text('$size', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-              ],
-            ),
-            const SizedBox(width: 16),
-            // Entry
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('Entry Price', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
-                Text('\$${entry.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
-              ],
-            ),
-            const SizedBox(width: 16),
-            // Mark Price
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('Mark Price', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
-                Text('\$${markPrice.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
-              ],
-            ),
-            const Spacer(),
-            // PnL
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(
-                  '${isProfit ? '+' : ''}\$${pnlVal.toStringAsFixed(2)}',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: isProfit ? AppColors.bullish : AppColors.bearish,
-                    fontFamily: 'monospace',
-                  ),
+                const SizedBox(width: 16),
+                // Entry
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Entry Price', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                    Text('\$${entry.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
+                  ],
                 ),
-                Text(
-                  '(${isProfit ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: isProfit ? AppColors.bullish : AppColors.bearish,
+                const SizedBox(width: 16),
+                // Mark Price
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Mark Price', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                    Text('\$${markPrice.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
+                  ],
+                ),
+                const SizedBox(width: 24),
+                // PnL
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      '${isProfit ? '+' : ''}\$${pnlVal.toStringAsFixed(2)}',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: isProfit ? AppColors.bullish : AppColors.bearish,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                    Text(
+                      '(${isProfit ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: isProfit ? AppColors.bullish : AppColors.bearish,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(width: 16),
+                // Close Button
+                ElevatedButton(
+                  onPressed: () => _closePosition(tradeId),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF232A38),
+                    foregroundColor: Colors.white70,
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
                   ),
+                  child: const Text('Close ✕', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
                 ),
               ],
             ),
-            const SizedBox(width: 16),
-            // Close Button
-            ElevatedButton(
-              onPressed: () => _closePosition(tradeId),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF232A38),
-                foregroundColor: Colors.white70,
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                minimumSize: Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-              ),
-              child: const Text('Close ✕', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-            ),
-          ],
+          ),
         );
       },
     );

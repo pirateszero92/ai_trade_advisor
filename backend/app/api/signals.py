@@ -111,11 +111,12 @@ async def analyse_signal(
 async def quick_signal(
     symbol: str = Query("BTC/USDT"),
     timeframe: str = Query("1H"),
+    market_type: Literal["crypto", "forex", "stock"] = Query("crypto"),
     htf_bias: Literal["bullish", "bearish", "neutral"] = Query("neutral"),
     _key: str = Depends(verify_api_key),
 ):
     """Fast signal check — SMC only, no AI, no risk."""
-    df = await _market.get_ohlcv(symbol=symbol, timeframe=timeframe)
+    df = await _market.get_ohlcv(symbol=symbol, timeframe=timeframe, market_type=market_type)
     if df.empty:
         raise HTTPException(status_code=502, detail="Failed to fetch market data")
     signal = _smc.analyze(df, symbol, timeframe, htf_bias)

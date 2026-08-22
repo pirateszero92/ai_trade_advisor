@@ -99,22 +99,16 @@ class AdvancedIndicatorsEngine:
         avg_baseline = (donchian_mid + kc_sma) / 2.0
         delta = close - avg_baseline
 
-        def calc_linreg(series: pd.Series, length: int) -> pd.Series:
-            x = np.arange(length)
-            x_mean = x.mean()
-            denom = np.sum((x - x_mean) ** 2)
+        x = np.arange(kc_length)
+        x_mean = x.mean()
+        denom = np.sum((x - x_mean) ** 2)
+        weights = (1.0 / kc_length) + ((x - x_mean) * (kc_length - 1 - x_mean) / (denom or 1.0))
 
-            def linreg_val(y_slice):
-                if len(y_slice) < length or np.isnan(y_slice).any():
-                    return 0.0
-                y_mean = np.mean(y_slice)
-                slope = np.sum((x - x_mean) * (y_slice - y_mean)) / denom
-                intercept = y_mean - (slope * x_mean)
-                return intercept + slope * (length - 1)
-
-            return series.rolling(window=length).apply(linreg_val, raw=True)
-
-        hist = calc_linreg(delta, kc_length).fillna(0.0)
+        delta_vals = delta.values
+        hist_vals = np.full_like(delta_vals, 0.0)
+        if len(delta_vals) >= kc_length:
+            hist_vals[kc_length - 1:] = np.convolve(delta_vals, weights[::-1], mode="valid")
+        hist = pd.Series(hist_vals, index=delta.index).fillna(0.0)
 
         curr_squeeze_on = bool(squeeze_on.iloc[-1])
         prev_squeeze_on = bool(squeeze_on.iloc[-2]) if len(squeeze_on) > 1 else False

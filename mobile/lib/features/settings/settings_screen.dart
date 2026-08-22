@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:dio/dio.dart';
 import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
+import '../../core/constants/app_constants.dart';
 
 // ---------------------------------------------------------------------------
 // Settings state
@@ -220,8 +220,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   late TextEditingController _alpacaSecretCtrl;
   late TextEditingController _alpacaBaseUrlCtrl;
 
-  bool _initialized = false;
-
   List<Map<String, dynamic>> _watchlist = [];
 
   @override
@@ -266,9 +264,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       _apiUrlCtrl.text = savedApiUrl.trim();
       AppApi.setBaseUrl(savedApiUrl.trim());
     } else {
-      final defaultUrl = kIsWeb
-          ? (Uri.base.origin.isNotEmpty && !Uri.base.origin.startsWith('null') ? Uri.base.origin : 'http://192.168.22.84:8000')
-          : 'http://192.168.22.84:8000';
+      final defaultUrl = AppApi.baseUrl;
       _apiUrlCtrl.text = defaultUrl;
     }
 
@@ -332,9 +328,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
   Future<void> _fetchWatchlist() async {
     try {
-      final dio = Dio();
+      final dio = AppApi.dio;
       final resp = await dio.get(AppApi.url('/api/v1/settings/watchlist'));
       final List<dynamic> list = resp.data['watchlist'] ?? [];
+      if (!mounted) return;
       setState(() {
         _watchlist = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
       });
@@ -343,7 +340,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
   Future<void> _addWatchlistItem(String symbol, String marketType, String tf) async {
     try {
-      final dio = Dio();
+      final dio = AppApi.dio;
       await dio.post(
         AppApi.url('/api/v1/settings/watchlist'),
         data: {
@@ -374,7 +371,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
   Future<void> _removeWatchlistItem(String symbol) async {
     try {
-      final dio = Dio();
+      final dio = AppApi.dio;
       await dio.delete(AppApi.url('/api/v1/settings/watchlist/$symbol'));
       _fetchWatchlist();
       if (mounted) {
@@ -613,8 +610,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     );
 
     try {
-      final dio = Dio();
+      final dio = AppApi.dio;
       if (isApi) {
+        final targetUrl = _apiUrlCtrl.text.trim();
+        if (targetUrl.isNotEmpty) {
+          AppApi.setBaseUrl(targetUrl);
+        }
         final resp = await dio.get(AppApi.url('/health'));
         final ok = resp.data['status'] == 'ok';
         if (mounted) {
@@ -720,7 +721,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     );
 
     try {
-      final dio = Dio();
+      final dio = AppApi.dio;
       final resp = await dio.post(
         AppApi.url('/api/v1/settings/brokers/test'),
         data: {
@@ -768,7 +769,29 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text('Settings'),
+        title: Row(
+          children: [
+            const Text('Settings'),
+            const SizedBox(width: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: AppColors.bullish.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: AppColors.bullish.withValues(alpha: 0.4), width: 1),
+              ),
+              child: const Text(
+                AppConstants.fullVersion,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: AppColors.bullish,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 0.3,
+                ),
+              ),
+            ),
+          ],
+        ),
         backgroundColor: AppColors.surface,
         actions: [
           TextButton.icon(
@@ -784,7 +807,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           // ---- Backend Connection ----
           _sectionHeader('🔌 Backend Connection'),
           _card([
-            _textField('API Base URL', _apiUrlCtrl, hint: 'http://192.168.251.23:8000'),
+            _textField('API Base URL', _apiUrlCtrl, hint: 'http://192.168.1.40:8000'),
             const SizedBox(height: 8),
             SizedBox(
               width: double.infinity,
@@ -1052,10 +1075,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     onTap: () async {
                       ref.read(settingsProvider.notifier).save(settings.copyWith(isPaperMode: true));
                       try {
-                        final dio = Dio();
+                        final dio = AppApi.dio;
                         await dio.post(AppApi.url('/api/v1/settings/trading-mode'), data: {'mode': 'paper'});
                       } catch (_) {}
-                      if (mounted) {
+                      if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
                             backgroundColor: AppColors.neutral,
@@ -1369,6 +1392,40 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             _testBtn('LINE Notify'),
           ]),
 
+          const SizedBox(height: 24),
+
+          // ---- App Version Footer ----
+          Center(
+            child: Column(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF161B26),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.verified_outlined, size: 14, color: AppColors.bullish),
+                      const SizedBox(width: 6),
+                      Text(
+                        '${AppConstants.appName} ${AppConstants.fullVersion}',
+                        style: const TextStyle(fontSize: 11, color: Colors.white70, fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Institutional SMC & Quantitative Trading Co-Pilot',
+                  style: TextStyle(fontSize: 10, color: Colors.white24),
+                ),
+              ],
+            ),
+          ),
+
           const SizedBox(height: 32),
         ],
       ),
@@ -1528,7 +1585,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               Navigator.of(dialogCtx).pop();
               await ref.read(settingsProvider.notifier).save(settings.copyWith(isPaperMode: false));
               try {
-                final dio = Dio();
+                final dio = AppApi.dio;
                 await dio.post(AppApi.url('/api/v1/settings/trading-mode'), data: {'mode': 'live'});
               } catch (_) {}
               if (mounted) {
@@ -1560,169 +1617,175 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     bool isFetched = false;
     final textCtrl = TextEditingController();
 
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            if (!isFetched) {
-              isFetched = true;
-              Dio().get(AppApi.url('/api/v1/settings/prompts/active')).then((resp) {
-                setModalState(() {
-                  content = resp.data['content']?.toString() ?? '';
-                  promptName = resp.data['name']?.toString() ?? 'advisor_v1.md';
-                  textCtrl.text = content;
-                  isLoading = false;
+    try {
+      await showDialog(
+        context: context,
+        builder: (ctx) {
+          return StatefulBuilder(
+            builder: (context, setModalState) {
+              if (!isFetched) {
+                isFetched = true;
+                AppApi.dio.get(AppApi.url('/api/v1/settings/prompts/active')).then((resp) {
+                  setModalState(() {
+                    content = resp.data['content']?.toString() ?? '';
+                    promptName = resp.data['name']?.toString() ?? 'advisor_v1.md';
+                    textCtrl.text = content;
+                    isLoading = false;
+                  });
+                }).catchError((e) {
+                  setModalState(() {
+                    content = '# Error loading prompt: $e';
+                    textCtrl.text = content;
+                    isLoading = false;
+                  });
                 });
-              }).catchError((e) {
-                setModalState(() {
-                  content = '# Error loading prompt: $e';
-                  textCtrl.text = content;
-                  isLoading = false;
-                });
-              });
-            }
+              }
 
-            return Dialog(
-              backgroundColor: const Color(0xFF141923),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: Color(0xFF252D3D))),
-              insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
-              child: Container(
-                width: 760,
-                height: 620,
-                padding: const EdgeInsets.all(18),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.edit_note, color: Color(0xFF2E82FE), size: 24),
-                        const SizedBox(width: 8),
-                        Text('System Prompt Editor ($promptName)', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white)),
-                        const Spacer(),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: AppColors.orderBlock.withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(4),
+              final maxH = MediaQuery.of(context).size.height * 0.85;
+
+              return Dialog(
+                backgroundColor: const Color(0xFF141923),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: Color(0xFF252D3D))),
+                insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+                child: Container(
+                  width: 760,
+                  height: maxH.clamp(400.0, 680.0),
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.edit_note, color: Color(0xFF2E82FE), size: 24),
+                          const SizedBox(width: 8),
+                          Text('System Prompt Editor ($promptName)', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white)),
+                          const Spacer(),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: AppColors.orderBlock.withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text('${textCtrl.text.length} chars', style: const TextStyle(fontSize: 11, color: AppColors.orderBlock)),
                           ),
-                          child: Text('${textCtrl.text.length} chars', style: const TextStyle(fontSize: 11, color: AppColors.orderBlock)),
-                        ),
-                        const SizedBox(width: 8),
-                        IconButton(
-                          icon: const Icon(Icons.close, color: Colors.white54),
-                          onPressed: () => Navigator.pop(ctx),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    if (isLoading)
-                      const Expanded(
-                        child: Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              CircularProgressIndicator(color: AppColors.bullish),
-                              SizedBox(height: 12),
-                              Text('Loading active prompt...', style: TextStyle(color: Colors.white54)),
-                            ],
+                          const SizedBox(width: 8),
+                          IconButton(
+                            icon: const Icon(Icons.close, color: Colors.white54),
+                            onPressed: () => Navigator.pop(ctx),
                           ),
-                        ),
-                      )
-                    else
-                      Expanded(
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF0D111A),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: const Color(0xFF252D3D)),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      if (isLoading)
+                        const Expanded(
+                          child: Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                CircularProgressIndicator(color: AppColors.bullish),
+                                SizedBox(height: 12),
+                                Text('Loading active prompt...', style: TextStyle(color: Colors.white54)),
+                              ],
+                            ),
                           ),
-                          child: TextField(
-                            controller: textCtrl,
-                            maxLines: null,
-                            expands: true,
-                            style: const TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'monospace', height: 1.45),
-                            decoration: const InputDecoration(
-                              contentPadding: EdgeInsets.all(14),
-                              border: InputBorder.none,
-                              hintText: 'Enter AI trading advisor system prompt instructions...',
+                        )
+                      else
+                        Expanded(
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0D111A),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: const Color(0xFF252D3D)),
+                            ),
+                            child: TextField(
+                              controller: textCtrl,
+                              maxLines: null,
+                              expands: true,
+                              style: const TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'monospace', height: 1.45),
+                              decoration: const InputDecoration(
+                                contentPadding: EdgeInsets.all(14),
+                                border: InputBorder.none,
+                                hintText: 'Enter AI trading advisor system prompt instructions...',
+                              ),
                             ),
                           ),
                         ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          TextButton.icon(
+                            onPressed: () async {
+                              try {
+                                await AppApi.dio.post(AppApi.url('/api/v1/settings/prompts/reload'));
+                                final resp = await AppApi.dio.get(AppApi.url('/api/v1/settings/prompts/active'));
+                                setModalState(() {
+                                  content = resp.data['content']?.toString() ?? '';
+                                  textCtrl.text = content;
+                                });
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(backgroundColor: AppColors.bullish, content: Text('Prompt reloaded from disk!')),
+                                  );
+                                }
+                              } catch (_) {}
+                            },
+                            icon: const Icon(Icons.refresh, size: 16),
+                            label: const Text('Reload from Disk'),
+                            style: TextButton.styleFrom(foregroundColor: Colors.white60),
+                          ),
+                          const Spacer(),
+                          TextButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+                          ),
+                          const SizedBox(width: 8),
+                          ElevatedButton.icon(
+                            onPressed: isLoading
+                                ? null
+                                : () async {
+                                    try {
+                                      final newContent = textCtrl.text;
+                                      await AppApi.dio.post(
+                                        AppApi.url('/api/v1/settings/prompts/save'),
+                                        data: {
+                                          'name': promptName,
+                                          'content': newContent,
+                                        },
+                                      );
+                                      if (ctx.mounted) {
+                                        Navigator.pop(ctx);
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                            backgroundColor: AppColors.bullish,
+                                            content: Text('✅ System Prompt saved & active in AI Advisor!'),
+                                          ),
+                                        );
+                                      }
+                                    } catch (e) {
+                                      if (ctx.mounted) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          SnackBar(backgroundColor: AppColors.bearish, content: Text('Save failed: $e')),
+                                        );
+                                      }
+                                    }
+                                  },
+                            icon: const Icon(Icons.save, size: 16, color: Colors.black),
+                            label: const Text('Save Changes', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+                            style: ElevatedButton.styleFrom(backgroundColor: AppColors.bullish),
+                          ),
+                        ],
                       ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        TextButton.icon(
-                          onPressed: () async {
-                            try {
-                              await Dio().post(AppApi.url('/api/v1/settings/prompts/reload'));
-                              final resp = await Dio().get(AppApi.url('/api/v1/settings/prompts/active'));
-                              setModalState(() {
-                                content = resp.data['content']?.toString() ?? '';
-                                textCtrl.text = content;
-                              });
-                              if (context.mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(backgroundColor: AppColors.bullish, content: Text('Prompt reloaded from disk!')),
-                                );
-                              }
-                            } catch (_) {}
-                          },
-                          icon: const Icon(Icons.refresh, size: 16),
-                          label: const Text('Reload from Disk'),
-                          style: TextButton.styleFrom(foregroundColor: Colors.white60),
-                        ),
-                        const Spacer(),
-                        TextButton(
-                          onPressed: () => Navigator.pop(ctx),
-                          child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
-                        ),
-                        const SizedBox(width: 8),
-                        ElevatedButton.icon(
-                          onPressed: isLoading
-                              ? null
-                              : () async {
-                                  try {
-                                    final newContent = textCtrl.text;
-                                    await Dio().post(
-                                      AppApi.url('/api/v1/settings/prompts/save'),
-                                      data: {
-                                        'name': promptName,
-                                        'content': newContent,
-                                      },
-                                    );
-                                    if (ctx.mounted) {
-                                      Navigator.pop(ctx);
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        const SnackBar(
-                                          backgroundColor: AppColors.bullish,
-                                          content: Text('✅ System Prompt saved & active in AI Advisor!'),
-                                        ),
-                                      );
-                                    }
-                                  } catch (e) {
-                                    if (ctx.mounted) {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        SnackBar(backgroundColor: AppColors.bearish, content: Text('Save failed: $e')),
-                                      );
-                                    }
-                                  }
-                                },
-                          icon: const Icon(Icons.save, size: 16, color: Colors.black),
-                          label: const Text('Save Changes', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-                          style: ElevatedButton.styleFrom(backgroundColor: AppColors.bullish),
-                        ),
-                      ],
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-            );
-          },
-        );
-      },
-    );
+              );
+            },
+          );
+        },
+      );
+    } finally {
+      textCtrl.dispose();
+    }
   }
 
   Future<void> _testPrompt() async {
@@ -1737,8 +1800,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           builder: (context, setModalState) {
             if (!isTriggered) {
               isTriggered = true;
-              Dio(BaseOptions(connectTimeout: const Duration(seconds: 90), receiveTimeout: const Duration(seconds: 90)))
-                  .post(AppApi.url('/api/v1/settings/prompts/test'))
+              AppApi.dio
+                  .post(
+                    AppApi.url('/api/v1/settings/prompts/test'),
+                    options: Options(
+                      sendTimeout: const Duration(seconds: 90),
+                      receiveTimeout: const Duration(seconds: 90),
+                    ),
+                  )
                   .then((resp) {
                 setModalState(() {
                   isTesting = false;

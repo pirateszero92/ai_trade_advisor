@@ -2,19 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 class MainScaffold extends StatelessWidget {
-  final Widget child;
-  const MainScaffold({super.key, required this.child});
+  final StatefulNavigationShell navigationShell;
+  const MainScaffold({super.key, required this.navigationShell});
 
   @override
   Widget build(BuildContext context) {
-    final location = GoRouterState.of(context).matchedLocation;
     return Scaffold(
-      body: child,
+      body: navigationShell,
       bottomNavigationBar: NavigationBar(
         height: MediaQuery.of(context).orientation == Orientation.landscape ? 52 : 65,
         backgroundColor: const Color(0xFF1A1A2E),
-        selectedIndex: _indexFromLocation(location),
-        onDestinationSelected: (i) => _navigate(context, i),
+        selectedIndex: navigationShell.currentIndex,
+        onDestinationSelected: (i) => _onTap(context, i),
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.candlestick_chart_outlined),
@@ -46,17 +45,10 @@ class MainScaffold extends StatelessWidget {
     );
   }
 
-  int _indexFromLocation(String location) {
-    if (location.startsWith('/chart')) return 0;
-    if (location.startsWith('/signals')) return 1;
-    if (location.startsWith('/journal')) return 2;
-    if (location.startsWith('/chat')) return 3;
-    if (location.startsWith('/settings')) return 4;
-    return 0;
-  }
-
-  void _navigate(BuildContext context, int index) {
-    final paths = ['/chart', '/signals', '/journal', '/chat', '/settings'];
-    context.go(paths[index]);
+  void _onTap(BuildContext context, int index) {
+    navigationShell.goBranch(
+      index,
+      initialLocation: index == navigationShell.currentIndex,
+    );
   }
 }

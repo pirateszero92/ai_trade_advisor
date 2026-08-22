@@ -399,16 +399,31 @@ class AIEngine:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         headers = {"x-goog-api-key": api_key.strip()}
         system_text = next((m["content"] for m in messages if m["role"] == "system"), "")
-        user_parts = [{"text": m["content"]} for m in messages if m["role"] != "system"]
-        payload: dict[str, Any] = {"contents": [{"role": "user", "parts": user_parts}]}
+        
+        contents = []
+        for m in messages:
+            if m.get("role") == "system":
+                continue
+            role = "user" if m.get("role") == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": m.get("content", "")}]})
+        
+        if not contents:
+            contents = [{"role": "user", "parts": [{"text": "Hello"}]}]
+
+        payload: dict[str, Any] = {"contents": contents}
         if system_text:
             payload["systemInstruction"] = {"parts": [{"text": system_text}]}
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=45.0) as client:
             r = await client.post(url, headers=headers, json=payload)
             r.raise_for_status()
             data = r.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+            candidates = data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts and "text" in parts[0]:
+                    return parts[0]["text"]
+            raise ValueError("Gemini returned empty candidate content or was blocked by safety filters")
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4))
     async def _call_openrouter(self, messages: list[dict]) -> str:
@@ -428,7 +443,7 @@ class AIEngine:
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": "https://ai-trade-advisor",
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=45.0) as client:
             r = await client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 json=payload,
@@ -459,6 +474,24 @@ class AIEngine:
             f"- Volume Spike: {'✅' if sig.get('volume_spike') else '❌'}",
             f"- Confluence Score: {sig.get('confluence_score', sig.get('confluence', 0))}/100",
         ]
+
+        if portfolio_state:
+            lines.extend([
+                "",
+                "## Portfolio & Risk State",
+                f"- Account Balance: ${portfolio_state.get('balance', 100000.0):,.2f}",
+                f"- Open Positions: {portfolio_state.get('open_positions', 0)}",
+                f"- Daily PnL: {portfolio_state.get('daily_pnl_pct', 0.0):+.2f}%",
+                f"- Max Drawdown: {portfolio_state.get('drawdown_pct', 0.0):.2f}%",
+            ])
+
+        if market_context:
+            lines.extend([
+                "",
+                "## Additional Market Context / Trader Notes",
+                f"{market_context}",
+            ])
+
         return "\n".join(lines)
 
     def _parse_response(self, raw: str) -> AIAnalysis:
