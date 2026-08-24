@@ -315,33 +315,34 @@ class MarketMonitor:
                 for t in all_t.values():
                     if t.get("status") == "open" and t.get("symbol") == symbol:
                         t_dir = str(t.get("direction", "")).lower()
-                        # If open short and new confirmed structure is strong bullish with CHoCH
-                        if t_dir == "short" and (direction == "long" and ltf_sig.choch):
+                        t_entry = float(t.get("entry", live_price))
+                        # Require confirmed opposite structure (score >= 65) with CHoCH and adverse price movement
+                        if t_dir == "short" and (direction == "long" and ltf_sig.choch and confluence >= 65 and live_price > t_entry):
                             closed = auto_close_trade_sync(t["id"], "Structure Invalidation (Market turned Bullish) ⚠️", live_price)
                             if closed:
-                                logger.info(f"⚡ AUTO CUT LOSS: {symbol} Short position closed due to bullish invalidation")
+                                logger.info(f"⚡ AUTO CUT LOSS: {symbol} Short position closed due to confirmed bullish reversal (confluence={confluence})")
                                 await broadcast({"type": "trade_closed", "data": closed})
                                 await self.notifier.send_signal_alert(
                                     symbol=symbol,
                                     timeframe=tf.upper(),
                                     direction="closed",
-                                    message=f"[Structure Invalidation] ปิดสถานะ SHORT {symbol} อัตโนมัติเนื่องจากตลาดเปลี่ยนโครงสร้างเป็น BULLISH | PnL: ${closed.get('pnl', 0):+.2f}",
+                                    message=f"[Structure Invalidation] ปิดสถานะ SHORT {symbol} อัตโนมัติเนื่องจากโครงสร้างตลาดกลับตัวเป็น BULLISH (Confluence {confluence}/100) | PnL: ${closed.get('pnl', 0):+.2f}",
                                     confluence_score=confluence,
                                     entry=t.get("entry", 0),
                                     sl=t.get("stop_loss", 0),
                                     tp=t.get("take_profit", 0),
                                 )
                         # If open long and new confirmed structure is strong bearish with CHoCH
-                        elif t_dir == "long" and (direction == "short" and ltf_sig.choch):
+                        elif t_dir == "long" and (direction == "short" and ltf_sig.choch and confluence >= 65 and live_price < t_entry):
                             closed = auto_close_trade_sync(t["id"], "Structure Invalidation (Market turned Bearish) ⚠️", live_price)
                             if closed:
-                                logger.info(f"⚡ AUTO CUT LOSS: {symbol} Long position closed due to bearish invalidation")
+                                logger.info(f"⚡ AUTO CUT LOSS: {symbol} Long position closed due to confirmed bearish reversal (confluence={confluence})")
                                 await broadcast({"type": "trade_closed", "data": closed})
                                 await self.notifier.send_signal_alert(
                                     symbol=symbol,
                                     timeframe=tf.upper(),
                                     direction="closed",
-                                    message=f"[Structure Invalidation] ปิดสถานะ LONG {symbol} อัตโนมัติเนื่องจากตลาดเปลี่ยนโครงสร้างเป็น BEARISH | PnL: ${closed.get('pnl', 0):+.2f}",
+                                    message=f"[Structure Invalidation] ปิดสถานะ LONG {symbol} อัตโนมัติเนื่องจากโครงสร้างตลาดกลับตัวเป็น BEARISH (Confluence {confluence}/100) | PnL: ${closed.get('pnl', 0):+.2f}",
                                     confluence_score=confluence,
                                     entry=t.get("entry", 0),
                                     sl=t.get("stop_loss", 0),

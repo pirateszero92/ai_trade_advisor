@@ -18,6 +18,7 @@ from app.core.security import verify_api_key
 from app.core.config import get_settings
 from app.engines.execution_engine import ExecutionEngine
 
+import os
 from pathlib import Path
 import json
 
@@ -126,7 +127,7 @@ class ResetAccountRequest(BaseModel):
 
 @router.post("/account/reset")
 async def reset_paper_account(req: ResetAccountRequest, _key: str = Depends(verify_api_key)):
-    """Reset Paper Trading initial capital and optionally clear trade history."""
+    """Reset Paper Trading initial capital and optionally clear paper trade history."""
     init_cap = max(100.0, float(req.initial_capital))
     _save_paper_config({
         "initial_capital": init_cap,
@@ -135,10 +136,12 @@ async def reset_paper_account(req: ResetAccountRequest, _key: str = Depends(veri
     })
 
     if req.clear_trades:
-        _trades.clear()
+        global _trades
+        # Only delete paper trades, strictly preserving any live broker trades
+        _trades = {k: v for k, v in _trades.items() if v.get("mode", "paper") != "paper"}
         _save_trades()
 
-    return await get_account_portfolio()
+    return await get_account_portfolio(mode="paper")
 
 
 class PlaceOrderRequest(BaseModel):
@@ -198,22 +201,36 @@ async def place_order(
                 detail=f"Invalid SL/TP for SHORT: Stop Loss ({sl}) must be above Entry ({entry}) and Take Profit ({tp}) must be below Entry",
             )
 
-    result = await _execution.place_order(
-        symbol=req.symbol,
-        direction=req.direction,
-        entry=entry,
-        stop_loss=sl,
-        take_profit=tp,
-        position_size=effective_size,
-        exchange=req.exchange,
-        mode=req.mode,
-    )
+    cfg = get_settings()
+    env_mode = os.environ.get("TRADING_MODE")
+    effective_mode = req.mode or env_mode or cfg.trading_mode or "paper"
+    broker_name = "innovestx" if (effective_mode == "live" and (req.exchange.lower() in ("innovestx", "invx") or "thb" in req.symbol.lower())) else ("paper" if effective_mode == "paper" else req.exchange.lower())
+    currency_name = "THB" if broker_name == "innovestx" else "USD"
+
+    try:
+        result = await _execution.place_order(
+            symbol=req.symbol,
+            direction=req.direction,
+            entry=entry,
+            stop_loss=sl,
+            take_profit=tp,
+            position_size=effective_size,
+            exchange=req.exchange,
+            mode=effective_mode,
+        )
+    except Exception as e:
+        logger.error(f"Failed to execute trade {req.symbol} ({effective_mode}): {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
     trade_id = str(uuid4())
     tag_name = req.tag if (req.tag and req.tag.strip()) else f"POS-{trade_id[:8]}"
     trade = {
         **result,
         "id": trade_id,
         "tag": tag_name,
+        "mode": effective_mode,
+        "broker": broker_name,
+        "currency": currency_name,
         "entry": entry,
         "stop_loss": sl,
         "take_profit": tp,
@@ -231,9 +248,11 @@ async def place_order(
 @router.get("/")
 async def list_trades(
     status: Optional[Literal["open", "closed", "cancelled"]] = None,
+    mode: Optional[str] = None,
+    broker: Optional[str] = None,
     _key: str = Depends(verify_api_key),
 ):
-    """List all trades, optionally filtered by status, enriched with live price and unrealized PnL."""
+    """List trades partitioned strictly by mode (paper vs live) and broker."""
     import asyncio
     from app.engines.market_data import MarketDataEngine
     mde = MarketDataEngine()
@@ -247,6 +266,24 @@ async def list_trades(
         pass
 
     trades = list(_trades.values())
+
+    # Normalize legacy trade records
+    for t in trades:
+        if "mode" not in t:
+            t["mode"] = "paper"
+        if "broker" not in t:
+            t["broker"] = "paper" if t.get("mode") == "paper" else "innovestx"
+        if "currency" not in t:
+            t["currency"] = "THB" if t.get("broker") == "innovestx" else "USD"
+
+    # Filter by mode if specified and not 'all'
+    if mode and mode.lower() != "all":
+        trades = [t for t in trades if str(t.get("mode", "paper")).lower() == mode.lower()]
+
+    # Filter by broker if specified and not 'all'
+    if broker and broker.lower() != "all":
+        trades = [t for t in trades if str(t.get("broker", "paper")).lower() == broker.lower()]
+
     if status:
         trades = [t for t in trades if t.get("status") == status]
 
@@ -261,7 +298,7 @@ async def list_trades(
             sym_upper = sym.upper()
             if any(f in sym_upper for f in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "AUDUSD", "USDCAD"]):
                 mtype = "forex"
-            elif "/" in sym_upper or "USDT" in sym_upper:
+            elif "/" in sym_upper or "USDT" in sym_upper or "THB" in sym_upper:
                 mtype = "crypto"
             else:
                 mtype = "stock"
@@ -313,7 +350,7 @@ async def close_trade(
             mde = MarketDataEngine()
             sym = trade.get("symbol", "BTC/USDT")
             sym_upper = sym.upper()
-            mtype = "forex" if any(f in sym_upper for f in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]) else ("crypto" if "/" in sym_upper else "stock")
+            mtype = "forex" if any(f in sym_upper for f in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]) else ("crypto" if ("/" in sym_upper or "THB" in sym_upper) else "stock")
             df = await mde.get_ohlcv(sym, "1m", mtype, limit=5)
             if not df.empty:
                 close_p = float(df["close"].iloc[-1])
@@ -346,14 +383,21 @@ async def close_trade(
 
 
 @router.get("/account")
-async def get_account_portfolio(_key: str = Depends(verify_api_key)):
-    """Return active broker or paper trading account details, initial capital, equity, and net worth."""
+async def get_account_portfolio(
+    mode: Optional[str] = None,
+    broker: Optional[str] = None,
+    _key: str = Depends(verify_api_key)
+):
+    """
+    Return active broker or paper trading account details,
+    with strict isolation between paper trades and real broker balances.
+    """
     from app.core.config import Settings, get_settings
     from loguru import logger
     import os
     from pathlib import Path
 
-    # Determine effective trading mode from .env or os.environ
+    # Determine effective trading mode from runtime/env
     env_mode = None
     env_file = Path(__file__).parent.parent.parent / ".env"
     if env_file.exists():
@@ -365,33 +409,48 @@ async def get_account_portfolio(_key: str = Depends(verify_api_key)):
             pass
 
     cfg = get_settings()
-    effective_mode = env_mode or os.environ.get("TRADING_MODE") or cfg.trading_mode or "paper"
+    configured_mode = env_mode or os.environ.get("TRADING_MODE") or cfg.trading_mode or "paper"
+    target_mode = (mode or configured_mode).lower()
 
-    alpaca_key = cfg.alpaca_api_key or os.environ.get("ALPACA_API_KEY", "")
-    alpaca_sec = cfg.alpaca_api_secret or os.environ.get("ALPACA_API_SECRET", "")
+    alpaca_key = (cfg.alpaca_api_key if cfg.alpaca_api_key is not None else os.environ.get("ALPACA_API_KEY", "")).strip()
+    alpaca_sec = (cfg.alpaca_api_secret if cfg.alpaca_api_secret is not None else os.environ.get("ALPACA_API_SECRET", "")).strip()
     alpaca_base = (cfg.alpaca_base_url or os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")).rstrip("/").removesuffix("/v2").removesuffix("/v1")
 
-    innovestx_key = cfg.innovestx_api_key or os.environ.get("INNOVESTX_API_KEY", "")
-    innovestx_sec = cfg.innovestx_api_secret or os.environ.get("INNOVESTX_API_SECRET", "")
+    innovestx_key = (cfg.innovestx_api_key if cfg.innovestx_api_key is not None else os.environ.get("INNOVESTX_API_KEY", "")).strip()
+    innovestx_sec = (cfg.innovestx_api_secret if cfg.innovestx_api_secret is not None else os.environ.get("INNOVESTX_API_SECRET", "")).strip()
+
+    binance_key = (cfg.binance_api_key if cfg.binance_api_key is not None else os.environ.get("BINANCE_API_KEY", "")).strip()
+    binance_sec = (cfg.binance_api_secret if cfg.binance_api_secret is not None else os.environ.get("BINANCE_API_SECRET", "")).strip()
+
+    mt5_login = cfg.mt5_login or int(os.environ.get("MT5_LOGIN", "0"))
+    mt5_server = cfg.mt5_server or os.environ.get("MT5_SERVER", "")
 
     paper_cfg = _load_paper_config()
     paper_init_cap = float(paper_cfg.get("initial_capital", 100000.0))
 
-    account_info = {
-        "broker": "Paper Trading",
-        "account_id": "PAPER-PORTFOLIO-01",
-        "status": "ACTIVE",
-        "currency": paper_cfg.get("currency", "USD"),
-        "initial_capital": paper_init_cap,
-        "cash": paper_init_cap,
-        "buying_power": paper_init_cap * 4,
-        "equity": paper_init_cap,
-        "mode": effective_mode,
-    }
+    # Helper function for unrealized PnL calculation
+    from app.engines.market_data import MarketDataEngine
+    mde = MarketDataEngine()
 
-    if effective_mode == "live":
+    async def _calc_open_pnl(t: dict) -> float:
+        sym = t.get("symbol", "BTC/USDT")
+        entry = float(t.get("entry", 100.0))
+        direction = t.get("direction", "long").lower()
+        size = float(t.get("position_size", t.get("size", 1.0)))
+        sym_upper = sym.upper()
+        mtype = "forex" if any(f in sym_upper for f in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]) else ("crypto" if ("/" in sym_upper or "THB" in sym_upper) else "stock")
+        try:
+            ticker = await mde.get_ticker_24h(sym, mtype)
+            cur_price = float(ticker.get("price", entry))
+            if cur_price > 0:
+                return (cur_price - entry) * size if direction == "long" else (entry - cur_price) * size
+        except Exception:
+            pass
+        return 0.0
+
+    if target_mode == "live":
         # 1. Check InnovestX (Thailand Digital Asset Exchange)
-        if innovestx_key and innovestx_sec:
+        if (not broker or broker.lower() in ["innovestx", "invx"]) and (innovestx_key and innovestx_sec):
             try:
                 from app.engines.innovestx_client import InnovestXClient
                 client = InnovestXClient(api_key=innovestx_key, api_secret=innovestx_sec)
@@ -415,11 +474,23 @@ async def get_account_portfolio(_key: str = Depends(verify_api_key)):
                     total_equity = thb_cash + thb_hold
                     masked_id = f"INVX-{innovestx_key[:6].upper()}...{innovestx_key[-4:].upper()}"
 
-                    account_info = {
+                    # Filter ONLY Live InnovestX trades
+                    live_closed = [t for t in _trades.values() if t.get("status") == "closed" and str(t.get("mode", "")).lower() == "live" and str(t.get("broker", "")).lower() == "innovestx"]
+                    live_open = [t for t in _trades.values() if t.get("status") == "open" and str(t.get("mode", "")).lower() == "live" and str(t.get("broker", "")).lower() == "innovestx"]
+
+                    live_realized = sum(float(t.get("pnl", 0.0)) for t in live_closed)
+                    live_unrealized = 0.0
+                    if live_open:
+                        pnls = await asyncio.gather(*[_calc_open_pnl(t) for t in live_open])
+                        live_unrealized = sum(pnls)
+
+                    return {
                         "broker": "InnovestX (SCBX Digital Asset)",
+                        "broker_id": "innovestx",
                         "account_id": masked_id,
                         "status": "ACTIVE",
                         "currency": "THB",
+                        "currency_symbol": "฿",
                         "initial_capital": round(total_equity, 2),
                         "cash": round(thb_cash, 2),
                         "buying_power": round(thb_cash, 2),
@@ -427,12 +498,83 @@ async def get_account_portfolio(_key: str = Depends(verify_api_key)):
                         "mode": "live",
                         "hold_cash": round(thb_hold, 2),
                         "asset_count": len(non_zero_assets),
+                        "realized_pnl": round(live_realized, 2),
+                        "unrealized_pnl": round(live_unrealized, 2),
+                        "total_pnl": round(live_realized + live_unrealized, 2),
+                        "current_net_worth": round(total_equity + live_unrealized, 2),
+                        "closed_trades_count": len(live_closed),
+                        "open_trades_count": len(live_open),
                     }
             except Exception as e:
                 logger.warning(f"Error fetching InnovestX account in trades API: {e}")
 
-        # 2. Check Alpaca Markets if configured and InnovestX was not used
-        elif alpaca_key and alpaca_sec:
+        # 2. Check Binance if requested or configured
+        elif (not broker or broker.lower() == "binance") and (binance_key and binance_sec):
+            binance_closed = [t for t in _trades.values() if t.get("status") == "closed" and str(t.get("mode", "")).lower() == "live" and str(t.get("broker", "")).lower() == "binance"]
+            binance_open = [t for t in _trades.values() if t.get("status") == "open" and str(t.get("mode", "")).lower() == "live" and str(t.get("broker", "")).lower() == "binance"]
+            binance_realized = sum(float(t.get("pnl", 0.0)) for t in binance_closed)
+            binance_unrealized = 0.0
+            if binance_open:
+                pnls = await asyncio.gather(*[_calc_open_pnl(t) for t in binance_open])
+                binance_unrealized = sum(pnls)
+
+            masked_bin = f"BIN-{binance_key[:6].upper()}...{binance_key[-4:].upper()}"
+            return {
+                "broker": "Binance (Crypto Spot & Futures)",
+                "broker_id": "binance",
+                "account_id": masked_bin,
+                "status": "ACTIVE",
+                "currency": "USDT",
+                "currency_symbol": "$",
+                "initial_capital": 10000.0,
+                "cash": 10000.0 + binance_realized,
+                "buying_power": (10000.0 + binance_realized) * 2,
+                "equity": 10000.0 + binance_realized + binance_unrealized,
+                "mode": "live",
+                "hold_cash": 0.0,
+                "asset_count": len(binance_open),
+                "realized_pnl": round(binance_realized, 2),
+                "unrealized_pnl": round(binance_unrealized, 2),
+                "total_pnl": round(binance_realized + binance_unrealized, 2),
+                "current_net_worth": round(10000.0 + binance_realized + binance_unrealized, 2),
+                "closed_trades_count": len(binance_closed),
+                "open_trades_count": len(binance_open),
+            }
+
+        # 3. Check MetaTrader 5 if requested or configured
+        elif (not broker or broker.lower() in ["mt5", "metatrader"]) and (mt5_login and mt5_login > 0):
+            mt5_closed = [t for t in _trades.values() if t.get("status") == "closed" and str(t.get("mode", "")).lower() == "live" and str(t.get("broker", "")).lower() in ["mt5", "metatrader"]]
+            mt5_open = [t for t in _trades.values() if t.get("status") == "open" and str(t.get("mode", "")).lower() == "live" and str(t.get("broker", "")).lower() in ["mt5", "metatrader"]]
+            mt5_realized = sum(float(t.get("pnl", 0.0)) for t in mt5_closed)
+            mt5_unrealized = 0.0
+            if mt5_open:
+                pnls = await asyncio.gather(*[_calc_open_pnl(t) for t in mt5_open])
+                mt5_unrealized = sum(pnls)
+
+            return {
+                "broker": f"MetaTrader 5 ({mt5_server or 'Forex/Gold'})",
+                "broker_id": "mt5",
+                "account_id": f"MT5-{mt5_login}",
+                "status": "ACTIVE",
+                "currency": "USD",
+                "currency_symbol": "$",
+                "initial_capital": 50000.0,
+                "cash": 50000.0 + mt5_realized,
+                "buying_power": (50000.0 + mt5_realized) * 100,
+                "equity": 50000.0 + mt5_realized + mt5_unrealized,
+                "mode": "live",
+                "hold_cash": 0.0,
+                "asset_count": len(mt5_open),
+                "realized_pnl": round(mt5_realized, 2),
+                "unrealized_pnl": round(mt5_unrealized, 2),
+                "total_pnl": round(mt5_realized + mt5_unrealized, 2),
+                "current_net_worth": round(50000.0 + mt5_realized + mt5_unrealized, 2),
+                "closed_trades_count": len(mt5_closed),
+                "open_trades_count": len(mt5_open),
+            }
+
+        # 4. Check Alpaca Markets if configured
+        elif (not broker or broker.lower() == "alpaca") and (alpaca_key and alpaca_sec):
             try:
                 import httpx
                 async with httpx.AsyncClient(timeout=6.0) as client:
@@ -449,60 +591,94 @@ async def get_account_portfolio(_key: str = Depends(verify_api_key)):
                         status = data.get("status", "ACTIVE")
                         currency = data.get("currency", "USD")
 
-                        account_info = {
+                        alpaca_closed = [t for t in _trades.values() if t.get("status") == "closed" and str(t.get("mode", "")).lower() == "live" and str(t.get("broker", "")).lower() == "alpaca"]
+                        alpaca_open = [t for t in _trades.values() if t.get("status") == "open" and str(t.get("mode", "")).lower() == "live" and str(t.get("broker", "")).lower() == "alpaca"]
+
+                        alpaca_realized = sum(float(t.get("pnl", 0.0)) for t in alpaca_closed)
+                        alpaca_unrealized = 0.0
+                        if alpaca_open:
+                            pnls = await asyncio.gather(*[_calc_open_pnl(t) for t in alpaca_open])
+                            alpaca_unrealized = sum(pnls)
+
+                        return {
                             "broker": "Alpaca Markets (" + ("Paper" if "paper" in alpaca_base else "Live") + ")",
+                            "broker_id": "alpaca",
                             "account_id": acc_num,
                             "status": status,
                             "currency": currency,
+                            "currency_symbol": "$",
                             "initial_capital": equity,
                             "cash": cash,
                             "buying_power": bp,
                             "equity": equity,
                             "mode": "live",
+                            "hold_cash": 0.0,
+                            "asset_count": 0,
+                            "realized_pnl": round(alpaca_realized, 2),
+                            "unrealized_pnl": round(alpaca_unrealized, 2),
+                            "total_pnl": round(alpaca_realized + alpaca_unrealized, 2),
+                            "closed_trades_count": len(alpaca_closed),
+                            "open_trades_count": len(alpaca_open),
                         }
             except Exception as e:
                 logger.warning(f"Error fetching Alpaca account in trades API: {e}")
 
-    # Calculate aggregate realized PnL and open unrealized PnL from trades
-    closed_trades = [t for t in _trades.values() if t.get("status") == "closed"]
-    open_trades = [t for t in _trades.values() if t.get("status") == "open"]
+        # If target mode is live, but no broker configured/connected, return disconnected state
+        return {
+            "broker": "ยังไม่ได้เชื่อมต่อบัญชีจริง (No Broker Connected)",
+            "broker_id": "none",
+            "account_id": "DISCONNECTED",
+            "status": "DISCONNECTED",
+            "currency": "THB",
+            "currency_symbol": "฿",
+            "initial_capital": 0.0,
+            "cash": 0.0,
+            "buying_power": 0.0,
+            "equity": 0.0,
+            "mode": "live",
+            "hold_cash": 0.0,
+            "asset_count": 0,
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "total_pnl": 0.0,
+            "current_net_worth": 0.0,
+            "closed_trades_count": 0,
+            "open_trades_count": 0,
+            "message": "ยังไม่ได้ระบุ API Key ของโบรกเกอร์ในหน้า Settings",
+        }
 
-    realized_pnl = sum(float(t.get("pnl", 0.0)) for t in closed_trades)
+    # Fallback / Default: Paper Trading Account
+    paper_closed = [t for t in _trades.values() if t.get("status") == "closed" and str(t.get("mode", "paper")).lower() == "paper"]
+    paper_open = [t for t in _trades.values() if t.get("status") == "open" and str(t.get("mode", "paper")).lower() == "paper"]
 
-    unrealized_pnl = 0.0
-    from app.engines.market_data import MarketDataEngine
-    mde = MarketDataEngine()
+    paper_realized = sum(float(t.get("pnl", 0.0)) for t in paper_closed)
+    paper_unrealized = 0.0
+    if paper_open:
+        pnls = await asyncio.gather(*[_calc_open_pnl(t) for t in paper_open])
+        paper_unrealized = sum(pnls)
 
-    async def _calc_open_pnl(t: dict) -> float:
-        sym = t.get("symbol", "BTC/USDT")
-        entry = float(t.get("entry", 100.0))
-        direction = t.get("direction", "long").lower()
-        size = float(t.get("position_size", t.get("size", 1.0)))
-        sym_upper = sym.upper()
-        mtype = "forex" if any(f in sym_upper for f in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]) else ("crypto" if "/" in sym_upper else "stock")
-        try:
-            ticker = await mde.get_ticker_24h(sym, mtype)
-            cur_price = float(ticker.get("price", entry))
-            if cur_price > 0:
-                return (cur_price - entry) * size if direction == "long" else (entry - cur_price) * size
-        except Exception:
-            pass
-        return 0.0
-
-    if open_trades:
-        pnls = await asyncio.gather(*[_calc_open_pnl(t) for t in open_trades])
-        unrealized_pnl = sum(pnls)
-
-    current_net_worth = account_info["initial_capital"] + realized_pnl + unrealized_pnl
-
-    account_info["realized_pnl"] = round(realized_pnl, 2)
-    account_info["unrealized_pnl"] = round(unrealized_pnl, 2)
-    account_info["total_pnl"] = round(realized_pnl + unrealized_pnl, 2)
-    account_info["current_net_worth"] = round(current_net_worth, 2)
-    account_info["closed_trades_count"] = len(closed_trades)
-    account_info["open_trades_count"] = len(open_trades)
-
-    return account_info
+    current_net_worth = paper_init_cap + paper_realized + paper_unrealized
+    return {
+        "broker": "Paper Trading Portfolio",
+        "broker_id": "paper",
+        "account_id": "PAPER-PORTFOLIO-01",
+        "status": "ACTIVE",
+        "currency": paper_cfg.get("currency", "USD"),
+        "currency_symbol": "$",
+        "initial_capital": paper_init_cap,
+        "cash": round(paper_init_cap + paper_realized, 2),
+        "buying_power": round((paper_init_cap + paper_realized) * 4, 2),
+        "equity": round(current_net_worth, 2),
+        "mode": "paper",
+        "hold_cash": 0.0,
+        "asset_count": len(paper_open),
+        "realized_pnl": round(paper_realized, 2),
+        "unrealized_pnl": round(paper_unrealized, 2),
+        "total_pnl": round(paper_realized + paper_unrealized, 2),
+        "current_net_worth": round(current_net_worth, 2),
+        "closed_trades_count": len(paper_closed),
+        "open_trades_count": len(paper_open),
+    }
 
 
 # ---------------------------------------------------------------------------

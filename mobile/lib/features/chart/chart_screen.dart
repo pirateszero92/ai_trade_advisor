@@ -6,6 +6,7 @@ import 'package:candlesticks/candlesticks.dart';
 import 'package:dio/dio.dart';
 import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
+import '../settings/settings_screen.dart';
 import 'smc_interactive_chart.dart';
 
 class ChartScreen extends ConsumerStatefulWidget {
@@ -41,6 +42,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   final _chatInputCtrl = TextEditingController();
   final _chatScrollCtrl = ScrollController();
   final _qtyCtrl = TextEditingController(text: '0.10');
+  final _symbolSearchCtrl = TextEditingController();
   bool _isChatLoading = false;
   final List<Map<String, String>> _chatMessages = [
     {
@@ -92,10 +94,29 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     _chatInputCtrl.dispose();
     _chatScrollCtrl.dispose();
     _qtyCtrl.dispose();
+    _symbolSearchCtrl.dispose();
     super.dispose();
   }
 
   Map<String, double> _symbolLivePrices = {};
+  Map<String, Map<String, dynamic>> _watchlistMap = {};
+
+  void _resolveExchangeForCurrentSymbol() {
+    final item = _watchlistMap[_selectedSymbol];
+    if (item != null && item['exchange'] != null && item['exchange'].toString().isNotEmpty) {
+      _selectedExchange = item['exchange'].toString().toLowerCase();
+    } else {
+      if (_selectedSymbol.toUpperCase().contains('THB')) {
+        _selectedExchange = 'innovestx';
+      } else if (_selectedMarket == 'forex') {
+        _selectedExchange = 'mt5';
+      } else if (_selectedMarket == 'stock') {
+        _selectedExchange = 'alpaca';
+      } else {
+        _selectedExchange = 'binance';
+      }
+    }
+  }
 
   Future<void> _fetchWatchlist() async {
     try {
@@ -107,12 +128,23 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         final newCrypto = <String>[];
         final newForex = <String>[];
         final newStock = <String>[];
+        final newMap = <String, Map<String, dynamic>>{};
 
         for (var item in list) {
           final raw = item as Map;
           final sym = raw['symbol']?.toString().trim().toUpperCase() ?? '';
           final mType = raw['market_type']?.toString().toLowerCase() ?? 'crypto';
+          final ex = raw['exchange']?.toString().toLowerCase() ?? (sym.contains('THB') ? 'innovestx' : 'binance');
           if (sym.isEmpty) continue;
+
+          newMap[sym] = {
+            'symbol': sym,
+            'market_type': mType,
+            'exchange': ex,
+            'timeframe': raw['timeframe'] ?? '1h',
+            'htf_timeframe': raw['htf_timeframe'] ?? '4h',
+          };
+
           if (mType == 'stock') {
             if (!newStock.contains(sym)) newStock.add(sym);
           } else if (mType == 'forex') {
@@ -121,7 +153,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             if (!newCrypto.contains(sym)) newCrypto.add(sym);
           }
         }
+
         setState(() {
+          _watchlistMap = newMap;
           _cryptoSymbols = newCrypto;
           _forexSymbols = newForex;
           _stockSymbols = newStock;
@@ -137,6 +171,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               _selectedSymbol = _stockSymbols.first;
             }
           }
+          _resolveExchangeForCurrentSymbol();
         });
       }
     } catch (_) {}
@@ -144,6 +179,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   Future<void> _fetchLiveTicker() async {
     try {
+      _resolveExchangeForCurrentSymbol();
       final dio = AppApi.dio;
       final resp = await dio.get(
         AppApi.url('/api/v1/chart/ticker'),
@@ -186,9 +222,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   void _startLiveTicker() {
     _liveTickerTimer?.cancel();
-    _liveTickerTimer = Timer.periodic(const Duration(milliseconds: 1400), (_) {
+    _liveTickerTimer = Timer.periodic(const Duration(milliseconds: 1500), (t) {
       if (!mounted) return;
       _fetchLiveTicker();
+      if (t.tick % 4 == 0) {
+        _fetchWatchlist();
+      }
     });
   }
 
@@ -304,7 +343,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     }
   }
 
-  Future<void> _executePaperOrder(String direction) async {
+  Future<void> _executeOrder(String direction) async {
     final entry = _lastPrice > 0 ? _lastPrice : 64000.0;
     
     // Dynamic SL/TP from SMC overlay or safe default 1.0% distance
@@ -321,6 +360,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     final tp = direction == 'long' ? (entry + slDist * 2.2) : (entry - slDist * 2.2);
         
     final size = double.tryParse(_qtyCtrl.text.trim()) ?? 0.10;
+    final isThb = _selectedSymbol.toUpperCase().contains('THB') || _selectedExchange == 'innovestx';
+    final targetMode = isThb ? 'live' : 'paper';
+    final targetExchange = isThb ? 'innovestx' : _selectedExchange;
+    final curr = isThb ? '฿' : '\$';
 
     try {
       final dio = AppApi.dio;
@@ -333,8 +376,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           'stop_loss': sl,
           'take_profit': tp,
           'position_size': size,
-          'exchange': _selectedExchange,
-          'mode': 'paper',
+          'exchange': targetExchange,
+          'mode': targetMode,
           'notes': 'Executed from Apex AI Terminal',
         },
       );
@@ -344,7 +387,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         SnackBar(
           backgroundColor: direction == 'long' ? AppColors.bullish : AppColors.bearish,
           content: Text(
-            '⚡ Position Opened: ${direction.toUpperCase()} $size $_selectedSymbol @ \$${entry.toStringAsFixed(2)}\nSL: \$${sl.toStringAsFixed(2)} | TP: \$${tp.toStringAsFixed(2)}',
+            '⚡ Position Opened: ${direction.toUpperCase()} $size $_selectedSymbol @ $curr${entry.toStringAsFixed(2)}\nSL: $curr${sl.toStringAsFixed(2)} | TP: $curr${tp.toStringAsFixed(2)}',
             style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
           ),
           duration: const Duration(seconds: 4),
@@ -353,9 +396,20 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
       await _fetchOpenPositions();
     } catch (e) {
+      String errDetail = e.toString();
+      if (e is DioException && e.response?.data != null) {
+        final data = e.response!.data;
+        if (data is Map && data['detail'] != null) {
+          errDetail = data['detail'].toString();
+        }
+      }
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(backgroundColor: AppColors.bearish, content: Text('Failed to place order: $e')),
+        SnackBar(
+          backgroundColor: AppColors.bearish,
+          content: Text('❌ ส่งคำสั่งล้มเหลว: $errDetail', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          duration: const Duration(seconds: 5),
+        ),
       );
     }
   }
@@ -476,82 +530,33 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             Container(width: 1, height: 20, color: AppColors.border),
             const SizedBox(width: 12),
 
-            // Symbol Selector Dropdown
-            PopupMenuButton<String>(
-              initialValue: _selectedSymbol,
-              tooltip: 'Select Pair / Symbol',
-              color: const Color(0xFF1E2533),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
-                side: const BorderSide(color: AppColors.border),
-              ),
-              onSelected: (s) {
-                if (s == '__ADD_CUSTOM__') {
-                  _showAddSymbolDialog();
-                } else {
-                  setState(() => _selectedSymbol = s);
-                  _fetchChartData();
-                }
-              },
-              itemBuilder: (context) {
-                final items = <PopupMenuEntry<String>>[];
-                for (var s in _symbols) {
-                  final isSel = s == _selectedSymbol;
-                  items.add(
-                    PopupMenuItem<String>(
-                      value: s,
-                      height: 38,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            s,
-                            style: TextStyle(
-                              fontWeight: isSel ? FontWeight.bold : FontWeight.w600,
-                              color: isSel ? AppColors.bullish : Colors.white,
-                              fontSize: 13,
-                            ),
-                          ),
-                          if (isSel)
-                            const Icon(Icons.check, size: 16, color: AppColors.bullish),
-                        ],
-                      ),
-                    ),
-                  );
-                }
-                items.add(const PopupMenuDivider(height: 8));
-                items.add(
-                  const PopupMenuItem<String>(
-                    value: '__ADD_CUSTOM__',
-                    height: 38,
-                    child: Row(
-                      children: [
-                        Icon(Icons.add_circle_outline, size: 16, color: AppColors.bullish),
-                        SizedBox(width: 8),
-                        Text(
-                          '+ Add / Search Symbol',
-                          style: TextStyle(
-                            color: AppColors.bullish,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 13,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-                return items;
-              },
+            // Symbol Selector Button (Synced with Proactive Watchlist)
+            GestureDetector(
+              onTap: _showSymbolPickerModal,
+              behavior: HitTestBehavior.opaque,
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1E2533),
                   borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: AppColors.border),
+                  border: Border.all(color: const Color(0xFF2E82FE).withOpacity(0.6)),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    if (_selectedSymbol.toUpperCase().contains('THB'))
+                      Container(
+                        margin: const EdgeInsets.only(right: 6),
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF9B59B6).withOpacity(0.25),
+                          borderRadius: BorderRadius.circular(3),
+                        ),
+                        child: const Text(
+                          'THB',
+                          style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Color(0xFFC39BD3)),
+                        ),
+                      ),
                     Text(
                       _selectedSymbol,
                       style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
@@ -715,8 +720,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             const SizedBox(width: 10),
             IconButton(
               icon: const Icon(Icons.refresh, size: 18, color: Colors.white70),
-              tooltip: 'Reload Data',
-              onPressed: _fetchChartData,
+              tooltip: 'รีเฟรชข้อมูลและ Watchlist',
+              onPressed: () async {
+                await _fetchWatchlist();
+                _fetchChartData();
+                _fetchLiveTicker();
+              },
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(),
             ),
@@ -736,8 +745,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           if (_symbols.isNotEmpty) {
             _selectedSymbol = _symbols.first;
           }
+          _resolveExchangeForCurrentSymbol();
         });
-        if (_symbols.isNotEmpty) _fetchChartData();
+        if (_symbols.isNotEmpty) {
+          _fetchChartData();
+          _fetchLiveTicker();
+        }
       },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -779,79 +792,623 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     return vol.toStringAsFixed(0);
   }
 
-  Future<void> _showAddSymbolDialog() async {
-    final symbolCtrl = TextEditingController();
-    String selectedMarket = _selectedMarket;
+  Future<void> _showSymbolPickerModal() async {
+    await _fetchWatchlist();
+    if (!mounted) return;
 
-    try {
-      await showDialog(
-        context: context,
-        builder: (ctx) => StatefulBuilder(
-        builder: (context, setDlgState) {
-          return AlertDialog(
-            backgroundColor: AppColors.surface,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            title: const Row(
-              children: [
-                Icon(Icons.add_chart, color: AppColors.bullish, size: 20),
-                SizedBox(width: 8),
-                Text('Add Asset / Symbol', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-              ],
-            ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF131722),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) {
+          final query = _symbolSearchCtrl.text.trim().toUpperCase();
+          final list = _symbols.where((s) => query.isEmpty || s.contains(query)).toList();
+
+          return Container(
+            height: MediaQuery.of(context).size.height * 0.75,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Market Type:', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
-                const SizedBox(height: 6),
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
+                  ),
+                ),
+                const SizedBox(height: 12),
                 Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    _dlgMarketChip('Crypto', 'crypto', selectedMarket, (m) => setDlgState(() => selectedMarket = m)),
-                    const SizedBox(width: 6),
-                    _dlgMarketChip('Forex/Gold', 'forex', selectedMarket, (m) => setDlgState(() => selectedMarket = m)),
-                    const SizedBox(width: 6),
-                    _dlgMarketChip('Stocks', 'stock', selectedMarket, (m) => setDlgState(() => selectedMarket = m)),
+                    Text(
+                      'เลือกสินทรัพย์ (${_selectedMarket.toUpperCase()})',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: AppColors.bullish.withValues(alpha: 0.2),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        '${_symbols.length} รายการใน Watchlist',
+                        style: const TextStyle(fontSize: 11, color: AppColors.bullish, fontWeight: FontWeight.bold),
+                      ),
+                    ),
                   ],
                 ),
-                const SizedBox(height: 14),
-                const Text('Symbol / Ticker:', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
-                const SizedBox(height: 6),
+                const SizedBox(height: 12),
+                // Search bar
                 TextField(
-                  controller: symbolCtrl,
-                  autofocus: true,
-                  textCapitalization: TextCapitalization.characters,
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                  controller: _symbolSearchCtrl,
+                  onChanged: (_) => setModalState(() {}),
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
                   decoration: InputDecoration(
-                    hintText: selectedMarket == 'crypto' ? 'e.g. SOL/USDT, ADA/USDT' : (selectedMarket == 'forex' ? 'e.g. XAUUSD, GBPJPY' : 'e.g. AMD, CCJ, PLTR, GOOGL'),
+                    prefixIcon: const Icon(Icons.search, color: Colors.white54),
+                    hintText: 'ค้นหาเหรียญใน Watchlist (เช่น THB, BTC, XRP)...',
                     hintStyle: const TextStyle(color: Colors.white30, fontSize: 13),
-                    prefixIcon: const Icon(Icons.search, color: Colors.white60, size: 18),
+                    filled: true,
+                    fillColor: const Color(0xFF1E2533),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: const BorderSide(color: Color(0xFF2E82FE), width: 0.8),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: list.isEmpty
+                      ? const Center(
+                          child: Text(
+                            'ไม่พบสินทรัพย์ที่ค้นหา',
+                            style: TextStyle(color: Colors.white38, fontSize: 13),
+                          ),
+                        )
+                      : ListView.builder(
+                          itemCount: list.length,
+                          itemBuilder: (context, i) {
+                            final s = list[i];
+                            final isSel = s == _selectedSymbol;
+                            final isTHB = s.toUpperCase().contains('THB');
+                            final isUSDT = s.toUpperCase().contains('USDT');
+
+                            Color tagBg = const Color(0xFF2E82FE).withValues(alpha: 0.2);
+                            Color tagFg = const Color(0xFF2E82FE);
+                            String tagLabel = _selectedMarket.toUpperCase();
+
+                            if (_selectedMarket == 'crypto') {
+                              if (isTHB) {
+                                tagBg = const Color(0xFF9B59B6).withValues(alpha: 0.25);
+                                tagFg = const Color(0xFFC39BD3);
+                                tagLabel = '🟣 INNOVESTX (THB)';
+                              } else if (isUSDT) {
+                                tagBg = const Color(0xFF2E82FE).withValues(alpha: 0.25);
+                                tagFg = const Color(0xFF5DADE2);
+                                tagLabel = '🌐 BINANCE (USDT)';
+                              }
+                            } else if (_selectedMarket == 'forex') {
+                              tagBg = const Color(0xFFF39C12).withValues(alpha: 0.25);
+                              tagFg = const Color(0xFFF8C471);
+                              tagLabel = '💱 FOREX/GOLD (MT5)';
+                            } else if (_selectedMarket == 'stock') {
+                              tagBg = const Color(0xFF00C087).withValues(alpha: 0.25);
+                              tagFg = const Color(0xFF00C087);
+                              tagLabel = '📈 STOCK (ALPACA)';
+                            }
+
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 6),
+                              decoration: BoxDecoration(
+                                color: isSel ? const Color(0xFF2E82FE).withValues(alpha: 0.15) : const Color(0xFF1B2333),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: isSel ? const Color(0xFF2E82FE) : const Color(0xFF232A38),
+                                  width: isSel ? 1.2 : 0.8,
+                                ),
+                              ),
+                              child: ListTile(
+                                onTap: () {
+                                  Navigator.pop(ctx);
+                                  setState(() {
+                                    _selectedSymbol = s;
+                                    _resolveExchangeForCurrentSymbol();
+                                  });
+                                  _fetchChartData();
+                                  _fetchLiveTicker();
+                                },
+                                title: Row(
+                                  children: [
+                                    Text(
+                                      s,
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 14,
+                                        color: isSel ? AppColors.bullish : Colors.white,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                      decoration: BoxDecoration(
+                                        color: tagBg,
+                                        borderRadius: BorderRadius.circular(6),
+                                      ),
+                                      child: Text(
+                                        tagLabel,
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold,
+                                          color: tagFg,
+                                        ),
+                                      ),
+                                    ),
+                                    const Spacer(),
+                                  ],
+                                ),
+                                trailing: isSel ? const Icon(Icons.check_circle, color: AppColors.bullish, size: 20) : null,
+                              ),
+                            );
+                          },
+                        ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _showAddAssetCatalogDialog();
+                    },
+                    icon: const Icon(Icons.add_circle, size: 18),
+                    label: const Text('➕ เพิ่มสินทรัพย์ใหม่เข้า Watchlist', style: TextStyle(fontWeight: FontWeight.bold)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF2E82FE),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
                   ),
                 ),
               ],
             ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: Colors.white60))),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: AppColors.bullish, foregroundColor: Colors.black),
-                onPressed: () async {
-                  final sym = symbolCtrl.text.trim().toUpperCase();
-                  if (sym.isEmpty) return;
-                  Navigator.pop(ctx);
-                  _addAndSelectSymbol(sym, selectedMarket);
-                },
-                child: const Text('Add & View Chart', style: TextStyle(fontWeight: FontWeight.bold)),
-              ),
-            ],
           );
         },
       ),
     );
-    } finally {
-      symbolCtrl.dispose();
-    }
   }
 
-  Widget _dlgMarketChip(String label, String market, String selectedMarket, Function(String) onSelect) {
+  void _showAddAssetCatalogDialog() {
+    final customSymCtrl = TextEditingController();
+    final searchCtrl = TextEditingController();
+    String activeCategory = _selectedMarket == 'forex'
+        ? 'forex_metals'
+        : (_selectedMarket == 'stock' ? 'stocks' : 'innovestx_thb');
+    String selectedTf = _selectedTimeframe;
+    String customMarketType = _selectedMarket;
+
+    final selectedItems = <Map<String, dynamic>>{};
+    bool isLoadingCatalog = true;
+    Map<String, List<Map<String, dynamic>>> catalog = {};
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF131722),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) {
+          if (isLoadingCatalog) {
+            AppApi.dio.get(AppApi.url('/api/v1/settings/assets/catalog')).then((resp) {
+              final data = resp.data as Map<String, dynamic>;
+              setModalState(() {
+                catalog = {
+                  'innovestx_thb': List<Map<String, dynamic>>.from(data['innovestx_thb'] ?? []),
+                  'crypto_global': List<Map<String, dynamic>>.from(data['crypto_global'] ?? []),
+                  'forex_metals': List<Map<String, dynamic>>.from(data['forex_metals'] ?? []),
+                  'stocks': List<Map<String, dynamic>>.from(data['stocks'] ?? []),
+                };
+                isLoadingCatalog = false;
+              });
+            }).catchError((_) {
+              setModalState(() {
+                isLoadingCatalog = false;
+              });
+            });
+          }
+
+          final existingNormSymbols = _watchlistMap.keys.map((e) => e.replaceAll('/', '').replaceAll('-', '').toUpperCase()).toSet();
+
+          List<Map<String, dynamic>> currentList = catalog[activeCategory] ?? [];
+          final q = searchCtrl.text.trim().toUpperCase();
+          if (q.isNotEmpty) {
+            currentList = currentList.where((it) {
+              final sym = (it['symbol'] ?? '').toString().toUpperCase();
+              final name = (it['name'] ?? '').toString().toUpperCase();
+              return sym.contains(q) || name.contains(q);
+            }).toList();
+          }
+
+          return Container(
+            height: MediaQuery.of(context).size.height * 0.85,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.playlist_add, color: AppColors.bullish, size: 22),
+                        SizedBox(width: 8),
+                        Text(
+                          'เลือกสินทรัพย์เข้า Watchlist & Chart',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                        ),
+                      ],
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white54),
+                      onPressed: () => Navigator.pop(ctx),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+
+                // Category Selector Bar
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      _chartCatChip('🟣 InnovestX (THB)', 'innovestx_thb', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      const SizedBox(width: 6),
+                      _chartCatChip('🌐 Crypto (USDT)', 'crypto_global', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      const SizedBox(width: 6),
+                      _chartCatChip('💱 Forex & Gold', 'forex_metals', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      const SizedBox(width: 6),
+                      _chartCatChip('📈 US Stocks', 'stocks', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      const SizedBox(width: 6),
+                      _chartCatChip('✍️ กำหนดเอง (Custom)', 'custom', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+
+                // Timeframe Bar + Search Bar
+                if (activeCategory != 'custom') ...[
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: searchCtrl,
+                          onChanged: (_) => setModalState(() {}),
+                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                          decoration: InputDecoration(
+                            prefixIcon: const Icon(Icons.search, color: Colors.white54, size: 18),
+                            hintText: 'ค้นหาชื่อเหรียญหรือสัญลักษณ์...',
+                            hintStyle: const TextStyle(color: Colors.white30, fontSize: 12),
+                            filled: true,
+                            fillColor: const Color(0xFF1E2533),
+                            contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 10),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: const BorderSide(color: Color(0xFF2E82FE), width: 0.8),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1E2533),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFF2E82FE).withValues(alpha: 0.4)),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            value: selectedTf,
+                            dropdownColor: const Color(0xFF1B2333),
+                            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                            items: const [
+                              DropdownMenuItem(value: '15m', child: Text('TF 15M')),
+                              DropdownMenuItem(value: '1h', child: Text('TF 1H')),
+                              DropdownMenuItem(value: '4h', child: Text('TF 4H')),
+                              DropdownMenuItem(value: '1d', child: Text('TF 1D')),
+                            ],
+                            onChanged: (v) => setModalState(() => selectedTf = v ?? '1h'),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+
+                  // Asset list
+                  Expanded(
+                    child: isLoadingCatalog
+                        ? const Center(child: CircularProgressIndicator(color: AppColors.bullish))
+                        : currentList.isEmpty
+                            ? const Center(child: Text('ไม่พบสินทรัพย์ในหมวดนี้', style: TextStyle(color: Colors.white38, fontSize: 13)))
+                            : ListView.builder(
+                                itemCount: currentList.length,
+                                itemBuilder: (context, idx) {
+                                  final item = currentList[idx];
+                                  final sym = item['symbol']?.toString() ?? '';
+                                  final name = item['name']?.toString() ?? '';
+                                  final ex = item['exchange']?.toString() ?? 'binance';
+                                  final mType = item['market_type']?.toString() ?? 'crypto';
+
+                                  final normSym = sym.replaceAll('/', '').replaceAll('-', '').toUpperCase();
+                                  final isAlreadyInWatchlist = existingNormSymbols.contains(normSym);
+
+                                  final isChecked = selectedItems.any((it) => it['symbol'] == sym);
+
+                                  Color tagBg = const Color(0xFF2E82FE).withValues(alpha: 0.2);
+                                  Color tagFg = const Color(0xFF2E82FE);
+                                  String tagLabel = mType.toUpperCase();
+
+                                  if (activeCategory == 'innovestx_thb' || sym.endsWith('/THB')) {
+                                    tagBg = const Color(0xFF9B59B6).withValues(alpha: 0.25);
+                                    tagFg = const Color(0xFFC39BD3);
+                                    tagLabel = 'THB';
+                                  } else if (activeCategory == 'crypto_global') {
+                                    tagBg = const Color(0xFF2E82FE).withValues(alpha: 0.25);
+                                    tagFg = const Color(0xFF5DADE2);
+                                    tagLabel = 'USDT';
+                                  } else if (activeCategory == 'forex_metals') {
+                                    tagBg = const Color(0xFFF39C12).withValues(alpha: 0.25);
+                                    tagFg = const Color(0xFFF8C471);
+                                    tagLabel = 'MT5';
+                                  } else if (activeCategory == 'stocks') {
+                                    tagBg = const Color(0xFF00C087).withValues(alpha: 0.25);
+                                    tagFg = const Color(0xFF00C087);
+                                    tagLabel = 'ALPACA';
+                                  }
+
+                                  return Container(
+                                    margin: const EdgeInsets.only(bottom: 6),
+                                    decoration: BoxDecoration(
+                                      color: isAlreadyInWatchlist
+                                          ? const Color(0xFF141923)
+                                          : (isChecked ? const Color(0xFF2E82FE).withValues(alpha: 0.15) : const Color(0xFF1B2333)),
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                        color: isChecked
+                                            ? const Color(0xFF2E82FE)
+                                            : (isAlreadyInWatchlist ? Colors.white10 : const Color(0xFF232A38)),
+                                        width: isChecked ? 1.2 : 0.8,
+                                      ),
+                                    ),
+                                    child: ListTile(
+                                      dense: true,
+                                      enabled: !isAlreadyInWatchlist,
+                                      onTap: isAlreadyInWatchlist
+                                          ? null
+                                          : () {
+                                              setModalState(() {
+                                                if (isChecked) {
+                                                  selectedItems.removeWhere((it) => it['symbol'] == sym);
+                                                } else {
+                                                  selectedItems.add({
+                                                    'symbol': sym,
+                                                    'market_type': mType,
+                                                    'timeframe': selectedTf,
+                                                    'htf_timeframe': selectedTf == '1d' ? '1w' : '4h',
+                                                    'exchange': ex,
+                                                  });
+                                                }
+                                              });
+                                            },
+                                      leading: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                                        decoration: BoxDecoration(color: tagBg, borderRadius: BorderRadius.circular(4)),
+                                        child: Text(tagLabel, style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: tagFg)),
+                                      ),
+                                      title: Text(
+                                        sym,
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 14,
+                                          color: isAlreadyInWatchlist ? Colors.white38 : (isChecked ? AppColors.bullish : Colors.white),
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        name,
+                                        style: TextStyle(fontSize: 11, color: isAlreadyInWatchlist ? Colors.white24 : Colors.white54),
+                                      ),
+                                      trailing: isAlreadyInWatchlist
+                                          ? Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                              decoration: BoxDecoration(
+                                                color: Colors.white.withValues(alpha: 0.05),
+                                                borderRadius: BorderRadius.circular(4),
+                                              ),
+                                              child: const Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  Icon(Icons.check, size: 14, color: AppColors.bullish),
+                                                  SizedBox(width: 4),
+                                                  Text('อยู่ใน Watchlist แล้ว', style: TextStyle(fontSize: 10, color: Colors.white54)),
+                                                ],
+                                              ),
+                                            )
+                                          : Checkbox(
+                                              value: isChecked,
+                                              activeColor: AppColors.bullish,
+                                              checkColor: Colors.black,
+                                              onChanged: (val) {
+                                                setModalState(() {
+                                                  if (val == true) {
+                                                    selectedItems.add({
+                                                      'symbol': sym,
+                                                      'market_type': mType,
+                                                      'timeframe': selectedTf,
+                                                      'htf_timeframe': selectedTf == '1d' ? '1w' : '4h',
+                                                      'exchange': ex,
+                                                    });
+                                                  } else {
+                                                    selectedItems.removeWhere((it) => it['symbol'] == sym);
+                                                  }
+                                                });
+                                              },
+                                            ),
+                                    ),
+                                  );
+                                },
+                              ),
+                  ),
+                ] else ...[
+                  // Custom input
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('เพิ่มสินทรัพย์ระบุเอง (Custom Symbol):', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white)),
+                          const SizedBox(height: 10),
+                          TextField(
+                            controller: customSymCtrl,
+                            textCapitalization: TextCapitalization.characters,
+                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                            decoration: const InputDecoration(
+                              hintText: 'เช่น DOGE/THB, BTC/USD, GBPJPY, AMZN',
+                              hintStyle: TextStyle(color: Colors.white30, fontSize: 13),
+                              prefixIcon: Icon(Icons.edit, color: Colors.white60),
+                            ),
+                          ),
+                          const SizedBox(height: 14),
+                          const Text('ประเภทตลาด (Market Type):', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
+                          const SizedBox(height: 6),
+                          Row(
+                            children: [
+                              _chartDlgMarketChip('Crypto', 'crypto', customMarketType, (m) => setModalState(() => customMarketType = m)),
+                              const SizedBox(width: 6),
+                              _chartDlgMarketChip('Forex/Gold', 'forex', customMarketType, (m) => setModalState(() => customMarketType = m)),
+                              const SizedBox(width: 6),
+                              _chartDlgMarketChip('Stocks', 'stock', customMarketType, (m) => setModalState(() => customMarketType = m)),
+                            ],
+                          ),
+                          const SizedBox(height: 14),
+                          const Text('Timeframe สแกนหลัก:', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
+                          const SizedBox(height: 6),
+                          Wrap(
+                            spacing: 8,
+                            children: ['15m', '1h', '4h', '1d'].map((tf) {
+                              final isSel = selectedTf == tf;
+                              return ChoiceChip(
+                                label: Text(tf.toUpperCase(), style: TextStyle(fontSize: 11, color: isSel ? Colors.black : Colors.white)),
+                                selected: isSel,
+                                selectedColor: AppColors.bullish,
+                                backgroundColor: const Color(0xFF252540),
+                                onSelected: (_) => setModalState(() => selectedTf = tf),
+                              );
+                            }).toList(),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+
+                const SizedBox(height: 10),
+                // Submit button
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () async {
+                      if (activeCategory == 'custom') {
+                        final sym = customSymCtrl.text.trim().toUpperCase();
+                        if (sym.isNotEmpty) {
+                          Navigator.pop(ctx);
+                          await _addAndSelectSymbol(sym, customMarketType);
+                        }
+                      } else {
+                        if (selectedItems.isEmpty) return;
+                        Navigator.pop(ctx);
+                        final itemsList = selectedItems.toList();
+                        try {
+                          final dio = AppApi.dio;
+                          await dio.post(
+                            AppApi.url('/api/v1/settings/watchlist/batch'),
+                            data: {'items': itemsList},
+                          );
+                        } catch (_) {}
+                        await _fetchWatchlist();
+                        if (itemsList.isNotEmpty) {
+                          final first = itemsList.first;
+                          setState(() {
+                            _selectedMarket = first['market_type'] ?? 'crypto';
+                            _selectedSymbol = first['symbol'] ?? _selectedSymbol;
+                            _resolveExchangeForCurrentSymbol();
+                          });
+                          _fetchChartData();
+                          _fetchLiveTicker();
+                        }
+                      }
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.bullish,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    child: Text(
+                      activeCategory == 'custom'
+                          ? '➕ เพิ่มสินทรัพย์ & ดูกราฟทันที'
+                          : '➕ เพิ่มที่เลือก (${selectedItems.length}) เข้า Watchlist & ดูกราฟ',
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _chartCatChip(String label, String catId, String activeCat, Function(String) onSelect) {
+    final isSel = activeCat == catId;
+    return GestureDetector(
+      onTap: () => onSelect(catId),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSel ? AppColors.bullish.withValues(alpha: 0.2) : const Color(0xFF1E2533),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: isSel ? AppColors.bullish : const Color(0xFF232A38)),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: isSel ? FontWeight.bold : FontWeight.normal,
+            color: isSel ? AppColors.bullish : Colors.white70,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _chartDlgMarketChip(String label, String market, String selectedMarket, Function(String) onSelect) {
     final isSel = selectedMarket == market;
     return Expanded(
       child: GestureDetector(
@@ -878,6 +1435,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   }
 
   Future<void> _addAndSelectSymbol(String sym, String market) async {
+    final isTHB = sym.toUpperCase().contains('THB');
+    final ex = isTHB ? 'innovestx' : (market == 'crypto' ? 'binance' : (market == 'forex' ? 'mt5' : 'alpaca'));
+
     setState(() {
       if (market == 'stock') {
         if (!_stockSymbols.contains(sym)) _stockSymbols.add(sym);
@@ -888,6 +1448,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       }
       _selectedMarket = market;
       _selectedSymbol = sym;
+      _selectedExchange = ex;
     });
 
     // Save to backend watchlist so proactive scanner also monitors it
@@ -900,12 +1461,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           'market_type': market,
           'timeframe': _selectedTimeframe,
           'htf_timeframe': _selectedHtfTimeframe,
-          'exchange': market == 'crypto' ? 'binance' : (market == 'forex' ? 'mt5' : 'alpaca'),
+          'exchange': ex,
         },
       );
+      await _fetchWatchlist();
     } catch (_) {}
 
     _fetchChartData();
+    _fetchLiveTicker();
   }
 
   // --------------------------------------------------------------------------
@@ -1088,8 +1651,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           'messages': chatHistory,
           'context': {
             'symbol': _selectedSymbol,
+            'market_type': _selectedMarket,
+            'exchange': _selectedExchange,
             'timeframe': _selectedTimeframe,
             'price': _lastPrice,
+            'currency': _currSym == '฿' ? 'THB (บาท)' : 'USD (\$)',
             'bias': _smcOverlayData?['bias'] ?? 'neutral',
             'confluence': _smcOverlayData?['confluence'] ?? 0,
             'open_positions': _openPositions.length,
@@ -1833,13 +2399,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               ),
               child: Column(
                 children: [
-                  _levelRow('Entry Zone', '\$${entryPrice.toStringAsFixed(2)}', Colors.white),
+                  _levelRow('Entry Zone', '$_currSym${entryPrice.toStringAsFixed(2)}', Colors.white),
                   const Divider(),
-                  _levelRow('Invalidation (SL)', '\$${slPrice.toStringAsFixed(2)}', AppColors.bearish, sub: 'Below Order Block'),
+                  _levelRow('Invalidation (SL)', '$_currSym${slPrice.toStringAsFixed(2)}', AppColors.bearish, sub: 'Below Order Block'),
                   const Divider(),
-                  _levelRow('Take Profit 1', '\$${tp1Price.toStringAsFixed(2)}', AppColors.bullish, sub: '1.8R Ratio'),
+                  _levelRow('Take Profit 1', '$_currSym${tp1Price.toStringAsFixed(2)}', AppColors.bullish, sub: '1.8R Ratio'),
                   const Divider(),
-                  _levelRow('Major Target (TP2)', '\$${tp2Price.toStringAsFixed(2)}', AppColors.bullish, sub: '3.2R Confluence Zone'),
+                  _levelRow('Major Target (TP2)', '$_currSym${tp2Price.toStringAsFixed(2)}', AppColors.bullish, sub: '3.2R Confluence Zone'),
                 ],
               ),
             ),
@@ -1851,7 +2417,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               decoration: BoxDecoration(
                 color: const Color(0xFF1A2234),
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: const Color(0xFF2E82FE).withOpacity(0.3)),
+                border: Border.all(color: const Color(0xFF2E82FE).withValues(alpha: 0.3)),
               ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -2002,11 +2568,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text('Pos Value: \$${posValue >= 1000 ? posValue.toStringAsFixed(1) : posValue.toStringAsFixed(2)}',
+                          Text('Pos Value: $_currSym${posValue >= 1000 ? posValue.toStringAsFixed(1) : posValue.toStringAsFixed(2)}',
                               style: const TextStyle(fontSize: 11, color: Colors.white70)),
-                          Text('Risk: -\$${riskAmount.toStringAsFixed(2)}',
+                          Text('Risk: -$_currSym${riskAmount.toStringAsFixed(2)}',
                               style: const TextStyle(fontSize: 11, color: AppColors.bearish, fontWeight: FontWeight.bold)),
-                          Text('TP1: +\$${profit1.toStringAsFixed(2)}',
+                          Text('TP1: +$_currSym${profit1.toStringAsFixed(2)}',
                               style: const TextStyle(fontSize: 11, color: AppColors.bullish, fontWeight: FontWeight.bold)),
                         ],
                       ),
@@ -2022,7 +2588,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               children: [
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: () => _executePaperOrder('long'),
+                    onPressed: () => _executeOrder('long'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.bullish,
                       foregroundColor: Colors.black,
@@ -2042,7 +2608,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: () => _executePaperOrder('short'),
+                    onPressed: () => _executeOrder('short'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.bearish,
                       foregroundColor: Colors.white,
@@ -2161,6 +2727,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   // Bottom Status Bar
   // --------------------------------------------------------------------------
   Widget _buildBottomStatusBar() {
+    final settings = ref.watch(settingsProvider);
+    final isLiveMode = !settings.isPaperMode;
+    final isThb = _selectedSymbol.toUpperCase().contains('THB');
+    final feedName = isThb ? 'InnovestX OpenAPI' : '$_selectedExchange.com';
+    final modeLabel = isLiveMode
+        ? (isThb ? 'Mode: Live Trading (฿)' : 'Mode: Live Trading (\$)')
+        : 'Mode: Paper Trading (\$)';
+
     return Container(
       color: AppColors.surface,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -2168,11 +2742,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
-            const Icon(Icons.cloud_done, size: 14, color: AppColors.bullish),
+            Icon(isLiveMode ? Icons.verified : Icons.science_outlined, size: 14, color: isLiveMode ? const Color(0xFF9B59B6) : const Color(0xFF00E5FF)),
             const SizedBox(width: 6),
             Text(
-              'Feed: $_selectedExchange.com  •  Latency: 28ms  •  Mode: Paper Trading',
-              style: const TextStyle(fontSize: 11, color: AppColors.textMuted),
+              'Feed: $feedName  •  Latency: ${isLiveMode ? "15ms" : "28ms"}  •  $modeLabel',
+              style: TextStyle(
+                fontSize: 11,
+                color: isLiveMode ? const Color(0xFFC39BD3) : const Color(0xFF00E5FF).withValues(alpha: 0.8),
+                fontWeight: isLiveMode ? FontWeight.bold : FontWeight.normal,
+              ),
             ),
             const SizedBox(width: 16),
             Text(

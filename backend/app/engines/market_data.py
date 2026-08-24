@@ -196,6 +196,34 @@ class MarketDataEngine:
         else:
             query_sym = clean_sym
 
+        # 1.5. If THB symbol (InnovestX Digital Asset), try InnovestX L2 Orderbook directly first
+        if is_thb:
+            try:
+                from app.engines.innovestx_client import InnovestXClient
+                ix_client = InnovestXClient()
+                if ix_client.is_configured():
+                    ix_data = await asyncio.wait_for(ix_client.get_live_ticker(symbol), timeout=1.8)
+                    if ix_data and ix_data.get("price", 0) > 0:
+                        p = float(ix_data["price"])
+                        bid = float(ix_data.get("best_bid", p))
+                        ask = float(ix_data.get("best_ask", p))
+                        res = {
+                            "symbol": symbol,
+                            "price": p,
+                            "change_24h": 0.0,
+                            "high_24h": ask if ask > 0 else p,
+                            "low_24h": bid if bid > 0 else p,
+                            "volume_24h": 0.0,
+                            "best_bid": bid,
+                            "best_ask": ask,
+                            "spread": float(ix_data.get("spread", 0.0)),
+                            "exchange": "innovestx",
+                        }
+                        _TICKER_CACHE[cache_key] = (now, res)
+                        return res
+            except Exception as e:
+                logger.debug(f"[MarketData] InnovestX direct ticker lookup: {e}")
+
         # 2. Crypto lookups (Binance / Bybit)
         if market_type == "crypto" or is_thb or ("/" in symbol and "USD" in clean_sym and clean_sym not in ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY"]):
             binance_hosts = [
@@ -416,6 +444,19 @@ class MarketDataEngine:
         if not df.empty:
             if is_thb:
                 usd_thb = await _get_usd_thb_rate_cached()
+                # If InnovestX is configured, calibrate candle price to exact InnovestX orderbook price
+                try:
+                    from app.engines.innovestx_client import InnovestXClient
+                    ix_client = InnovestXClient()
+                    if ix_client.is_configured():
+                        ix_data = await asyncio.wait_for(ix_client.get_live_ticker(symbol), timeout=1.5)
+                        if ix_data and ix_data.get("price", 0) > 0:
+                            last_raw = float(df["close"].iloc[-1])
+                            if last_raw > 0:
+                                usd_thb = float(ix_data["price"]) / last_raw
+                except Exception:
+                    pass
+
                 for col in ["open", "high", "low", "close"]:
                     df[col] = df[col] * usd_thb
                 last_c = df["close"].iloc[-1]

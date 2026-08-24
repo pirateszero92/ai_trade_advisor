@@ -223,6 +223,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   late TextEditingController _alpacaBaseUrlCtrl;
 
   List<Map<String, dynamic>> _watchlist = [];
+  Map<String, dynamic> _brokerConfig = {};
 
   @override
   void initState() {
@@ -315,6 +316,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       final bData = bResp.data as Map<String, dynamic>;
       if (mounted) {
         setState(() {
+          _brokerConfig = Map<String, dynamic>.from(bData);
           if (_innovestxKeyCtrl.text.isEmpty && bData['innovestx_api_key'] != null && !bData['innovestx_api_key'].toString().contains('*')) _innovestxKeyCtrl.text = bData['innovestx_api_key'].toString();
           if (_innovestxSecretCtrl.text.isEmpty && bData['innovestx_api_secret'] != null && !bData['innovestx_api_secret'].toString().contains('*')) _innovestxSecretCtrl.text = bData['innovestx_api_secret'].toString();
           if (_mt5LoginCtrl.text.isEmpty && bData['mt5_login'] != null && bData['mt5_login'] != 0) _mt5LoginCtrl.text = bData['mt5_login'].toString();
@@ -346,6 +348,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   }
 
   Future<void> _addWatchlistItem(String symbol, String marketType, String tf) async {
+    final isTHB = symbol.trim().toUpperCase().contains('THB');
+    final ex = isTHB ? 'innovestx' : (marketType == 'crypto' ? 'binance' : (marketType == 'forex' ? 'mt5' : 'alpaca'));
+
     try {
       final dio = AppApi.dio;
       await dio.post(
@@ -355,7 +360,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'market_type': marketType.toLowerCase(),
           'timeframe': tf.toLowerCase(),
           'htf_timeframe': tf == '1d' ? '1w' : '4h',
-          'exchange': marketType == 'crypto' ? 'binance' : (marketType == 'forex' ? 'mt5' : 'alpaca'),
+          'exchange': ex,
         },
       );
       _fetchWatchlist();
@@ -363,14 +368,46 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             backgroundColor: AppColors.bullish,
-            content: Text('✅ Added $symbol to Proactive Scanner!', style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+            content: Text('✅ เพิ่ม $symbol เข้า Proactive Watchlist แล้ว!', style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
           ),
         );
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(backgroundColor: AppColors.bearish, content: Text('Failed to add asset: $e')),
+          SnackBar(backgroundColor: AppColors.bearish, content: Text('เพิ่มไม่สำเร็จ: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _addBatchWatchlistItems(List<Map<String, dynamic>> items) async {
+    if (items.isEmpty) return;
+    try {
+      final dio = AppApi.dio;
+      final resp = await dio.post(
+        AppApi.url('/api/v1/settings/watchlist/batch'),
+        data: {'items': items},
+      );
+      await _fetchWatchlist();
+      if (mounted) {
+        final count = resp.data['added_count'] ?? items.length;
+        final total = resp.data['total_count'] ?? _watchlist.length;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.bullish,
+            content: Text(
+              '✅ เพิ่ม $count สินทรัพย์เข้า Proactive Watchlist สำเร็จ! (รวม $total รายการ)',
+              style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+            ),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(backgroundColor: AppColors.bearish, content: Text('เพิ่มสินทรัพย์ไม่สำเร็จ: $e')),
         );
       }
     }
@@ -403,47 +440,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(backgroundColor: AppColors.bearish, content: Text('ลบไม่สำเร็จ: $e')),
-        );
-      }
-    }
-  }
-
-  Future<void> _clearInnovestxWatchlist() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E2533),
-        title: const Text('ลบเหรียญ THB ทั้งหมด?', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
-        content: const Text('ต้องการลบเหรียญคู่ THB ที่ซิงค์มาจาก InnovestX ทั้งหมดออกจาก Watchlist ใช่หรือไม่?', style: TextStyle(color: Colors.white70, fontSize: 13)),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('ยกเลิก', style: TextStyle(color: Colors.white54))),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.bearish),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('ลบทั้งหมด', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-          ),
-        ],
-      ),
-    );
-    if (confirm != true) return;
-
-    try {
-      final dio = AppApi.dio;
-      final resp = await dio.post(AppApi.url('/api/v1/settings/watchlist/clear-innovestx'));
-      await _fetchWatchlist();
-      if (mounted) {
-        final removedCount = resp.data['removed_count'] ?? 0;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: AppColors.bullish,
-            content: Text('🗑️ ลบเหรียญ THB เรียบร้อย ($removedCount คู่)', style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(backgroundColor: AppColors.bearish, content: Text('เกิดข้อผิดพลาด: $e')),
         );
       }
     }
@@ -489,150 +485,429 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     }
   }
 
-  Future<void> _syncInnovestxWatchlist() async {
-    final key = _innovestxKeyCtrl.text.trim();
-    final secret = _innovestxSecretCtrl.text.trim();
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('กำลังดึง 39 คู่เหรียญดิจิทัลจาก InnovestX...'),
-        duration: Duration(seconds: 2),
-      ),
-    );
-
-    try {
-      final dio = AppApi.dio;
-      final resp = await dio.post(
-        AppApi.url('/api/v1/settings/watchlist/import-innovestx'),
-        data: {
-          'api_key': key.isNotEmpty ? key : null,
-          'api_secret': secret.isNotEmpty ? secret : null,
-          'timeframe': '1h',
-          'htf_timeframe': '4h',
-        },
-      );
-
-      final count = resp.data['added_count'] ?? 0;
-      final total = resp.data['total_watchlist_count'] ?? 0;
-
-      await _fetchWatchlist();
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: AppColors.bullish,
-            content: Text(
-              '🟣 ซิงค์สินทรัพย์ InnovestX สำเร็จ! เพิ่มใหม่ $count คู่ (รวมเฝ้าสแกน $total คู่) ✅',
-              style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
-            ),
-            duration: const Duration(seconds: 4),
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(backgroundColor: AppColors.bearish, content: Text('ซิงค์ InnovestX ล้มเหลว: $e')),
-        );
-      }
-    }
-  }
-
   void _showAddAssetDialog() {
-    final symCtrl = TextEditingController();
-    String selectedType = 'crypto';
+    final customSymCtrl = TextEditingController();
+    final searchCtrl = TextEditingController();
+    String activeCategory = 'innovestx_thb';
     String selectedTf = '1h';
+    String customMarketType = 'crypto';
 
-    final quickThbPairs = [
-      'BTC/THB', 'ETH/THB', 'SOL/THB', 'XRP/THB', 'ADA/THB',
-      'DOGE/THB', 'BNB/THB', 'USDT/THB', 'USDC/THB', 'POL/THB',
-      'LINK/THB', 'NEAR/THB', 'SUI/THB', 'ARB/THB', 'XAUT/THB'
-    ];
+    final selectedItems = <Map<String, dynamic>>{};
+    bool isLoadingCatalog = true;
+    Map<String, List<Map<String, dynamic>>> catalog = {};
 
-    showDialog(
+    showModalBottomSheet(
       context: context,
+      backgroundColor: const Color(0xFF131722),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDlgState) => AlertDialog(
-          backgroundColor: AppColors.surface,
-          title: const Row(
-            children: [
-              Icon(Icons.add_chart, color: AppColors.bullish, size: 20),
-              SizedBox(width: 8),
-              Text('เพิ่มคู่เหรียญ / สินทรัพย์สแกน', style: TextStyle(color: Colors.white, fontSize: 16)),
-            ],
-          ),
-          content: SingleChildScrollView(
+        builder: (context, setModalState) {
+          if (isLoadingCatalog) {
+            AppApi.dio.get(AppApi.url('/api/v1/settings/assets/catalog')).then((resp) {
+              final data = resp.data as Map<String, dynamic>;
+              setModalState(() {
+                catalog = {
+                  'innovestx_thb': List<Map<String, dynamic>>.from(data['innovestx_thb'] ?? []),
+                  'crypto_global': List<Map<String, dynamic>>.from(data['crypto_global'] ?? []),
+                  'forex_metals': List<Map<String, dynamic>>.from(data['forex_metals'] ?? []),
+                  'stocks': List<Map<String, dynamic>>.from(data['stocks'] ?? []),
+                };
+                isLoadingCatalog = false;
+              });
+            }).catchError((_) {
+              setModalState(() {
+                isLoadingCatalog = false;
+              });
+            });
+          }
+
+          final existingNormSymbols = _watchlist.map((e) => (e['symbol'] ?? '').toString().replaceAll('/', '').replaceAll('-', '').toUpperCase()).toSet();
+
+          List<Map<String, dynamic>> currentList = catalog[activeCategory] ?? [];
+          final q = searchCtrl.text.trim().toUpperCase();
+          if (q.isNotEmpty) {
+            currentList = currentList.where((it) {
+              final sym = (it['symbol'] ?? '').toString().toUpperCase();
+              final name = (it['name'] ?? '').toString().toUpperCase();
+              return sym.contains(q) || name.contains(q);
+            }).toList();
+          }
+
+          return Container(
+            height: MediaQuery.of(context).size.height * 0.85,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Column(
-              mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                TextField(
-                  controller: symCtrl,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: const InputDecoration(
-                    labelText: 'สัญลักษณ์ (เช่น BTC/THB, SOL/USDT, XAUUSD)',
-                    hintText: 'BTC/THB',
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
                   ),
                 ),
-                const SizedBox(height: 8),
-                const Text('🔥 คู่เหรียญ InnovestX (THB) ยอดนิยม:', style: TextStyle(fontSize: 11, color: Colors.white54)),
-                const SizedBox(height: 4),
-                Wrap(
-                  spacing: 4,
-                  runSpacing: 4,
-                  children: quickThbPairs.map((p) => ActionChip(
-                    label: Text(p, style: const TextStyle(fontSize: 10, color: Colors.white)),
-                    backgroundColor: const Color(0xFF252540),
-                    onPressed: () => setDlgState(() => symCtrl.text = p),
-                  )).toList(),
-                ),
                 const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
-                  value: selectedType,
-                  dropdownColor: AppColors.surface,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: const InputDecoration(labelText: 'ประเภทตลาด (Market Type)'),
-                  items: const [
-                    DropdownMenuItem(value: 'crypto', child: Text('🟣 InnovestX / Crypto (THB & USDT)')),
-                    DropdownMenuItem(value: 'forex', child: Text('💱 Forex & Gold (MT5)')),
-                    DropdownMenuItem(value: 'stock', child: Text('📈 Stocks (US Equities)')),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.playlist_add, color: AppColors.bullish, size: 22),
+                        SizedBox(width: 8),
+                        Text(
+                          'เลือกสินทรัพย์เข้า Watchlist',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                        ),
+                      ],
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white54),
+                      onPressed: () => Navigator.pop(ctx),
+                    ),
                   ],
-                  onChanged: (v) => setDlgState(() => selectedType = v ?? 'crypto'),
                 ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                value: selectedTf,
-                dropdownColor: AppColors.surface,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(labelText: 'Timeframe สแกน'),
-                items: const [
-                  DropdownMenuItem(value: '15m', child: Text('15 Minutes (15M)')),
-                  DropdownMenuItem(value: '1h', child: Text('1 Hour (1H)')),
-                  DropdownMenuItem(value: '4h', child: Text('4 Hours (4H)')),
-                  DropdownMenuItem(value: '1d', child: Text('1 Day (1D)')),
+                const SizedBox(height: 8),
+
+                // Category Selector Bar
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      _catChip('🟣 InnovestX (THB)', 'innovestx_thb', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      const SizedBox(width: 6),
+                      _catChip('🌐 Crypto (USDT)', 'crypto_global', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      const SizedBox(width: 6),
+                      _catChip('💱 Forex & Gold', 'forex_metals', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      const SizedBox(width: 6),
+                      _catChip('📈 US Stocks', 'stocks', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      const SizedBox(width: 6),
+                      _catChip('✍️ กำหนดเอง (Custom)', 'custom', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+
+                // Timeframe Bar + Search Bar
+                if (activeCategory != 'custom') ...[
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: searchCtrl,
+                          onChanged: (_) => setModalState(() {}),
+                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                          decoration: InputDecoration(
+                            prefixIcon: const Icon(Icons.search, color: Colors.white54, size: 18),
+                            hintText: 'ค้นหาชื่อเหรียญหรือสัญลักษณ์...',
+                            hintStyle: const TextStyle(color: Colors.white30, fontSize: 12),
+                            filled: true,
+                            fillColor: const Color(0xFF1E2533),
+                            contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 10),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: const BorderSide(color: Color(0xFF2E82FE), width: 0.8),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1E2533),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFF2E82FE).withValues(alpha: 0.4)),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            value: selectedTf,
+                            dropdownColor: const Color(0xFF1B2333),
+                            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                            items: const [
+                              DropdownMenuItem(value: '15m', child: Text('TF 15M')),
+                              DropdownMenuItem(value: '1h', child: Text('TF 1H')),
+                              DropdownMenuItem(value: '4h', child: Text('TF 4H')),
+                              DropdownMenuItem(value: '1d', child: Text('TF 1D')),
+                            ],
+                            onChanged: (v) => setModalState(() => selectedTf = v ?? '1h'),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+
+                  // Asset list
+                  Expanded(
+                    child: isLoadingCatalog
+                        ? const Center(child: CircularProgressIndicator(color: AppColors.bullish))
+                        : currentList.isEmpty
+                            ? const Center(child: Text('ไม่พบสินทรัพย์ในหมวดนี้', style: TextStyle(color: Colors.white38, fontSize: 13)))
+                            : ListView.builder(
+                                itemCount: currentList.length,
+                                itemBuilder: (context, idx) {
+                                  final item = currentList[idx];
+                                  final sym = item['symbol']?.toString() ?? '';
+                                  final name = item['name']?.toString() ?? '';
+                                  final ex = item['exchange']?.toString() ?? 'binance';
+                                  final mType = item['market_type']?.toString() ?? 'crypto';
+
+                                  final normSym = sym.replaceAll('/', '').replaceAll('-', '').toUpperCase();
+                                  final isAlreadyInWatchlist = existingNormSymbols.contains(normSym);
+
+                                  final isChecked = selectedItems.any((it) => it['symbol'] == sym);
+
+                                  Color tagBg = const Color(0xFF2E82FE).withValues(alpha: 0.2);
+                                  Color tagFg = const Color(0xFF2E82FE);
+                                  String tagLabel = mType.toUpperCase();
+
+                                  if (activeCategory == 'innovestx_thb' || sym.endsWith('/THB')) {
+                                    tagBg = const Color(0xFF9B59B6).withValues(alpha: 0.25);
+                                    tagFg = const Color(0xFFC39BD3);
+                                    tagLabel = 'THB';
+                                  } else if (activeCategory == 'crypto_global') {
+                                    tagBg = const Color(0xFF2E82FE).withValues(alpha: 0.25);
+                                    tagFg = const Color(0xFF5DADE2);
+                                    tagLabel = 'USDT';
+                                  } else if (activeCategory == 'forex_metals') {
+                                    tagBg = const Color(0xFFF39C12).withValues(alpha: 0.25);
+                                    tagFg = const Color(0xFFF8C471);
+                                    tagLabel = 'MT5';
+                                  } else if (activeCategory == 'stocks') {
+                                    tagBg = const Color(0xFF00C087).withValues(alpha: 0.25);
+                                    tagFg = const Color(0xFF00C087);
+                                    tagLabel = 'ALPACA';
+                                  }
+
+                                  return Container(
+                                    margin: const EdgeInsets.only(bottom: 6),
+                                    decoration: BoxDecoration(
+                                      color: isAlreadyInWatchlist
+                                          ? const Color(0xFF141923)
+                                          : (isChecked ? const Color(0xFF2E82FE).withValues(alpha: 0.15) : const Color(0xFF1B2333)),
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                        color: isChecked
+                                            ? const Color(0xFF2E82FE)
+                                            : (isAlreadyInWatchlist ? Colors.white10 : const Color(0xFF232A38)),
+                                        width: isChecked ? 1.2 : 0.8,
+                                      ),
+                                    ),
+                                    child: ListTile(
+                                      dense: true,
+                                      enabled: !isAlreadyInWatchlist,
+                                      onTap: isAlreadyInWatchlist
+                                          ? null
+                                          : () {
+                                              setModalState(() {
+                                                if (isChecked) {
+                                                  selectedItems.removeWhere((it) => it['symbol'] == sym);
+                                                } else {
+                                                  selectedItems.add({
+                                                    'symbol': sym,
+                                                    'market_type': mType,
+                                                    'timeframe': selectedTf,
+                                                    'htf_timeframe': selectedTf == '1d' ? '1w' : '4h',
+                                                    'exchange': ex,
+                                                  });
+                                                }
+                                              });
+                                            },
+                                      leading: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                                        decoration: BoxDecoration(color: tagBg, borderRadius: BorderRadius.circular(4)),
+                                        child: Text(tagLabel, style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: tagFg)),
+                                      ),
+                                      title: Text(
+                                        sym,
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 14,
+                                          color: isAlreadyInWatchlist ? Colors.white38 : (isChecked ? AppColors.bullish : Colors.white),
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        name,
+                                        style: TextStyle(fontSize: 11, color: isAlreadyInWatchlist ? Colors.white24 : Colors.white54),
+                                      ),
+                                      trailing: isAlreadyInWatchlist
+                                          ? Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                              decoration: BoxDecoration(
+                                                color: Colors.white.withValues(alpha: 0.05),
+                                                borderRadius: BorderRadius.circular(4),
+                                              ),
+                                              child: const Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  Icon(Icons.check, size: 14, color: AppColors.bullish),
+                                                  SizedBox(width: 4),
+                                                  Text('อยู่ใน Watchlist แล้ว', style: TextStyle(fontSize: 10, color: Colors.white54)),
+                                                ],
+                                              ),
+                                            )
+                                          : Checkbox(
+                                              value: isChecked,
+                                              activeColor: AppColors.bullish,
+                                              checkColor: Colors.black,
+                                              onChanged: (val) {
+                                                setModalState(() {
+                                                  if (val == true) {
+                                                    selectedItems.add({
+                                                      'symbol': sym,
+                                                      'market_type': mType,
+                                                      'timeframe': selectedTf,
+                                                      'htf_timeframe': selectedTf == '1d' ? '1w' : '4h',
+                                                      'exchange': ex,
+                                                    });
+                                                  } else {
+                                                    selectedItems.removeWhere((it) => it['symbol'] == sym);
+                                                  }
+                                                });
+                                              },
+                                            ),
+                                    ),
+                                  );
+                                },
+                              ),
+                  ),
+
+                  // Bottom Action Button
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: selectedItems.isEmpty
+                          ? null
+                          : () {
+                              final listToSubmit = selectedItems.map((it) => {
+                                ...it,
+                                'timeframe': selectedTf,
+                                'htf_timeframe': selectedTf == '1d' ? '1w' : '4h',
+                              }).toList();
+                              Navigator.pop(ctx);
+                              _addBatchWatchlistItems(listToSubmit);
+                            },
+                      icon: const Icon(Icons.add_task, size: 18),
+                      label: Text(
+                        selectedItems.isEmpty
+                            ? 'แตะเลือกเหรียญที่ต้องการเพิ่ม'
+                            : '➕ เพิ่มสินทรัพย์ที่เลือก (${selectedItems.length} รายการ - TF $selectedTf)',
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.bullish,
+                        foregroundColor: Colors.black,
+                        disabledBackgroundColor: Colors.white10,
+                        disabledForegroundColor: Colors.white30,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                    ),
+                  ),
+                ] else ...[
+                  // Custom input tab
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: customSymCtrl,
+                            textCapitalization: TextCapitalization.characters,
+                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                            decoration: const InputDecoration(
+                              labelText: 'สัญลักษณ์คู่สินทรัพย์ (Symbol / Ticker)',
+                              hintText: 'เช่น KUB/THB, SOL/USDT, GBPJPY, AMD',
+                              prefixIcon: Icon(Icons.edit, color: Colors.white54, size: 18),
+                            ),
+                          ),
+                          const SizedBox(height: 14),
+                          DropdownButtonFormField<String>(
+                            value: customMarketType,
+                            dropdownColor: const Color(0xFF1B2333),
+                            style: const TextStyle(color: Colors.white),
+                            decoration: const InputDecoration(labelText: 'ประเภทตลาด (Market Type)'),
+                            items: const [
+                              DropdownMenuItem(value: 'crypto', child: Text('🟣 InnovestX / Crypto (THB & USDT)')),
+                              DropdownMenuItem(value: 'forex', child: Text('💱 Forex & Gold (MT5)')),
+                              DropdownMenuItem(value: 'stock', child: Text('📈 Stocks (US Equities)')),
+                            ],
+                            onChanged: (v) => setModalState(() => customMarketType = v ?? 'crypto'),
+                          ),
+                          const SizedBox(height: 14),
+                          DropdownButtonFormField<String>(
+                            value: selectedTf,
+                            dropdownColor: const Color(0xFF1B2333),
+                            style: const TextStyle(color: Colors.white),
+                            decoration: const InputDecoration(labelText: 'Timeframe สแกน'),
+                            items: const [
+                              DropdownMenuItem(value: '15m', child: Text('15 Minutes (15M)')),
+                              DropdownMenuItem(value: '1h', child: Text('1 Hour (1H)')),
+                              DropdownMenuItem(value: '4h', child: Text('4 Hours (4H)')),
+                              DropdownMenuItem(value: '1d', child: Text('1 Day (1D)')),
+                            ],
+                            onChanged: (v) => setModalState(() => selectedTf = v ?? '1h'),
+                          ),
+                          const SizedBox(height: 24),
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton.icon(
+                              onPressed: () {
+                                final s = customSymCtrl.text.trim().toUpperCase();
+                                if (s.isNotEmpty) {
+                                  Navigator.pop(ctx);
+                                  _addWatchlistItem(s, customMarketType, selectedTf);
+                                }
+                              },
+                              icon: const Icon(Icons.check_circle, size: 18),
+                              label: const Text('บันทึกคู่เหรียญนี้เข้า Watchlist', style: TextStyle(fontWeight: FontWeight.bold)),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: AppColors.bullish,
+                                foregroundColor: Colors.black,
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 ],
-                onChanged: (v) => setDlgState(() => selectedTf = v ?? '1h'),
-              ),
-            ],
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _catChip(String label, String cat, String activeCat, Function(String) onSelect) {
+    final isSel = activeCat == cat;
+    return GestureDetector(
+      onTap: () => onSelect(cat),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSel ? const Color(0xFF2E82FE).withValues(alpha: 0.25) : const Color(0xFF1E2533),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: isSel ? const Color(0xFF2E82FE) : const Color(0xFF232A38),
+            width: isSel ? 1.2 : 0.8,
           ),
         ),
-        actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('ยกเลิก', style: TextStyle(color: Colors.white54)),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                final s = symCtrl.text.trim();
-                if (s.isNotEmpty) {
-                  _addWatchlistItem(s, selectedType, selectedTf);
-                  Navigator.pop(ctx);
-                }
-              },
-              style: ElevatedButton.styleFrom(backgroundColor: AppColors.bullish),
-              child: const Text('บันทึกคู่เหรียญ', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-            ),
-          ],
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: isSel ? FontWeight.bold : FontWeight.normal,
+            color: isSel ? Colors.white : AppColors.textMuted,
+          ),
         ),
       ),
     );
@@ -1002,6 +1277,154 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     );
   }
 
+  Future<void> _clearBrokerCredentials(String broker) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded, color: AppColors.bearish, size: 22),
+            const SizedBox(width: 8),
+            Text('ล้างการเชื่อมต่อ $broker?', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Text(
+          'คุณต้องการลบ API Key และ Secret ของ $broker ออกจากระบบหรือไม่?\n\nสถานะการเชื่อมต่อในหน้า Journal จะถูกตัดการเชื่อมต่อทันที',
+          style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('ยกเลิก', style: TextStyle(color: Colors.white60)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.bearish, foregroundColor: Colors.white),
+            child: const Text('ล้างข้อมูล / ตัดการเชื่อมต่อ'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      final dio = AppApi.dio;
+      await dio.delete(AppApi.url('/api/v1/settings/brokers/config/$broker'));
+      if (broker == 'innovestx') {
+        _innovestxKeyCtrl.clear();
+        _innovestxSecretCtrl.clear();
+      } else if (broker == 'binance') {
+        _binanceKeyCtrl.clear();
+        _binanceSecretCtrl.clear();
+      } else if (broker == 'mt5') {
+        _mt5LoginCtrl.clear();
+        _mt5PasswordCtrl.clear();
+        _mt5ServerCtrl.clear();
+      } else if (broker == 'alpaca') {
+        _alpacaKeyCtrl.clear();
+        _alpacaSecretCtrl.clear();
+      }
+      await _loadAllSettings();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.bullish,
+            content: Text('✅ ล้างข้อมูลการเชื่อมต่อ $broker เรียบร้อยแล้ว (ตัดการเชื่อมต่อ)', style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(backgroundColor: AppColors.bearish, content: Text('❌ เกิดข้อผิดพลาด: $e')),
+        );
+      }
+    }
+  }
+
+  Widget _buildBrokerStatusBanner({
+    required String brokerTitle,
+    required String brokerKey,
+    required bool isConfigured,
+    String? maskedKey,
+    required Color color,
+  }) {
+    if (isConfigured) {
+      return Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withValues(alpha: 0.4), width: 1),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.verified, color: color, size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('สถานะ: บันทึกข้อมูล $brokerTitle ในระบบแล้ว', style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 11)),
+                  if (maskedKey != null && maskedKey.isNotEmpty)
+                    Text(
+                      'ID: $maskedKey',
+                      style: const TextStyle(color: Colors.white70, fontSize: 10, fontFamily: 'monospace'),
+                    ),
+                ],
+              ),
+            ),
+            InkWell(
+              onTap: () => _clearBrokerCredentials(brokerKey),
+              borderRadius: BorderRadius.circular(4),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: AppColors.bearish.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: AppColors.bearish.withValues(alpha: 0.4), width: 0.8),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.delete_outline, size: 12, color: AppColors.bearish),
+                    SizedBox(width: 2),
+                    Text('ล้าง Key', style: TextStyle(color: AppColors.bearish, fontSize: 10, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    } else {
+      return Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1E2230),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFF2E384D)),
+        ),
+        child: const Row(
+          children: [
+            Icon(Icons.link_off, color: Colors.white38, size: 14),
+            SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                '⚪ ยังไม่ได้เชื่อมต่อ API (กรอกข้อมูลด้านล่างเพื่อเชื่อมต่อ)',
+                style: TextStyle(color: Colors.white54, fontSize: 10),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
@@ -1228,7 +1651,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               subtitle: const Text('สั่งปิดออเดอร์ตัดขาดทุน/ทำกำไรอัตโนมัติเมื่อราคาแตะเส้น SL หรือ TP', style: TextStyle(fontSize: 11, color: Colors.white54)),
               value: settings.autoSlTp,
               activeColor: AppColors.bullish,
-              onChanged: (v) => ref.read(settingsProvider.notifier).save(settings.copyWith(autoSlTp: v)),
+              onChanged: (v) async {
+                ref.read(settingsProvider.notifier).save(settings.copyWith(autoSlTp: v));
+                try {
+                  await AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'), data: {'auto_sl_tp': v});
+                } catch (_) {}
+              },
             ),
             const Divider(color: Colors.white12, height: 16),
             SwitchListTile(
@@ -1237,7 +1665,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               subtitle: const Text('ตัดขาดทุนทันทีเมื่อโครงสร้างตลาดกลับตัวฝั่งตรงข้าม (เช่น เกิด CHoCH สวนทาง)', style: TextStyle(fontSize: 11, color: Colors.white54)),
               value: settings.autoInvalidation,
               activeColor: AppColors.bullish,
-              onChanged: (v) => ref.read(settingsProvider.notifier).save(settings.copyWith(autoInvalidation: v)),
+              onChanged: (v) async {
+                ref.read(settingsProvider.notifier).save(settings.copyWith(autoInvalidation: v));
+                try {
+                  await AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'), data: {'auto_invalidation': v});
+                } catch (_) {}
+              },
             ),
             const Divider(color: Colors.white12, height: 16),
             _riskSlider(
@@ -1377,7 +1810,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             ),
             const SizedBox(height: 16),
             SizedBox(
-              height: 310,
+              height: 380,
               child: TabBarView(
                 controller: _brokerTabController,
                 children: [
@@ -1393,7 +1826,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                             Text('InnovestX (SCBX) Digital Asset Exchange (THB)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white)),
                           ],
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 8),
+                        _buildBrokerStatusBanner(
+                          brokerTitle: 'InnovestX',
+                          brokerKey: 'innovestx',
+                          isConfigured: _brokerConfig['innovestx_configured'] == true || _innovestxKeyCtrl.text.isNotEmpty,
+                          maskedKey: _brokerConfig['innovestx_api_key']?.toString(),
+                          color: const Color(0xFF9B59B6),
+                        ),
                         _textField(
                           'InnovestX API Key (64 chars)',
                           _innovestxKeyCtrl,
@@ -1446,7 +1886,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                             Text('MetaTrader 5 Direct Bridge (Forex & Gold)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white)),
                           ],
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 8),
+                        _buildBrokerStatusBanner(
+                          brokerTitle: 'MetaTrader 5',
+                          brokerKey: 'mt5',
+                          isConfigured: _brokerConfig['mt5_configured'] == true || _mt5LoginCtrl.text.isNotEmpty,
+                          maskedKey: _brokerConfig['mt5_login'] != null && _brokerConfig['mt5_login'] != 0 ? 'MT5 #${_brokerConfig['mt5_login']} (${_brokerConfig['mt5_server'] ?? ""})' : null,
+                          color: const Color(0xFF00E5FF),
+                        ),
                         _textField(
                           'MT5 Login / Account ID',
                           _mt5LoginCtrl,
@@ -1494,7 +1941,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                             Text('Binance / Bybit API Connection (Crypto)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white)),
                           ],
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 8),
+                        _buildBrokerStatusBanner(
+                          brokerTitle: 'Binance / Bybit',
+                          brokerKey: 'binance',
+                          isConfigured: _brokerConfig['binance_configured'] == true || _binanceKeyCtrl.text.isNotEmpty,
+                          maskedKey: _brokerConfig['binance_api_key']?.toString(),
+                          color: const Color(0xFFF0B90B),
+                        ),
                         _textField(
                           'Binance / Bybit API Key',
                           _binanceKeyCtrl,
@@ -1536,7 +1990,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                             Text('Alpaca Markets (US Equities & Stocks)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white)),
                           ],
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 8),
+                        _buildBrokerStatusBanner(
+                          brokerTitle: 'Alpaca Markets',
+                          brokerKey: 'alpaca',
+                          isConfigured: _brokerConfig['alpaca_configured'] == true || _alpacaKeyCtrl.text.isNotEmpty,
+                          maskedKey: _brokerConfig['alpaca_api_key']?.toString(),
+                          color: const Color(0xFFFFD700),
+                        ),
                         _textField(
                           'Alpaca API Key ID',
                           _alpacaKeyCtrl,
@@ -1726,53 +2187,29 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             Row(
               children: [
                 Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _syncInnovestxWatchlist,
-                    icon: const Icon(Icons.sync, size: 15, color: Colors.white),
-                    label: const Text('🟣 ซิงค์ 39 เหรียญ InnovestX', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF9B59B6),
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _clearInnovestxWatchlist,
-                    icon: const Icon(Icons.delete_sweep, size: 15, color: AppColors.bearish),
-                    label: const Text('🗑️ ล้างเหรียญ THB', style: TextStyle(color: AppColors.bearish, fontWeight: FontWeight.bold, fontSize: 11)),
-                    style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: AppColors.bearish),
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
+                  flex: 3,
                   child: ElevatedButton.icon(
                     onPressed: _showAddAssetDialog,
-                    icon: const Icon(Icons.add, size: 15, color: Colors.black),
-                    label: const Text('➕ เพิ่มสินทรัพย์', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 11)),
+                    icon: const Icon(Icons.add_circle, size: 16, color: Colors.black),
+                    label: const Text('➕ เพิ่มสินทรัพย์เข้า Watchlist', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 12)),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.bullish,
-                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                     ),
                   ),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
+                  flex: 2,
                   child: OutlinedButton.icon(
                     onPressed: _resetDefaultWatchlist,
                     icon: const Icon(Icons.refresh, size: 15, color: Colors.white70),
-                    label: const Text('🔄 รีเซ็ตค่าเริ่มต้น', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 11)),
+                    label: const Text('🔄 ค่าเริ่มต้น', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 11)),
                     style: OutlinedButton.styleFrom(
                       side: const BorderSide(color: AppColors.border),
-                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                     ),
                   ),
                 ),

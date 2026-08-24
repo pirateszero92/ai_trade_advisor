@@ -1,18 +1,20 @@
 import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
+import '../settings/settings_screen.dart';
 
-class SignalsScreen extends StatefulWidget {
+class SignalsScreen extends ConsumerStatefulWidget {
   const SignalsScreen({super.key});
 
   @override
-  State<SignalsScreen> createState() => _SignalsScreenState();
+  ConsumerState<SignalsScreen> createState() => _SignalsScreenState();
 }
 
-class _SignalsScreenState extends State<SignalsScreen> {
+class _SignalsScreenState extends ConsumerState<SignalsScreen> {
   List<Map<String, dynamic>> _signals = [];
   List<Map<String, dynamic>> _positions = [];
   bool _isLoading = true;
@@ -21,10 +23,13 @@ class _SignalsScreenState extends State<SignalsScreen> {
   String _selectedFilter = 'all';
   Timer? _liveTimer;
   int _tagCounter = 101;
+  String _activeMode = 'paper'; // 'live' or 'paper'
 
   @override
   void initState() {
     super.initState();
+    final isPaper = ref.read(settingsProvider).isPaperMode;
+    _activeMode = isPaper ? 'paper' : 'live';
     _fetchSignals();
     _fetchPositions();
     _startLiveTicker();
@@ -39,12 +44,21 @@ class _SignalsScreenState extends State<SignalsScreen> {
   static String _normalizeSym(String s) =>
       s.replaceAll('/', '').replaceAll('-', '').replaceAll('_', '').toUpperCase();
 
-  static String _formatPrice(double? price) {
+  static String _formatPrice(double? price, [String? sym]) {
     if (price == null) return '-';
-    if (price < 5.0) {
-      return '\$${price.toStringAsFixed(4)}';
+    final isThb = (sym ?? '').toUpperCase().contains('THB');
+    final pfx = isThb ? '฿' : '\$';
+    if (price < 5.0 && !isThb) {
+      return '$pfx${price.toStringAsFixed(4)}';
     }
-    return '\$${price.toStringAsFixed(2)}';
+    if (price.abs() >= 1000) {
+      final formatted = price.toStringAsFixed(2).replaceAllMapped(
+            RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'),
+            (Match m) => '${m[1]},',
+          );
+      return '$pfx$formatted';
+    }
+    return '$pfx${price.toStringAsFixed(2)}';
   }
 
   bool _isPriceFetching = false;
@@ -64,7 +78,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
     _isPriceFetching = true;
     try {
       final dio = AppApi.dio;
-      final resp = await dio.get(AppApi.url('/api/v1/signals/live-prices'));
+      final resp = await dio.get(AppApi.url('/api/v1/signals/live-prices'), queryParameters: {'mode': _activeMode});
       final prices = resp.data['prices'] as Map<String, dynamic>? ?? {};
       if (prices.isEmpty || !mounted) return;
 
@@ -112,13 +126,14 @@ class _SignalsScreenState extends State<SignalsScreen> {
 
   Set<String> _activeWatchlistNorm = {};
 
-  Future<void> _fetchSignals() async {
+  Future<void> _fetchSignals({String? mode}) async {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
     });
     try {
       final dio = AppApi.dio;
+      final effMode = mode ?? _activeMode;
 
       // 1. Sync active Watchlist in parallel
       try {
@@ -130,10 +145,12 @@ class _SignalsScreenState extends State<SignalsScreen> {
             .toSet();
       } catch (_) {}
 
-      // 2. Fetch signals
-      final resp = await dio.get(AppApi.url('/api/v1/signals/'));
+      // 2. Fetch signals filtered by mode
+      final resp = await dio.get(AppApi.url('/api/v1/signals/'), queryParameters: {'mode': effMode});
       final List<dynamic> list = resp.data['signals'] ?? [];
+      if (!mounted) return;
       setState(() {
+        if (mode != null) _activeMode = mode;
         final rawList = list.map((e) {
           final m = Map<String, dynamic>.from(e as Map);
           final rawSym = m['symbol']?.toString() ?? '';
@@ -162,10 +179,11 @@ class _SignalsScreenState extends State<SignalsScreen> {
     }
   }
 
-  Future<void> _fetchPositions() async {
+  Future<void> _fetchPositions({String? mode}) async {
     try {
       final dio = AppApi.dio;
-      final resp = await dio.get(AppApi.url('/api/v1/trades/'));
+      final effMode = mode ?? _activeMode;
+      final resp = await dio.get(AppApi.url('/api/v1/trades/'), queryParameters: {'mode': effMode, 'status': 'open'});
       final List<dynamic> list = resp.data['trades'] ?? [];
       if (mounted) {
         setState(() {
@@ -205,6 +223,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
 
       final resp = await dio.post(
         AppApi.url('/api/v1/signals/scan'),
+        queryParameters: {'mode': _activeMode},
         options: Options(receiveTimeout: const Duration(seconds: 40)),
       );
       final List<dynamic> list = resp.data['signals'] ?? [];
@@ -284,6 +303,11 @@ class _SignalsScreenState extends State<SignalsScreen> {
           final riskPct = entry > 0 ? (slDistance / entry) * 100 : 1.0;
           final gainPct = riskPct * selectedRR;
 
+          final isThb = _activeMode == 'live' || sym.toUpperCase().contains('THB');
+          final currSym = isThb ? '฿' : '\$';
+          final modeBadgeText = _activeMode == 'live' ? '🟣 LIVE (INNOVESTX)' : '🧪 PAPER';
+          final modeBadgeColor = _activeMode == 'live' ? const Color(0xFF9B59B6) : const Color(0xFF00E5FF);
+
           return AlertDialog(
             backgroundColor: AppColors.surface,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -305,9 +329,27 @@ class _SignalsScreenState extends State<SignalsScreen> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(
-                    'ยืนยันส่งคำสั่ง $sym (${dir.toUpperCase()})',
-                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'ยืนยันส่งคำสั่ง $sym (${dir.toUpperCase()})',
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 2),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                        decoration: BoxDecoration(
+                          color: modeBadgeColor.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: modeBadgeColor, width: 0.8),
+                        ),
+                        child: Text(
+                          modeBadgeText,
+                          style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: modeBadgeColor),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -332,9 +374,9 @@ class _SignalsScreenState extends State<SignalsScreen> {
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        _dialogItem('Entry (สด)', _formatPrice(entry), Colors.white),
-                        _dialogItem('Stop Loss (-${riskPct.toStringAsFixed(1)}%)', _formatPrice(sl), AppColors.bearish),
-                        _dialogItem('Take Profit (+${gainPct.toStringAsFixed(1)}%)', _formatPrice(tp), AppColors.bullish),
+                        _dialogItem('Entry (สด)', _formatPrice(entry, sym), Colors.white),
+                        _dialogItem('Stop Loss (-${riskPct.toStringAsFixed(1)}%)', _formatPrice(sl, sym), AppColors.bearish),
+                        _dialogItem('Take Profit (+${gainPct.toStringAsFixed(1)}%)', _formatPrice(tp, sym), AppColors.bullish),
                       ],
                     ),
                   ),
@@ -507,15 +549,15 @@ class _SignalsScreenState extends State<SignalsScreen> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          'Value: \$${posVal.toStringAsFixed(posVal > 1000 ? 1 : 2)}',
+                          'Value: $currSym${posVal.toStringAsFixed(posVal > 1000 ? 1 : 2)}',
                           style: const TextStyle(fontSize: 11, color: Colors.white70, fontFamily: 'monospace'),
                         ),
                         Text(
-                          'Risk: -\$${riskAmount.toStringAsFixed(2)}',
+                          'Risk: -$currSym${riskAmount.toStringAsFixed(2)}',
                           style: const TextStyle(fontSize: 11, color: AppColors.bearish, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
                         ),
                         Text(
-                          'TP: +\$${gainAmount.toStringAsFixed(2)}',
+                          'TP: +$currSym${gainAmount.toStringAsFixed(2)}',
                           style: const TextStyle(fontSize: 11, color: AppColors.bullish, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
                         ),
                       ],
@@ -567,6 +609,8 @@ class _SignalsScreenState extends State<SignalsScreen> {
             'position_size': selectedQty,
             'size': selectedQty,
             'tag': tag,
+            'mode': _activeMode,
+            'exchange': _activeMode == 'live' ? 'innovestx' : 'binance',
           },
         );
 
@@ -583,9 +627,20 @@ class _SignalsScreenState extends State<SignalsScreen> {
         }
         _fetchPositions();
       } catch (e) {
+        String errDetail = e.toString();
+        if (e is DioException && e.response?.data != null) {
+          final data = e.response!.data;
+          if (data is Map && data['detail'] != null) {
+            errDetail = data['detail'].toString();
+          }
+        }
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(backgroundColor: AppColors.bearish, content: Text('Execution failed: $e')),
+            SnackBar(
+              backgroundColor: AppColors.bearish,
+              content: Text('❌ ส่งคำสั่งล้มเหลว: $errDetail', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              duration: const Duration(seconds: 5),
+            ),
           );
         }
       }
@@ -627,6 +682,147 @@ class _SignalsScreenState extends State<SignalsScreen> {
     );
   }
 
+  void _showLiveDisabledDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: const Row(
+          children: [
+            Icon(Icons.lock_outline, color: Color(0xFF9B59B6), size: 20),
+            SizedBox(width: 8),
+            Text('โหมด Live Trading ปิดอยู่', style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: const Text(
+          'ขณะนี้ระบบทำงานในโหมดพอร์ตจำลอง (Paper Trading)\n\nหากต้องการเปิดใช้งานการสแกนและส่งคำสั่งในบัญชีจริง กรุณาไปที่เมนู Settings และเปิดสวิตช์ "Live Trading"',
+          style: TextStyle(color: Colors.white70, fontSize: 13, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('ปิด', style: TextStyle(color: Colors.white60)),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.pop(ctx);
+              context.go('/settings');
+            },
+            icon: const Icon(Icons.settings, size: 16),
+            label: const Text('ไปยังหน้า Settings'),
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF9B59B6), foregroundColor: Colors.white),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildModeSelector() {
+    final settings = ref.watch(settingsProvider);
+    final isLiveAllowed = !settings.isPaperMode;
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 6, 12, 4),
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xFF141926),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFF2E384D), width: 1),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: InkWell(
+              onTap: () {
+                if (!isLiveAllowed) {
+                  _showLiveDisabledDialog();
+                  return;
+                }
+                if (_activeMode != 'live') {
+                  setState(() {
+                    _activeMode = 'live';
+                    _isLoading = true;
+                  });
+                  _fetchSignals(mode: 'live');
+                  _fetchPositions(mode: 'live');
+                }
+              },
+              borderRadius: BorderRadius.circular(8),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(
+                  color: _activeMode == 'live' ? const Color(0xFF9B59B6).withValues(alpha: 0.25) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8),
+                  border: _activeMode == 'live' ? Border.all(color: const Color(0xFF9B59B6), width: 1.2) : null,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      isLiveAllowed ? Icons.verified : Icons.lock_outline,
+                      size: 14,
+                      color: _activeMode == 'live' ? const Color(0xFFD4AC0D) : (isLiveAllowed ? Colors.white38 : Colors.white24),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      isLiveAllowed ? '🟣 บัญชีจริง Live' : '🟣 บัญชีจริง (ปิดใน Settings)',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: _activeMode == 'live' ? Colors.white : (isLiveAllowed ? Colors.white60 : Colors.white38),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          Expanded(
+            child: InkWell(
+              onTap: () {
+                if (_activeMode != 'paper') {
+                  setState(() {
+                    _activeMode = 'paper';
+                    _isLoading = true;
+                  });
+                  _fetchSignals(mode: 'paper');
+                  _fetchPositions(mode: 'paper');
+                }
+              },
+              borderRadius: BorderRadius.circular(8),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(
+                  color: _activeMode == 'paper' ? const Color(0xFF00E5FF).withValues(alpha: 0.18) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8),
+                  border: _activeMode == 'paper' ? Border.all(color: const Color(0xFF00E5FF), width: 1.2) : null,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.science, size: 14, color: _activeMode == 'paper' ? const Color(0xFF00E5FF) : Colors.white38),
+                    const SizedBox(width: 6),
+                    Text(
+                      '🧪 พอร์ตจำลอง Paper (\$)',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: _activeMode == 'paper' ? Colors.white : Colors.white60,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   List<Map<String, dynamic>> get _filteredSignals {
     var list = _signals
         .where((s) => _activeWatchlistNorm.contains(_normalizeSym(s['symbol'] ?? '')))
@@ -653,9 +849,9 @@ class _SignalsScreenState extends State<SignalsScreen> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
-                color: AppColors.bullish.withOpacity(0.15),
+                color: AppColors.bullish.withValues(alpha: 0.15),
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: AppColors.bullish.withOpacity(0.4)),
+                border: Border.all(color: AppColors.bullish.withValues(alpha: 0.4)),
               ),
               child: Text(
                 '${filtered.length} รายการ',
@@ -678,7 +874,10 @@ class _SignalsScreenState extends State<SignalsScreen> {
       ),
       body: Column(
         children: [
-          // Filter Bar + Scan Trigger Button (Horizontally scrollable with fixed Scan button)
+          // Profile Mode Switcher
+          _buildModeSelector(),
+
+          // Filter Bar + Scan Trigger Button
           Container(
             color: AppColors.surface,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -729,7 +928,7 @@ class _SignalsScreenState extends State<SignalsScreen> {
               ],
             ),
           ),
-          const Divider(),
+          const Divider(height: 1),
           Expanded(
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator(color: AppColors.bullish))
@@ -939,10 +1138,19 @@ class _SignalCard extends StatelessWidget {
 
   String _formatPrice(double? price) {
     if (price == null) return '-';
-    if (price < 5.0) {
-      return '\$${price.toStringAsFixed(4)}';
+    final isThb = symbol.toUpperCase().contains('THB');
+    final pfx = isThb ? '฿' : '\$';
+    if (price < 5.0 && !isThb) {
+      return '$pfx${price.toStringAsFixed(4)}';
     }
-    return '\$${price.toStringAsFixed(2)}';
+    if (price.abs() >= 1000) {
+      final formatted = price.toStringAsFixed(2).replaceAllMapped(
+            RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'),
+            (Match m) => '${m[1]},',
+          );
+      return '$pfx$formatted';
+    }
+    return '$pfx${price.toStringAsFixed(2)}';
   }
 
   @override
@@ -1209,13 +1417,16 @@ class _SignalCard extends StatelessWidget {
                 final isWin = pnl >= 0;
                 final pCol = isWin ? AppColors.bullish : AppColors.bearish;
 
+                final posIsThb = symbol.toUpperCase().contains('THB') || (pos['currency'] == 'THB');
+                final posPfx = posIsThb ? '฿' : '\$';
+
                 return Container(
                   margin: const EdgeInsets.only(bottom: 4),
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                   decoration: BoxDecoration(
                     color: const Color(0xFF1B2333),
                     borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4)),
+                    border: Border.all(color: const Color(0xFF00E5FF).withValues(alpha: 0.4)),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1236,7 +1447,7 @@ class _SignalCard extends StatelessWidget {
                           FittedBox(
                             fit: BoxFit.scaleDown,
                             child: Text(
-                              '${isWin ? '+' : ''}\$${pnl.toStringAsFixed(2)} (${isWin ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)',
+                              '${isWin ? '+' : ''}$posPfx${pnl.toStringAsFixed(2)} (${isWin ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)',
                               style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: pCol, fontFamily: 'monospace'),
                             ),
                           ),
@@ -1246,7 +1457,7 @@ class _SignalCard extends StatelessWidget {
                             child: Container(
                               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                               decoration: BoxDecoration(
-                                color: AppColors.bearish.withOpacity(0.2),
+                                color: AppColors.bearish.withValues(alpha: 0.2),
                                 borderRadius: BorderRadius.circular(4),
                                 border: Border.all(color: AppColors.bearish, width: 0.8),
                               ),

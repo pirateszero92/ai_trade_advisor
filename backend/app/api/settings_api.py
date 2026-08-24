@@ -420,6 +420,10 @@ class WatchlistAddRequest(BaseModel):
     exchange: str = "binance"
 
 
+class WatchlistBatchAddRequest(BaseModel):
+    items: list[WatchlistAddRequest]
+
+
 def _save_runtime_watchlist(watchlist: list[dict]):
     try:
         import json
@@ -507,6 +511,119 @@ async def add_to_watchlist(item: WatchlistAddRequest, _key: str = Depends(verify
     monitor.watchlist.append(new_item)
     _save_runtime_watchlist(monitor.watchlist)
     return {"status": "added", "item": new_item, "total_count": len(monitor.watchlist)}
+
+
+@router.post("/watchlist/batch")
+async def add_batch_to_watchlist(req: WatchlistBatchAddRequest, _key: str = Depends(verify_api_key)):
+    from app.services.event_trigger import MarketMonitor
+    monitor = MarketMonitor.get_instance()
+    existing_symbols = {_normalize_symbol(w.get("symbol", "")) for w in monitor.watchlist if "symbol" in w}
+    added = []
+    
+    for item in req.items:
+        norm = _normalize_symbol(item.symbol)
+        if norm and norm not in existing_symbols:
+            new_item = {
+                "symbol": item.symbol,
+                "timeframe": item.timeframe,
+                "htf_timeframe": item.htf_timeframe,
+                "market_type": item.market_type,
+                "exchange": item.exchange,
+            }
+            monitor.watchlist.append(new_item)
+            existing_symbols.add(norm)
+            added.append(new_item)
+            
+    if added:
+        _save_runtime_watchlist(monitor.watchlist)
+        
+    return {
+        "status": "ok",
+        "added_count": len(added),
+        "total_count": len(monitor.watchlist),
+        "added": added,
+    }
+
+
+@router.get("/assets/catalog")
+async def get_assets_catalog(_key: str = Depends(verify_api_key)):
+    """Return available asset catalog across all supported markets."""
+    from app.engines.innovestx_client import InnovestXClient
+    cfg = get_settings()
+    
+    innovestx_symbols = []
+    try:
+        if cfg.innovestx_api_key and cfg.innovestx_api_secret:
+            client = InnovestXClient(api_key=cfg.innovestx_api_key, api_secret=cfg.innovestx_api_secret)
+            pairs = await client.get_formatted_symbols()
+            if pairs:
+                innovestx_symbols = [p["symbol"] for p in pairs]
+    except Exception:
+        pass
+        
+    if not innovestx_symbols:
+        innovestx_symbols = [
+            "BTC/THB", "ETH/THB", "SOL/THB", "XRP/THB", "ADA/THB", "DOGE/THB",
+            "BNB/THB", "AVAX/THB", "DOT/THB", "POL/THB", "LINK/THB", "NEAR/THB",
+            "SUI/THB", "SEI/THB", "ARB/THB", "OP/THB", "USDT/THB", "USDC/THB",
+            "AAVE/THB", "UNI/THB", "SAND/THB", "GALA/THB", "PEPE/THB", "SHIB/THB",
+            "XLM/THB", "DYDX/THB", "CRV/THB", "PENDLE/THB", "LDO/THB", "WLD/THB",
+            "TIA/THB", "XAUT/THB", "ASTER/THB", "BLU/THB", "REALX/THB", "SUMX/THB",
+            "CHZ/THB", "SNX/THB", "AXS/THB", "BCH/THB"
+        ]
+
+    crypto_global = [
+        {"symbol": "BTC/USDT", "name": "Bitcoin", "exchange": "binance"},
+        {"symbol": "ETH/USDT", "name": "Ethereum", "exchange": "binance"},
+        {"symbol": "SOL/USDT", "name": "Solana", "exchange": "binance"},
+        {"symbol": "BNB/USDT", "name": "BNB", "exchange": "binance"},
+        {"symbol": "XRP/USDT", "name": "Ripple", "exchange": "binance"},
+        {"symbol": "ADA/USDT", "name": "Cardano", "exchange": "binance"},
+        {"symbol": "DOGE/USDT", "name": "Dogecoin", "exchange": "binance"},
+        {"symbol": "AVAX/USDT", "name": "Avalanche", "exchange": "binance"},
+        {"symbol": "LINK/USDT", "name": "Chainlink", "exchange": "binance"},
+        {"symbol": "SUI/USDT", "name": "Sui Network", "exchange": "binance"},
+        {"symbol": "NEAR/USDT", "name": "NEAR Protocol", "exchange": "binance"},
+        {"symbol": "DOT/USDT", "name": "Polkadot", "exchange": "binance"},
+        {"symbol": "PEPE/USDT", "name": "Pepe", "exchange": "binance"},
+        {"symbol": "SHIB/USDT", "name": "Shiba Inu", "exchange": "binance"},
+    ]
+
+    forex_metals = [
+        {"symbol": "XAUUSD", "name": "Gold / USD Spot", "exchange": "mt5"},
+        {"symbol": "EURUSD", "name": "Euro / US Dollar", "exchange": "mt5"},
+        {"symbol": "GBPUSD", "name": "British Pound / USD", "exchange": "mt5"},
+        {"symbol": "USDJPY", "name": "US Dollar / Japanese Yen", "exchange": "mt5"},
+        {"symbol": "AUDUSD", "name": "Australian Dollar / USD", "exchange": "mt5"},
+        {"symbol": "USDCAD", "name": "US Dollar / Canadian Dollar", "exchange": "mt5"},
+        {"symbol": "USDCHF", "name": "US Dollar / Swiss Franc", "exchange": "mt5"},
+        {"symbol": "GBPJPY", "name": "British Pound / Yen", "exchange": "mt5"},
+        {"symbol": "XAGUSD", "name": "Silver / USD Spot", "exchange": "mt5"},
+        {"symbol": "USOIL", "name": "WTI Crude Oil", "exchange": "mt5"},
+    ]
+
+    stocks = [
+        {"symbol": "AAPL", "name": "Apple Inc.", "exchange": "alpaca"},
+        {"symbol": "TSLA", "name": "Tesla, Inc.", "exchange": "alpaca"},
+        {"symbol": "NVDA", "name": "NVIDIA Corporation", "exchange": "alpaca"},
+        {"symbol": "MSFT", "name": "Microsoft Corporation", "exchange": "alpaca"},
+        {"symbol": "AMZN", "name": "Amazon.com, Inc.", "exchange": "alpaca"},
+        {"symbol": "GOOGL", "name": "Alphabet Inc.", "exchange": "alpaca"},
+        {"symbol": "META", "name": "Meta Platforms, Inc.", "exchange": "alpaca"},
+        {"symbol": "AMD", "name": "Advanced Micro Devices", "exchange": "alpaca"},
+        {"symbol": "PLTR", "name": "Palantir Technologies", "exchange": "alpaca"},
+        {"symbol": "COIN", "name": "Coinbase Global", "exchange": "alpaca"},
+        {"symbol": "MSTR", "name": "MicroStrategy Inc.", "exchange": "alpaca"},
+        {"symbol": "SPY", "name": "SPDR S&P 500 ETF", "exchange": "alpaca"},
+        {"symbol": "QQQ", "name": "Invesco QQQ Trust", "exchange": "alpaca"},
+    ]
+
+    return {
+        "innovestx_thb": [{"symbol": s, "name": s.split('/')[0] + " / THB", "exchange": "innovestx", "market_type": "crypto"} for s in innovestx_symbols],
+        "crypto_global": [{"symbol": c["symbol"], "name": c["name"], "exchange": c["exchange"], "market_type": "crypto"} for c in crypto_global],
+        "forex_metals": [{"symbol": f["symbol"], "name": f["name"], "exchange": f["exchange"], "market_type": "forex"} for f in forex_metals],
+        "stocks": [{"symbol": st["symbol"], "name": st["name"], "exchange": st["exchange"], "market_type": "stock"} for st in stocks],
+    }
 
 
 @router.delete("/watchlist")
@@ -777,6 +894,7 @@ async def update_broker_config(req: BrokerConfigRequest, _key: str = Depends(ver
                 else:
                     new_lines.append(line)
             for key, val in updates.items():
+                os.environ[key] = str(val)
                 if key not in matched_keys:
                     new_lines.append(f"{key}={val}")
             ENV_FILE.write_text("\n".join(new_lines), encoding="utf-8")
@@ -784,6 +902,71 @@ async def update_broker_config(req: BrokerConfigRequest, _key: str = Depends(ver
         logger.warning(f"Failed to persist broker settings to .env: {e}")
 
     return {"status": "ok", "message": "Broker & Exchange settings updated successfully"}
+
+
+@router.delete("/brokers/config/{broker}")
+async def clear_broker_config(broker: str, _key: str = Depends(verify_api_key)):
+    """Clear credentials for a specific broker and persist to .env."""
+    cfg = get_settings()
+    b = broker.lower().strip()
+    cleared = []
+
+    if b in ["innovestx", "invx"]:
+        cfg.innovestx_api_key = ""
+        cfg.innovestx_api_secret = ""
+        cleared = ["INNOVESTX_API_KEY", "INNOVESTX_API_SECRET"]
+    elif b in ["binance"]:
+        cfg.binance_api_key = ""
+        cfg.binance_api_secret = ""
+        cleared = ["BINANCE_API_KEY", "BINANCE_API_SECRET"]
+    elif b in ["bybit"]:
+        cfg.bybit_api_key = ""
+        cfg.bybit_api_secret = ""
+        cleared = ["BYBIT_API_KEY", "BYBIT_API_SECRET"]
+    elif b in ["mt5", "metatrader"]:
+        cfg.mt5_login = 0
+        cfg.mt5_password = ""
+        cfg.mt5_server = ""
+        cleared = ["MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER"]
+    elif b in ["alpaca"]:
+        cfg.alpaca_api_key = ""
+        cfg.alpaca_api_secret = ""
+        cleared = ["ALPACA_API_KEY", "ALPACA_API_SECRET"]
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown broker: {broker}")
+
+    # Persist to .env and os.environ
+    try:
+        if ENV_FILE.exists():
+            lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
+            updates = {
+                "INNOVESTX_API_KEY": cfg.innovestx_api_key,
+                "INNOVESTX_API_SECRET": cfg.innovestx_api_secret,
+                "BINANCE_API_KEY": cfg.binance_api_key,
+                "BINANCE_API_SECRET": cfg.binance_api_secret,
+                "BYBIT_API_KEY": cfg.bybit_api_key,
+                "BYBIT_API_SECRET": cfg.bybit_api_secret,
+                "MT5_LOGIN": str(cfg.mt5_login),
+                "MT5_PASSWORD": cfg.mt5_password,
+                "MT5_SERVER": cfg.mt5_server,
+                "ALPACA_API_KEY": cfg.alpaca_api_key,
+                "ALPACA_API_SECRET": cfg.alpaca_api_secret,
+            }
+            for k, v in updates.items():
+                os.environ[k] = str(v)
+            new_lines = []
+            for line in lines:
+                key = line.split("=")[0].strip() if "=" in line else None
+                if key in updates:
+                    new_lines.append(f"{key}={updates[key]}")
+                else:
+                    new_lines.append(line)
+            ENV_FILE.write_text("\n".join(new_lines), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Failed to persist cleared broker settings to .env: {e}")
+
+    return {"status": "ok", "message": f"Cleared {broker} credentials", "cleared_fields": cleared}
+
 
 
 class BrokerTestRequest(BaseModel):

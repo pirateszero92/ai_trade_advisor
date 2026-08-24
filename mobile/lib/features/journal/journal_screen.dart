@@ -1,17 +1,19 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
+import '../settings/settings_screen.dart';
 
-class JournalScreen extends StatefulWidget {
+class JournalScreen extends ConsumerStatefulWidget {
   const JournalScreen({super.key});
 
   @override
-  State<JournalScreen> createState() => _JournalScreenState();
+  ConsumerState<JournalScreen> createState() => _JournalScreenState();
 }
 
-class _JournalScreenState extends State<JournalScreen> {
+class _JournalScreenState extends ConsumerState<JournalScreen> {
   List<Map<String, dynamic>> _trades = [];
   Map<String, dynamic>? _accountInfo;
   bool _isLoading = true;
@@ -19,12 +21,16 @@ class _JournalScreenState extends State<JournalScreen> {
   Timer? _liveTimer;
   int _selectedTab = 0; // 0: Open Positions, 1: Trade History
   String _historyFilter = 'all'; // 'all', 'win', 'loss'
+  String _activeProfileMode = 'paper'; // 'live' or 'paper'
+  String _selectedBroker = 'all'; // 'all', 'innovestx', 'mt5', 'binance', 'alpaca'
 
   @override
   void initState() {
     super.initState();
-    _fetchTrades();
+    final isPaper = ref.read(settingsProvider).isPaperMode;
+    _activeProfileMode = isPaper ? 'paper' : 'live';
     _fetchAccountInfo();
+    _fetchTrades();
     _startLiveTicker();
   }
 
@@ -90,13 +96,22 @@ class _JournalScreenState extends State<JournalScreen> {
     }
   }
 
-  Future<void> _fetchAccountInfo() async {
+  Future<void> _fetchAccountInfo({String? mode, String? broker}) async {
     try {
       final dio = AppApi.dio;
-      final resp = await dio.get(AppApi.url('/api/v1/trades/account'));
+      final effMode = mode ?? _activeProfileMode;
+      final effBroker = broker ?? _selectedBroker;
+      final q = <String, dynamic>{'mode': effMode};
+      if (effMode == 'live' && effBroker != 'all') {
+        q['broker'] = effBroker;
+      }
+      final resp = await dio.get(AppApi.url('/api/v1/trades/account'), queryParameters: q);
       if (mounted) {
         setState(() {
           _accountInfo = Map<String, dynamic>.from(resp.data);
+          if (mode != null) {
+            _activeProfileMode = mode;
+          }
         });
       }
     } catch (_) {}
@@ -105,7 +120,11 @@ class _JournalScreenState extends State<JournalScreen> {
   Future<void> _fetchAccountInfoSilently() async {
     try {
       final dio = AppApi.dio;
-      final resp = await dio.get(AppApi.url('/api/v1/trades/account'));
+      final q = <String, dynamic>{'mode': _activeProfileMode};
+      if (_activeProfileMode == 'live' && _selectedBroker != 'all') {
+        q['broker'] = _selectedBroker;
+      }
+      final resp = await dio.get(AppApi.url('/api/v1/trades/account'), queryParameters: q);
       if (mounted) {
         setState(() {
           _accountInfo = Map<String, dynamic>.from(resp.data);
@@ -114,14 +133,20 @@ class _JournalScreenState extends State<JournalScreen> {
     } catch (_) {}
   }
 
-  Future<void> _fetchTrades() async {
+  Future<void> _fetchTrades({String? mode, String? broker}) async {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
     });
     try {
       final dio = AppApi.dio;
-      final resp = await dio.get(AppApi.url('/api/v1/trades/'));
+      final effMode = mode ?? _activeProfileMode;
+      final effBroker = broker ?? _selectedBroker;
+      final q = <String, dynamic>{'mode': effMode};
+      if (effMode == 'live' && effBroker != 'all') {
+        q['broker'] = effBroker;
+      }
+      final resp = await dio.get(AppApi.url('/api/v1/trades/'), queryParameters: q);
       final List<dynamic> list = resp.data['trades'] ?? [];
       if (!mounted) return;
       setState(() {
@@ -155,7 +180,11 @@ class _JournalScreenState extends State<JournalScreen> {
   Future<void> _fetchTradesSilently() async {
     try {
       final dio = AppApi.dio;
-      final resp = await dio.get(AppApi.url('/api/v1/trades/'));
+      final q = <String, dynamic>{'mode': _activeProfileMode};
+      if (_activeProfileMode == 'live' && _selectedBroker != 'all') {
+        q['broker'] = _selectedBroker;
+      }
+      final resp = await dio.get(AppApi.url('/api/v1/trades/'), queryParameters: q);
       final List<dynamic> list = resp.data['trades'] ?? [];
       if (mounted) {
         setState(() {
@@ -388,6 +417,14 @@ class _JournalScreenState extends State<JournalScreen> {
                   child: ListView(
                     padding: EdgeInsets.fromLTRB(12, 6, 12, isLandscape ? 30 : 90),
                     children: [
+                      // Profile Mode Selector: Live vs Paper Trading
+                      _buildAccountProfileSelector(),
+                      if (_activeProfileMode == 'live') ...[
+                        const SizedBox(height: 6),
+                        _buildBrokerSelector(),
+                      ],
+                      const SizedBox(height: 6),
+
                       // Header: In Landscape, 2 columns side-by-side! In Portrait, stacked vertically.
                       if (isLandscape)
                         Row(
@@ -431,28 +468,56 @@ class _JournalScreenState extends State<JournalScreen> {
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  const Icon(Icons.check_circle_outline, size: 44, color: AppColors.bullish),
+                                  Icon(
+                                    (_activeProfileMode == 'live' && (_accountInfo?['status'] == 'DISCONNECTED' || _accountInfo?['broker_id'] == 'none'))
+                                        ? Icons.link_off
+                                        : Icons.check_circle_outline,
+                                    size: 44,
+                                    color: (_activeProfileMode == 'live' && (_accountInfo?['status'] == 'DISCONNECTED' || _accountInfo?['broker_id'] == 'none'))
+                                        ? Colors.white54
+                                        : AppColors.bullish,
+                                  ),
                                   const SizedBox(height: 10),
-                                  const Text(
-                                    'ไม่มีสถานะที่เปิดอยู่ขณะนี้ (No Open Positions)',
-                                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
+                                  Text(
+                                    _activeProfileMode == 'live'
+                                        ? ((_accountInfo?['status'] == 'DISCONNECTED' || _accountInfo?['broker_id'] == 'none')
+                                            ? 'ยังไม่ได้เชื่อมต่อบัญชีจริง (No Live Broker)'
+                                            : 'ไม่มีสถานะที่เปิดอยู่ในบัญชีจริง (No Live Positions)')
+                                        : 'ไม่มีสถานะที่เปิดอยู่ขณะนี้ (No Open Positions)',
+                                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
                                   ),
                                   const SizedBox(height: 6),
-                                  const Text(
-                                    'พอร์ตของคุณกำลังถือเงินสด 100% รอสัญญาณ SMC Confluence คุณภาพสูง',
+                                  Text(
+                                    _activeProfileMode == 'live'
+                                        ? ((_accountInfo?['status'] == 'DISCONNECTED' || _accountInfo?['broker_id'] == 'none')
+                                            ? 'กรุณากรอก API Key ในหน้า Settings เพื่อเชื่อมต่อบัญชีจริงของคุณ'
+                                            : 'บัญชีจริงของคุณกำลังถือเงินสด 100% รอสัญญาณ SMC Confluence ที่ปลอดภัย')
+                                        : 'พอร์ตจำลองกำลังถือเงินสด 100% รอสัญญาณ SMC Confluence คุณภาพสูง',
                                     textAlign: TextAlign.center,
-                                    style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+                                    style: const TextStyle(color: AppColors.textMuted, fontSize: 12),
                                   ),
                                   const SizedBox(height: 14),
-                                  ElevatedButton.icon(
-                                    onPressed: () => context.go('/signals'),
-                                    icon: const Icon(Icons.bolt, size: 16, color: Colors.black),
-                                    label: const Text('ดูสัญญาณเทรด SMC Signals →', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 12)),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: const Color(0xFF00E5FF),
-                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                  if (_activeProfileMode == 'live' && (_accountInfo?['status'] == 'DISCONNECTED' || _accountInfo?['broker_id'] == 'none'))
+                                    ElevatedButton.icon(
+                                      onPressed: () => context.go('/settings'),
+                                      icon: const Icon(Icons.settings, size: 16),
+                                      label: const Text('ไปยังหน้าตั้งค่า (Settings) →', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: const Color(0xFF9B59B6),
+                                        foregroundColor: Colors.white,
+                                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                      ),
+                                    )
+                                  else
+                                    ElevatedButton.icon(
+                                      onPressed: () => context.go('/signals'),
+                                      icon: const Icon(Icons.bolt, size: 16, color: Colors.black),
+                                      label: const Text('ดูสัญญาณเทรด SMC Signals →', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 12)),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: const Color(0xFF00E5FF),
+                                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                      ),
                                     ),
-                                  ),
                                 ],
                               ),
                             ),
@@ -472,15 +537,25 @@ class _JournalScreenState extends State<JournalScreen> {
                               borderRadius: BorderRadius.circular(12),
                               border: Border.all(color: const Color(0xFF2E384D).withValues(alpha: 0.6)),
                             ),
-                            child: const Center(
+                            child: Center(
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Icon(Icons.history_toggle_off, size: 44, color: Colors.white24),
-                                  SizedBox(height: 10),
+                                  const Icon(Icons.history_toggle_off, size: 44, color: Colors.white24),
+                                  const SizedBox(height: 10),
                                   Text(
-                                    'ไม่พบประวัติการเทรดตามเงื่อนไขที่เลือก',
-                                    style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 14),
+                                    _activeProfileMode == 'live'
+                                        ? 'ยังไม่มีประวัติการเทรดสดในบัญชีจริง'
+                                        : 'ยังไม่มีประวัติการเทรดจำลองตามเงื่อนไขที่เลือก',
+                                    style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 14),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    _activeProfileMode == 'live'
+                                        ? 'รายการซื้อขายที่ส่งผ่าน InnovestX จริงจะถูกบันทึกและซิงค์สถิติที่นี่แบบ Real-time'
+                                        : 'ประวัติการเทรด Paper Trading ที่ปิดแล้วจะแสดงที่นี่',
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(color: AppColors.textMuted, fontSize: 11),
                                   ),
                                 ],
                               ),
@@ -492,6 +567,194 @@ class _JournalScreenState extends State<JournalScreen> {
                     ],
                   ),
                 ),
+    );
+  }
+
+  void _showLiveDisabledDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: const Row(
+          children: [
+            Icon(Icons.lock_outline, color: Color(0xFF9B59B6), size: 20),
+            SizedBox(width: 8),
+            Text('โหมด Live Trading ปิดอยู่', style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: const Text(
+          'ขณะนี้ระบบทำงานในโหมดพอร์ตจำลอง (Paper Trading)\n\nหากต้องการดูยอดเงินและประวัติการเทรดในบัญชีจริง กรุณาไปที่เมนู Settings และเปิดสวิตช์ "Live Trading"',
+          style: TextStyle(color: Colors.white70, fontSize: 13, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('ปิด', style: TextStyle(color: Colors.white60)),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.pop(ctx);
+              context.go('/settings');
+            },
+            icon: const Icon(Icons.settings, size: 16),
+            label: const Text('ไปยังหน้า Settings'),
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF9B59B6), foregroundColor: Colors.white),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBrokerSelector() {
+    final brokers = [
+      {'id': 'all', 'name': '🌐 ทั้งหมด', 'color': const Color(0xFF00E5FF)},
+      {'id': 'innovestx', 'name': '🟣 InnovestX (฿)', 'color': const Color(0xFF9B59B6)},
+      {'id': 'mt5', 'name': '💱 MetaTrader 5 (\$)', 'color': const Color(0xFF00E5FF)},
+      {'id': 'binance', 'name': '🪙 Binance (USDT)', 'color': const Color(0xFFF0B90B)},
+      {'id': 'alpaca', 'name': '📈 Alpaca (\$)', 'color': const Color(0xFFFFD700)},
+    ];
+
+    return SizedBox(
+      height: 32,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        children: brokers.map((b) {
+          final isSel = _selectedBroker == b['id'];
+          final color = b['color'] as Color;
+          return Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: ChoiceChip(
+              label: Text(
+                b['name'] as String,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: isSel ? FontWeight.bold : FontWeight.normal,
+                  color: isSel ? Colors.white : Colors.white60,
+                ),
+              ),
+              selected: isSel,
+              selectedColor: color.withValues(alpha: 0.25),
+              backgroundColor: const Color(0xFF141926),
+              side: BorderSide(color: isSel ? color : const Color(0xFF2E384D)),
+              onSelected: (_) {
+                setState(() {
+                  _selectedBroker = b['id'] as String;
+                  _isLoading = true;
+                });
+                _fetchAccountInfo(mode: 'live', broker: _selectedBroker);
+                _fetchTrades(mode: 'live', broker: _selectedBroker);
+              },
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildAccountProfileSelector() {
+    final settings = ref.watch(settingsProvider);
+    final isLiveAllowed = !settings.isPaperMode;
+
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xFF141926),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFF2E384D), width: 1),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: InkWell(
+              onTap: () {
+                if (!isLiveAllowed) {
+                  _showLiveDisabledDialog();
+                  return;
+                }
+                if (_activeProfileMode != 'live') {
+                  setState(() {
+                    _activeProfileMode = 'live';
+                    _isLoading = true;
+                  });
+                  _fetchAccountInfo(mode: 'live');
+                  _fetchTrades(mode: 'live');
+                }
+              },
+              borderRadius: BorderRadius.circular(8),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(
+                  color: _activeProfileMode == 'live' ? const Color(0xFF9B59B6).withValues(alpha: 0.25) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8),
+                  border: _activeProfileMode == 'live' ? Border.all(color: const Color(0xFF9B59B6), width: 1.2) : null,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      isLiveAllowed ? Icons.verified : Icons.lock_outline,
+                      size: 14,
+                      color: _activeProfileMode == 'live' ? const Color(0xFFD4AC0D) : (isLiveAllowed ? Colors.white38 : Colors.white24),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      isLiveAllowed ? '🟣 บัญชีจริง Live' : '🟣 บัญชีจริง (ปิดใน Settings)',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: _activeProfileMode == 'live' ? Colors.white : (isLiveAllowed ? Colors.white60 : Colors.white38),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          Expanded(
+            child: InkWell(
+              onTap: () {
+                if (_activeProfileMode != 'paper') {
+                  setState(() {
+                    _activeProfileMode = 'paper';
+                    _isLoading = true;
+                  });
+                  _fetchAccountInfo(mode: 'paper');
+                  _fetchTrades(mode: 'paper');
+                }
+              },
+              borderRadius: BorderRadius.circular(8),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(
+                  color: _activeProfileMode == 'paper' ? const Color(0xFF00E5FF).withValues(alpha: 0.18) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8),
+                  border: _activeProfileMode == 'paper' ? Border.all(color: const Color(0xFF00E5FF), width: 1.2) : null,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.science, size: 14, color: _activeProfileMode == 'paper' ? const Color(0xFF00E5FF) : Colors.white38),
+                    const SizedBox(width: 6),
+                    Text(
+                      '🧪 พอร์ตจำลอง Paper (\$)',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: _activeProfileMode == 'paper' ? Colors.white : Colors.white60,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -521,6 +784,8 @@ class _JournalScreenState extends State<JournalScreen> {
     final pnl = isOpen ? ((t['live_pnl'] ?? 0.0) as num).toDouble() : ((t['pnl'] ?? 0.0) as num).toDouble();
     final pnlPct = isOpen ? ((t['live_pnl_pct'] ?? 0.0) as num).toDouble() : ((t['pnl_pct'] ?? 0.0) as num).toDouble();
     final date = (t['opened_at'] ?? '').toString().split('T').first;
+    final tradeCurrency = (t['currency'] ?? (_activeProfileMode == 'live' ? 'THB' : 'USD')).toString().toUpperCase();
+    final currSym = tradeCurrency == 'THB' ? '฿' : '\$';
 
     return _TradeCard(
       id: id,
@@ -537,6 +802,7 @@ class _JournalScreenState extends State<JournalScreen> {
       status: status,
       rr: 2.3,
       date: date,
+      currSym: currSym,
       onClose: () => _closeTrade(id),
     );
   }
@@ -785,6 +1051,68 @@ class _JournalScreenState extends State<JournalScreen> {
     final totalPnl = realizedPnl + unrealizedPnl;
     final totalPnlPct = initialCap > 0 ? (totalPnl / initialCap) * 100 : 0.0;
     final isPnlPositive = totalPnl >= 0;
+
+    final isDisconnected = isLive && (acc['status'] == 'DISCONNECTED' || acc['broker_id'] == 'none');
+
+    if (isDisconnected) {
+      return Container(
+        margin: isLandscape ? EdgeInsets.zero : const EdgeInsets.fromLTRB(0, 4, 0, 0),
+        padding: EdgeInsets.all(isLandscape ? 12 : 14),
+        decoration: BoxDecoration(
+          color: const Color(0xFF141926),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFF2E384D)),
+        ),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF252540),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(Icons.link_off, color: Colors.white54, size: 20),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'ยังไม่ได้เชื่อมต่อบัญชีจริง (No Live Broker)',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                      ),
+                      SizedBox(height: 2),
+                      Text(
+                        'กรุณาระบุ API Key ในหน้า Settings เพื่อเชื่อมต่อบัญชีจริง',
+                        style: TextStyle(fontSize: 11, color: Colors.white54),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () => context.go('/settings'),
+                icon: const Icon(Icons.key, size: 15),
+                label: const Text('ไปยังหน้าตั้งค่าเชื่อมต่อ API (Settings)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF9B59B6),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
 
     return Container(
       margin: isLandscape ? EdgeInsets.zero : const EdgeInsets.fromLTRB(0, 4, 0, 0),
@@ -1092,6 +1420,7 @@ class _JournalScreenState extends State<JournalScreen> {
 class _TradeCard extends StatelessWidget {
   final String id, tag, symbol, direction, date, status, closeReason;
   final double entry, livePrice, closePrice, size, pnl, pnlUsd, rr;
+  final String currSym;
   final VoidCallback onClose;
 
   const _TradeCard({
@@ -1109,6 +1438,7 @@ class _TradeCard extends StatelessWidget {
     required this.status,
     required this.rr,
     required this.date,
+    this.currSym = '\$',
     required this.onClose,
   });
 
@@ -1216,7 +1546,7 @@ class _TradeCard extends StatelessWidget {
                     border: Border.all(color: pnlColor, width: 0.8),
                   ),
                   child: Text(
-                    '${isWin ? '+' : ''}\$${pnlUsd.toStringAsFixed(2)} (${isWin ? '+' : ''}${pnl.toStringAsFixed(2)}%)',
+                    '${isWin ? '+' : ''}$currSym${pnlUsd.toStringAsFixed(2)} (${isWin ? '+' : ''}${pnl.toStringAsFixed(2)}%)',
                     style: TextStyle(color: pnlColor, fontWeight: FontWeight.bold, fontSize: 11, fontFamily: 'monospace'),
                   ),
                 ),

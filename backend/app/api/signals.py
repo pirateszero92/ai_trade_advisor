@@ -127,9 +127,10 @@ async def quick_signal(
 async def list_signals(
     limit: int = Query(50, ge=1, le=100),
     market_type: Optional[str] = Query(None),
+    mode: Optional[str] = Query(None),
     _key: str = Depends(verify_api_key),
 ):
-    """List recent high-confluence SMC signals detected by proactive monitor (strictly filtered to Settings watchlist)."""
+    """List recent high-confluence SMC signals detected by proactive monitor (strictly filtered to Settings watchlist and active mode)."""
     from app.services.event_trigger import MarketMonitor, _clean_message_text, _compact_symbol
     monitor = MarketMonitor.get_instance()
     active_norm_symbols = {
@@ -140,6 +141,11 @@ async def list_signals(
         s for s in monitor.recent_signals
         if _compact_symbol(s.get("symbol", "")) in active_norm_symbols
     ]
+    if mode == "live":
+        signals = [s for s in signals if s.get("exchange") == "innovestx" or "thb" in s.get("symbol", "").lower()]
+    elif mode == "paper":
+        signals = [s for s in signals if s.get("exchange") != "innovestx" and "thb" not in s.get("symbol", "").lower()]
+
     if market_type and market_type.lower() != "all":
         mt = market_type.lower()
         signals = [s for s in signals if s.get("market_type", "crypto").lower() == mt]
@@ -154,12 +160,16 @@ async def list_signals(
         "total": len(signals),
         "last_scan": monitor.last_scan_time,
         "running": monitor.running,
+        "mode": mode,
         "signals": signals,
     }
 
 
 @router.get("/live-prices")
-async def get_live_prices(_key: str = Depends(verify_api_key)):
+async def get_live_prices(
+    mode: Optional[str] = Query(None),
+    _key: str = Depends(verify_api_key),
+):
     """Fetch realtime live prices for Settings watchlist symbols only."""
     import asyncio
     from app.services.event_trigger import MarketMonitor
@@ -168,7 +178,15 @@ async def get_live_prices(_key: str = Depends(verify_api_key)):
     all_syms = set()
     for w in monitor.watchlist:
         if w.get("symbol"):
-            all_syms.add((w["symbol"], w.get("market_type", "crypto")))
+            sym = w["symbol"]
+            m_type = w.get("market_type", "crypto")
+            ex = w.get("exchange", "")
+            is_live_asset = ex == "innovestx" or "thb" in sym.lower()
+            if mode == "live" and not is_live_asset:
+                continue
+            if mode == "paper" and is_live_asset:
+                continue
+            all_syms.add((sym, m_type))
 
     if not all_syms:
         return {"status": "ok", "prices": {}}
@@ -192,6 +210,7 @@ async def get_live_prices(_key: str = Depends(verify_api_key)):
 
 @router.post("/scan")
 async def trigger_scan(
+    mode: Optional[str] = Query(None),
     _key: str = Depends(verify_api_key),
 ):
     """Trigger an immediate proactive scan of Settings watchlist markets only."""
@@ -206,9 +225,15 @@ async def trigger_scan(
         s for s in new_signals
         if _compact_symbol(s.get("symbol", "")) in active_norm_symbols
     ]
+    if mode == "live":
+        filtered_signals = [s for s in filtered_signals if s.get("exchange") == "innovestx" or "thb" in s.get("symbol", "").lower()]
+    elif mode == "paper":
+        filtered_signals = [s for s in filtered_signals if s.get("exchange") != "innovestx" and "thb" not in s.get("symbol", "").lower()]
+
     return {
-        "message": f"Scan complete. {len(filtered_signals)} setups from Settings watchlist.",
+        "message": f"Scan complete. {len(filtered_signals)} setups ({mode or 'all'}).",
         "new_count": len(filtered_signals),
         "total_signals": len(filtered_signals),
+        "mode": mode,
         "signals": filtered_signals,
     }

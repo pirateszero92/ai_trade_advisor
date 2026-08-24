@@ -103,6 +103,7 @@ class InnovestXClient:
         )
 
         headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Content-Type": content_type,
             "Accept": "application/json",
             "X-INVX-APIKEY": self.api_key,
@@ -179,9 +180,72 @@ class InnovestXClient:
         return await self._request("GET", "/api/v1/digital-asset/products")
 
     async def get_orderbook(self, symbol: str) -> Dict[str, Any]:
-        """Fetch Level 2 Orderbook for a symbol (e.g. BTCTHB, ETHTHB, SOLTHB)."""
-        clean_symbol = symbol.replace("/", "").replace("_", "").upper()
+        """Fetch Level 2 Orderbook for a symbol (e.g. BTCTHB, ETHTHB, XAUTTHB)."""
+        clean_symbol = symbol.replace("/", "").replace("_", "").replace("-", "").upper()
         return await self._request("POST", "/api/v1/digital-asset/orderbook/lvl2", json_data={"symbol": clean_symbol})
+
+    async def get_live_ticker(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Fetch real-time Level 2 Best Bid / Best Ask and Last Trade Price from InnovestX."""
+        if not self.is_configured():
+            return None
+        try:
+            res = await self.get_orderbook(symbol)
+            if isinstance(res, dict) and res.get("code") == "0000":
+                data = res.get("data")
+                best_bid = 0.0
+                best_ask = 0.0
+                last_trade_price = 0.0
+
+                if isinstance(data, list):
+                    bids = []
+                    asks = []
+                    for item in data:
+                        p = float(item.get("price", 0))
+                        s = item.get("side")
+                        if s == 0 and p > 0:
+                            bids.append(p)
+                        elif s == 1 and p > 0:
+                            asks.append(p)
+                        if not last_trade_price and "lastTradePrice" in item:
+                            try:
+                                ltp = float(item["lastTradePrice"])
+                                if ltp > 0:
+                                    last_trade_price = ltp
+                            except Exception:
+                                pass
+                    if bids:
+                        best_bid = max(bids)
+                    if asks:
+                        best_ask = min(asks)
+                elif isinstance(data, dict):
+                    bids = data.get("bids", [])
+                    asks = data.get("asks", [])
+                    if bids:
+                        first_b = bids[0]
+                        best_bid = float(first_b.get("price") if isinstance(first_b, dict) else (first_b[0] if isinstance(first_b, (list, tuple)) else first_b))
+                    if asks:
+                        first_a = asks[0]
+                        best_ask = float(first_a.get("price") if isinstance(first_a, dict) else (first_a[0] if isinstance(first_a, (list, tuple)) else first_a))
+                    if "lastTradePrice" in data:
+                        try:
+                            last_trade_price = float(data["lastTradePrice"])
+                        except Exception:
+                            pass
+
+                effective_price = last_trade_price or ((best_bid + best_ask) / 2.0 if (best_bid > 0 and best_ask > 0) else (best_bid or best_ask))
+                if effective_price > 0:
+                    return {
+                        "symbol": symbol,
+                        "price": effective_price,
+                        "last_trade_price": last_trade_price or effective_price,
+                        "best_bid": best_bid,
+                        "best_ask": best_ask,
+                        "spread": round(best_ask - best_bid, 2) if (best_bid > 0 and best_ask > 0) else 0.0,
+                        "exchange": "innovestx",
+                    }
+        except Exception as e:
+            logger.warning(f"[InnovestX] Error in get_live_ticker for {symbol}: {e}")
+        return None
 
     # -----------------------------------------------------------------------
     # Account & Balances
