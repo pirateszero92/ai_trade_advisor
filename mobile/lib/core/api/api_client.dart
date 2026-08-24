@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiConfig {
   static const _storage = FlutterSecureStorage();
-  static const _defaultBaseUrl = kIsWeb ? '' : 'http://192.168.1.40:8000'; // Default to Pi LAN IP on mobile
+  static const _defaultBaseUrl = kIsWeb ? '' : 'http://10.0.2.2:8000'; // Default to Android emulator / local host on mobile
 
   static Future<String> getBaseUrl() async {
     if (kIsWeb) return '';
@@ -66,8 +66,8 @@ class AppApi {
       } catch (_) {}
       return '';
     }
-    // 3. Mobile default IP
-    return 'http://192.168.1.40:8000';
+    // 3. Mobile default IP (Android emulator loopback)
+    return 'http://10.0.2.2:8000';
   }
 
   static String url(String path) {
