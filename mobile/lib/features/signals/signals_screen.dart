@@ -1253,8 +1253,13 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
     _recommendedEntry = widget.recommendedEntry > 0 ? widget.recommendedEntry : widget.initialLivePrice;
     _livePrice = widget.initialLivePrice > 0 ? widget.initialLivePrice : _recommendedEntry;
 
-    // Default to 'recommended' if valid entry was provided by AI, otherwise 'market'
-    _entryMode = widget.recommendedEntry > 0 ? 'recommended' : 'market';
+    // Default to 'market' if live price is already > 0.5% away from recommended OB
+    final diffPct = _recommendedEntry > 0 ? ((_livePrice - _recommendedEntry).abs() / _recommendedEntry) : 0.0;
+    if (diffPct > 0.005) {
+      _entryMode = 'market';
+    } else {
+      _entryMode = widget.recommendedEntry > 0 ? 'recommended' : 'market';
+    }
     _selectedRR = widget.signalRR ?? 2.0;
 
     final mType = (widget.signal['market_type'] ?? 'crypto').toString().toLowerCase();
@@ -1326,7 +1331,15 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
     final entry = _currentEntry;
     final slDistance = _getSlDistance(entry);
     final sl = isLong ? (entry - slDistance) : (entry + slDistance);
-    final tp = isLong ? (entry + slDistance * _selectedRR) : (entry - slDistance * _selectedRR);
+    var tp = isLong ? (entry + slDistance * _selectedRR) : (entry - slDistance * _selectedRR);
+
+    // Forward-looking guard: ensure TP is always ahead of current live price
+    if (isLong && tp <= _livePrice && _livePrice > 0) {
+      tp = _livePrice + slDistance * _selectedRR;
+    } else if (!isLong && tp >= _livePrice && _livePrice > 0) {
+      tp = _livePrice - slDistance * _selectedRR;
+    }
+
     final posVal = entry * _selectedQty;
     final riskAmount = (entry - sl).abs() * _selectedQty;
     final gainAmount = (tp - entry).abs() * _selectedQty;
@@ -1782,17 +1795,21 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(
-                    'Value: $currSym${posVal.toStringAsFixed(posVal > 1000 ? 1 : 2)}',
-                    style: const TextStyle(fontSize: 11, color: Colors.white70, fontFamily: 'monospace'),
+                  Expanded(
+                    child: Text(
+                      'Value: ${widget.formatPrice(posVal, sym)}',
+                      style: const TextStyle(fontSize: 10, color: Colors.white70, fontFamily: 'monospace'),
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
                   Text(
-                    'Risk: -$currSym${riskAmount.toStringAsFixed(2)}',
-                    style: const TextStyle(fontSize: 11, color: AppColors.bearish, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+                    'Risk: -${widget.formatPrice(riskAmount, sym)}',
+                    style: const TextStyle(fontSize: 10, color: AppColors.bearish, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
                   ),
+                  const SizedBox(width: 6),
                   Text(
-                    'TP: +$currSym${gainAmount.toStringAsFixed(2)}',
-                    style: const TextStyle(fontSize: 11, color: AppColors.bullish, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+                    'TP: +${widget.formatPrice(gainAmount, sym)}',
+                    style: const TextStyle(fontSize: 10, color: AppColors.bullish, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
                   ),
                 ],
               ),

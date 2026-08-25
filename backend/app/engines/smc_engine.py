@@ -781,6 +781,11 @@ class SMCEngine:
             else:
                 tp = rr_based_tp     # Minimum 2.5R
 
+            # Crucial Guard: If live price already ran up past the old OB TP target,
+            # project fresh target forward from current live price!
+            if tp <= price:
+                tp = price + max(price * 0.015, sl_dist * 2.0)
+
         else:  # bearish
             signal.direction = "short"
             if entry_mode == "limit":
@@ -813,6 +818,11 @@ class SMCEngine:
                 tp = structural_tp   # Structural target offers better R:R
             else:
                 tp = rr_based_tp     # Minimum 2.5R
+
+            # Crucial Guard: If live price already dumped past the old OB TP target,
+            # project fresh target forward below current live price!
+            if tp >= price:
+                tp = price - max(price * 0.015, sl_dist * 2.0)
 
         signal.entry = round(entry, 6)
         signal.stop_loss = round(sl, 6)
