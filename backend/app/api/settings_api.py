@@ -779,6 +779,43 @@ async def get_innovestx_symbols(
     return {"symbols": pairs, "count": len(pairs)}
 
 
+class InnovestXFeeInquiryRequest(BaseModel):
+    symbol: str = "BTCTHB"
+    amount: float = 1.0
+    price: float = 2650000.0
+    side: Literal["BUY", "SELL", "buy", "sell"] = "BUY"
+
+
+@router.post("/broker/innovestx/estimate-fee")
+async def estimate_innovestx_fee(
+    req: InnovestXFeeInquiryRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Estimate transaction fee for an order on InnovestX Digital Asset Exchange."""
+    from app.engines.innovestx_client import InnovestXClient
+    client = InnovestXClient()
+    if not client.is_configured():
+        # Return fallback estimate if keys are not loaded yet (0.25% standard trading fee)
+        fee_rate = 0.0025
+        est_fee = round(req.amount * req.price * fee_rate, 2)
+        return {
+            "code": "0000",
+            "message": "Calculated via standard exchange fee schedule (0.25%)",
+            "data": {
+                "orderFee": str(est_fee),
+                "product": "THB",
+                "rate": "0.25%",
+            }
+        }
+    res = await client.get_estimate_fee(
+        symbol=req.symbol,
+        amount=req.amount,
+        price=req.price,
+        side=req.side,
+    )
+    return res
+
+
 # ------------------------------------------------------------------
 # Broker & Exchange Connections Settings
 # ------------------------------------------------------------------

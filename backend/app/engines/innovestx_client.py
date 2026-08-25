@@ -263,6 +263,28 @@ class InnovestXClient:
         """Fetch active open orders."""
         return await self._request("GET", "/api/v1/digital-asset/order/open/inquiry")
 
+    async def get_estimate_fee(
+        self,
+        symbol: str,
+        amount: float,
+        price: float,
+        side: Literal["BUY", "SELL", "buy", "sell"] = "BUY",
+    ) -> Dict[str, Any]:
+        """
+        Estimate the transaction fee for a specified order.
+        Endpoint: POST /api/v1/digital-asset/order/fee/inquiry
+        side: 0=Buy, 1=Sell
+        """
+        clean_symbol = symbol.replace("/", "").replace("_", "").replace("-", "").upper()
+        is_buy = str(side).upper() == "BUY"
+        payload = {
+            "symbol": clean_symbol,
+            "amount": float(amount),
+            "price": float(price),
+            "side": 0 if is_buy else 1,
+        }
+        return await self._request("POST", "/api/v1/digital-asset/order/fee/inquiry", json_data=payload)
+
     async def get_order_history(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         """Fetch trade order history."""
         payload = {}
