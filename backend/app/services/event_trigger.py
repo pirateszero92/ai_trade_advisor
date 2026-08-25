@@ -269,27 +269,97 @@ class MarketMonitor:
                     low_price = current_price
 
                 # -------------------------------------------------------------
-                # 1. Auto Break-Even Shield (Move SL to entry when in >= 1.0R profit)
+                # 1. Multi-Tier Dynamic Trailing Stop & Auto-Breakeven Engine
                 # -------------------------------------------------------------
-                if sl_dist > 0:
+                init_sl_dist = float(trade.get("initial_sl_dist", abs(entry - sl)))
+                if init_sl_dist <= 0 and entry > 0:
+                    init_sl_dist = entry * 0.01
+
+                if init_sl_dist > 0:
+                    # Update highest / lowest peak price achieved so far
                     if dir_ == "long":
-                        half_tp = entry + (tp - entry) * 0.5 if tp > entry else entry + sl_dist
-                        if (current_price >= (entry + sl_dist) or current_price >= half_tp) and sl < entry:
-                            new_sl = round(entry * 1.0005, 6)  # Breakeven + small fee buffer
-                            updated = update_trade_sl_sync(trade_id, new_sl, "🛡️ Breakeven Shield (1.0R Reached)")
+                        prev_high = float(trade.get("highest_price", entry))
+                        curr_high = max(prev_high, current_price, high_price)
+                        if curr_high > prev_high:
+                            trade["highest_price"] = curr_high
+
+                        r_multiple = (curr_high - entry) / init_sl_dist if init_sl_dist > 0 else 0.0
+                        new_sl = sl
+                        note = ""
+
+                        # Tier 4: Peak Dynamic Trail (at >= 2.5R) -> Trail behind high by 0.8R
+                        if r_multiple >= 2.5:
+                            cand_sl = round(curr_high - (init_sl_dist * 0.8), 6)
+                            if cand_sl > sl:
+                                new_sl = cand_sl
+                                note = f"💎 Dynamic Trailing Stop (+{r_multiple:.1f}R Peak)"
+                        # Tier 3: Lock +1.2R Profit (at >= 2.0R)
+                        elif r_multiple >= 2.0:
+                            cand_sl = round(entry + (init_sl_dist * 1.2), 6)
+                            if cand_sl > sl:
+                                new_sl = cand_sl
+                                note = "🚀 Trailing Stop (Locked +1.2R Profit)"
+                        # Tier 2: Lock +0.6R Profit (at >= 1.5R)
+                        elif r_multiple >= 1.5:
+                            cand_sl = round(entry + (init_sl_dist * 0.6), 6)
+                            if cand_sl > sl:
+                                new_sl = cand_sl
+                                note = "📈 Trailing Stop (Locked +0.6R Profit)"
+                        # Tier 1: Auto Breakeven Shield (at >= 1.0R)
+                        elif r_multiple >= 1.0 or (tp > entry and current_price >= entry + (tp - entry) * 0.5):
+                            cand_sl = round(entry * 1.0005, 6)
+                            if cand_sl > sl:
+                                new_sl = cand_sl
+                                note = "🛡️ Breakeven Shield (1.0R Reached)"
+
+                        if new_sl > sl and note:
+                            updated = update_trade_sl_sync(trade_id, new_sl, note)
                             if updated:
-                                logger.info(f"🛡️ AUTO BREAKEVEN: {sym} {trade.get('tag', trade_id)} Stop Loss moved to ${new_sl:.2f} (Risk-Free)")
+                                logger.info(f"📈 TRAILING SL UP: {sym} {trade.get('tag', trade_id)} SL moved to ${new_sl:.2f} [{note}]")
                                 await broadcast({"type": "trade_updated", "data": updated})
-                                sl = new_sl  # Update local reference
+                                sl = new_sl
+
                     else:  # short
-                        half_tp = entry - (entry - tp) * 0.5 if tp < entry else entry - sl_dist
-                        if (current_price <= (entry - sl_dist) or current_price <= half_tp) and sl > entry:
-                            new_sl = round(entry * 0.9995, 6)  # Breakeven - small fee buffer
-                            updated = update_trade_sl_sync(trade_id, new_sl, "🛡️ Breakeven Shield (1.0R Reached)")
+                        prev_low = float(trade.get("lowest_price", entry))
+                        curr_low = min(prev_low, current_price, low_price)
+                        if curr_low < prev_low:
+                            trade["lowest_price"] = curr_low
+
+                        r_multiple = (entry - curr_low) / init_sl_dist if init_sl_dist > 0 else 0.0
+                        new_sl = sl
+                        note = ""
+
+                        # Tier 4: Peak Dynamic Trail (at >= 2.5R) -> Trail above low by 0.8R
+                        if r_multiple >= 2.5:
+                            cand_sl = round(curr_low + (init_sl_dist * 0.8), 6)
+                            if cand_sl < sl or sl <= 0:
+                                new_sl = cand_sl
+                                note = f"💎 Dynamic Trailing Stop (+{r_multiple:.1f}R Peak)"
+                        # Tier 3: Lock +1.2R Profit (at >= 2.0R)
+                        elif r_multiple >= 2.0:
+                            cand_sl = round(entry - (init_sl_dist * 1.2), 6)
+                            if cand_sl < sl or sl <= 0:
+                                new_sl = cand_sl
+                                note = "🚀 Trailing Stop (Locked +1.2R Profit)"
+                        # Tier 2: Lock +0.6R Profit (at >= 1.5R)
+                        elif r_multiple >= 1.5:
+                            cand_sl = round(entry - (init_sl_dist * 0.6), 6)
+                            if cand_sl < sl or sl <= 0:
+                                new_sl = cand_sl
+                                note = "📈 Trailing Stop (Locked +0.6R Profit)"
+                        # Tier 1: Auto Breakeven Shield (at >= 1.0R)
+                        elif r_multiple >= 1.0 or (tp < entry and current_price <= entry - (entry - tp) * 0.5):
+                            cand_sl = round(entry * 0.9995, 6)
+                            if cand_sl < sl or sl <= 0:
+                                new_sl = cand_sl
+                                note = "🛡️ Breakeven Shield (1.0R Reached)"
+
+                        if (new_sl < sl or sl <= 0) and note:
+                            updated = update_trade_sl_sync(trade_id, new_sl, note)
                             if updated:
-                                logger.info(f"🛡️ AUTO BREAKEVEN: {sym} {trade.get('tag', trade_id)} Stop Loss moved to ${new_sl:.2f} (Risk-Free)")
+                                logger.info(f"📉 TRAILING SL DOWN: {sym} {trade.get('tag', trade_id)} SL moved to ${new_sl:.2f} [{note}]")
                                 await broadcast({"type": "trade_updated", "data": updated})
-                                sl = new_sl  # Update local reference
+                                sl = new_sl
 
                 # -------------------------------------------------------------
                 # 2. Check TP / SL Hit (Checking live price and extreme wick)
@@ -301,14 +371,20 @@ class MarketMonitor:
                         hit_reason = "Take Profit (TP Hit) 🎯"
                         exit_price = tp
                     elif sl > 0 and (current_price <= sl or low_price <= sl):
-                        hit_reason = "Stop Loss (SL Hit) 🛑"
+                        if sl >= entry:
+                            hit_reason = "Trailing Stop (Profit Protected) 📈" if sl > entry * 1.002 else "Breakeven Exit 🛡️"
+                        else:
+                            hit_reason = "Stop Loss (SL Hit) 🛑"
                         exit_price = sl
                 else:
                     if tp > 0 and (current_price <= tp or low_price <= tp):
                         hit_reason = "Take Profit (TP Hit) 🎯"
                         exit_price = tp
                     elif sl > 0 and (current_price >= sl or high_price >= sl):
-                        hit_reason = "Stop Loss (SL Hit) 🛑"
+                        if sl <= entry:
+                            hit_reason = "Trailing Stop (Profit Protected) 📈" if sl < entry * 0.998 else "Breakeven Exit 🛡️"
+                        else:
+                            hit_reason = "Stop Loss (SL Hit) 🛑"
                         exit_price = sl
 
                 if hit_reason:

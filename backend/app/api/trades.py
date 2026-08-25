@@ -268,6 +268,8 @@ async def place_order(
         "currency": currency_name,
         "entry": entry,
         "stop_loss": sl,
+        "initial_stop_loss": sl,
+        "initial_sl_dist": abs(entry - sl),
         "take_profit": tp,
         "opened_at": datetime.now(timezone.utc).isoformat(),
         "status": initial_status,
