@@ -88,7 +88,7 @@ class AppApi {
         final port = loc.hasPort ? ':${loc.port}' : '';
         return '$scheme://$host$port$clean';
       }
-      return 'ws://192.168.1.40:8000$clean';
+      return 'ws://10.0.2.2:8000$clean';
     }
     final wsBase = base
         .replaceFirst(RegExp(r'^https://', caseSensitive: false), 'wss://')
@@ -96,33 +96,43 @@ class AppApi {
     return '$wsBase$clean';
   }
 
-  static Dio? _dioInstance;
+  static String? _cachedApiKey;
 
-  static Dio get dio {
-    if (_dioInstance == null) {
-      final d = Dio(
-        BaseOptions(
-          connectTimeout: const Duration(seconds: 25),
-          receiveTimeout: const Duration(seconds: 30),
-          sendTimeout: const Duration(seconds: 25),
-        ),
-      );
-      d.interceptors.add(
-        InterceptorsWrapper(
-          onRequest: (options, handler) async {
-            try {
-              final key = await ApiConfig.getApiKey();
-              if (key != null && key.isNotEmpty) {
-                options.headers['X-API-Key'] = key;
-              }
-            } catch (_) {}
-            return handler.next(options);
-          },
-        ),
-      );
-      _dioInstance = d;
-    }
-    return _dioInstance!;
+  static void clearApiKeyCache() {
+    _cachedApiKey = null;
+  }
+
+  static final Dio _dioInstance = _createDio();
+
+  static Dio get dio => _dioInstance;
+
+  static Dio _createDio() {
+    final d = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 25),
+        receiveTimeout: const Duration(seconds: 30),
+        sendTimeout: const Duration(seconds: 25),
+      ),
+    );
+    d.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) async {
+          try {
+            if (_cachedApiKey == null) {
+              _cachedApiKey = await ApiConfig.getApiKey();
+            }
+            final key = _cachedApiKey;
+            if (key != null && key.isNotEmpty) {
+              options.headers['X-API-Key'] = key;
+            }
+          } catch (e) {
+            debugPrint('[API] Error retrieving API key: $e');
+          }
+          return handler.next(options);
+        },
+      ),
+    );
+    return d;
   }
 }
 

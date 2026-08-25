@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
+import '../../core/api/ws_client.dart';
 import '../settings/settings_screen.dart';
 
 class JournalScreen extends ConsumerStatefulWidget {
@@ -19,23 +21,93 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
   bool _isLoading = true;
   String? _errorMessage;
   Timer? _liveTimer;
-  int _selectedTab = 0; // 0: Open Positions, 1: Trade History
+  int _selectedTab = 0; // 0: Open Positions, 1: Pending, 2: Trade History
   String _historyFilter = 'all'; // 'all', 'win', 'loss'
   String _activeProfileMode = 'paper'; // 'live' or 'paper'
   String _selectedBroker = 'all'; // 'all', 'innovestx', 'mt5', 'binance', 'alpaca'
+  Map<String, dynamic>? _scorecardData;
+
+  StreamSubscription<Map<String, dynamic>>? _wsPriceSub;
+  StreamSubscription<Map<String, dynamic>>? _wsTradeSub;
+  StreamSubscription<WsConnectionState>? _wsStateSub;
+  WsConnectionState _wsState = WsConnectionState.disconnected;
 
   @override
   void initState() {
     super.initState();
     final isPaper = ref.read(settingsProvider).isPaperMode;
     _activeProfileMode = isPaper ? 'paper' : 'live';
+
+    _wsState = AppWebSocketClient.instance.currentState;
+    _wsStateSub = AppWebSocketClient.instance.connectionStateStream.listen((state) {
+      if (mounted) setState(() => _wsState = state);
+    });
+    _wsPriceSub = AppWebSocketClient.instance.priceStream.listen(_onWsPriceTick);
+    _wsTradeSub = AppWebSocketClient.instance.tradeStream.listen(_onWsTradeUpdate);
+
     _fetchAccountInfo();
     _fetchTrades();
+    _fetchScorecard();
     _startLiveTicker();
+  }
+
+  void _onWsPriceTick(Map<String, dynamic> ticks) {
+    if (!mounted || ticks.isEmpty) return;
+    bool hasChanges = false;
+    for (var entry in ticks.entries) {
+      final val = entry.value;
+      if (val is Map<String, dynamic>) {
+        final p = (val['price'] as num?)?.toDouble();
+        if (p != null && p > 0) {
+          final norm = _normalizeSym(entry.key);
+          for (var t in _trades) {
+            if (_normalizeSym(t['symbol']?.toString() ?? '') == norm) {
+              if (t['live_price'] != p) {
+                hasChanges = true;
+                t['live_price'] = p;
+                final entryPrice = (t['entry'] as num?)?.toDouble() ?? p;
+                final isLong = (t['direction'] ?? 'long').toString().toLowerCase() == 'long';
+                final size = (t['position_size'] ?? t['size'] ?? 1.0) as num;
+                if (t['status'] == 'open') {
+                  final livePnl = isLong ? (p - entryPrice) * size.toDouble() : (entryPrice - p) * size.toDouble();
+                  final livePnlPct = entryPrice > 0 ? (isLong ? (p - entryPrice) / entryPrice : (entryPrice - p) / entryPrice) * 100 : 0.0;
+                  t['live_pnl'] = livePnl;
+                  t['live_pnl_pct'] = livePnlPct;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    if (hasChanges && mounted) {
+      setState(() {});
+    }
+  }
+
+  void _onWsTradeUpdate(Map<String, dynamic> msg) {
+    if (!mounted) return;
+    _fetchTradesSilently();
+    _fetchAccountInfoSilently();
+    _fetchScorecard();
+  }
+
+  Future<void> _fetchScorecard() async {
+    try {
+      final resp = await AppApi.dio.get(AppApi.url('/api/v1/journal/scorecard'));
+      if (resp.statusCode == 200 && mounted) {
+        setState(() {
+          _scorecardData = Map<String, dynamic>.from(resp.data);
+        });
+      }
+    } catch (_) {}
   }
 
   @override
   void dispose() {
+    _wsPriceSub?.cancel();
+    _wsTradeSub?.cancel();
+    _wsStateSub?.cancel();
     _liveTimer?.cancel();
     super.dispose();
   }
@@ -56,7 +128,7 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
     });
   }
 
-  Future<void> _fetchLivePrices() async {
+    Future<void> _fetchLivePrices() async {
     if (_isPriceFetching) return;
     _isPriceFetching = true;
     try {
@@ -65,31 +137,39 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
       final prices = resp.data['prices'] as Map<String, dynamic>? ?? {};
       if (prices.isEmpty || !mounted) return;
 
-      setState(() {
-        for (var t in _trades) {
-          if (t['status'] == 'open') {
-            final rawSym = t['symbol']?.toString() ?? '';
-            final normSym = _normalizeSym(rawSym);
-            for (var entry in prices.entries) {
-              if (entry.key == rawSym || _normalizeSym(entry.key) == normSym) {
-                final pData = entry.value as Map<String, dynamic>;
-                final p = (pData['price'] as num?)?.toDouble();
-                if (p != null && p > 0) {
-                  t['live_price'] = p;
-                  final entryPrice = (t['entry'] as num?)?.toDouble() ?? p;
-                  final isLong = (t['direction'] ?? 'long').toString().toLowerCase() == 'long';
-                  final size = (t['position_size'] ?? t['size'] ?? 1.0) as num;
-                  final livePnl = isLong ? (p - entryPrice) * size.toDouble() : (entryPrice - p) * size.toDouble();
-                  final livePnlPct = entryPrice > 0 ? (isLong ? (p - entryPrice) / entryPrice : (entryPrice - p) / entryPrice) * 100 : 0.0;
-                  t['live_pnl'] = livePnl;
-                  t['live_pnl_pct'] = livePnlPct;
-                }
-                break;
-              }
+      final priceMap = <String, double>{};
+      for (var entry in prices.entries) {
+        final pData = entry.value as Map<String, dynamic>;
+        final p = (pData['price'] as num?)?.toDouble();
+        if (p != null && p > 0) {
+          priceMap[_normalizeSym(entry.key)] = p;
+        }
+      }
+
+      bool hasChanges = false;
+      for (var t in _trades) {
+        if (t['status'] == 'open' || t['status'] == 'pending') {
+          final normSym = _normalizeSym(t['symbol']?.toString() ?? '');
+          final p = priceMap[normSym];
+          if (p != null && p > 0 && t['live_price'] != p) {
+            hasChanges = true;
+            t['live_price'] = p;
+            final entryPrice = (t['entry'] as num?)?.toDouble() ?? p;
+            final isLong = (t['direction'] ?? 'long').toString().toLowerCase() == 'long';
+            final size = (t['position_size'] ?? t['size'] ?? 1.0) as num;
+            if (t['status'] == 'open') {
+              final livePnl = isLong ? (p - entryPrice) * size.toDouble() : (entryPrice - p) * size.toDouble();
+              final livePnlPct = entryPrice > 0 ? (isLong ? (p - entryPrice) / entryPrice : (entryPrice - p) / entryPrice) * 100 : 0.0;
+              t['live_pnl'] = livePnl;
+              t['live_pnl_pct'] = livePnlPct;
             }
           }
         }
-      });
+      }
+
+      if (hasChanges && mounted) {
+        setState(() {});
+      }
     } catch (_) {
     } finally {
       _isPriceFetching = false;
@@ -149,11 +229,17 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
       final resp = await dio.get(AppApi.url('/api/v1/trades/'), queryParameters: q);
       final List<dynamic> list = resp.data['trades'] ?? [];
       if (!mounted) return;
+
+      final existingMap = <String, Map<String, dynamic>>{
+        for (final t in _trades)
+          if (t['id'] != null) t['id'].toString(): t
+      };
+
       setState(() {
         _trades = list.map((e) {
           final m = Map<String, dynamic>.from(e as Map);
           final entry = (m['entry'] as num?)?.toDouble() ?? 100.0;
-          final existing = _trades.firstWhere((x) => x['id'] == m['id'], orElse: () => {});
+          final existing = existingMap[m['id']?.toString()] ?? {};
           final existingLive = (existing['live_price'] as num?)?.toDouble();
           final existingPnl = (existing['live_pnl'] as num?)?.toDouble();
           final existingPnlPct = (existing['live_pnl_pct'] as num?)?.toDouble();
@@ -187,11 +273,16 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
       final resp = await dio.get(AppApi.url('/api/v1/trades/'), queryParameters: q);
       final List<dynamic> list = resp.data['trades'] ?? [];
       if (mounted) {
+        final existingMap = <String, Map<String, dynamic>>{
+          for (final t in _trades)
+            if (t['id'] != null) t['id'].toString(): t
+        };
+
         setState(() {
           _trades = list.map((e) {
             final m = Map<String, dynamic>.from(e as Map);
             final entry = (m['entry'] as num?)?.toDouble() ?? 100.0;
-            final existing = _trades.firstWhere((x) => x['id'] == m['id'], orElse: () => {});
+            final existing = existingMap[m['id']?.toString()] ?? {};
             final existingLive = (existing['live_price'] as num?)?.toDouble();
             final existingPnl = (existing['live_pnl'] as num?)?.toDouble();
             final existingPnlPct = (existing['live_pnl_pct'] as num?)?.toDouble();
@@ -210,30 +301,41 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
     try {
       final dio = AppApi.dio;
       final t = _trades.firstWhere((e) => e['id']?.toString() == tradeId, orElse: () => {});
+      final isPending = t['status'] == 'pending';
+      final sym = t['symbol']?.toString() ?? '';
       final closePrice = (t['live_price'] as num?)?.toDouble() ?? (t['entry'] as num?)?.toDouble() ?? 100.0;
 
       await dio.post(
         AppApi.url('/api/v1/trades/$tradeId/close'),
         data: {
           'close_price': closePrice,
-          'reason': 'Manual Close from Journal',
+          'reason': isPending ? 'Order Cancelled' : 'Manual Close from Journal',
         },
       );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            backgroundColor: AppColors.bullish,
-            content: Text('✅ Closed position @ \$$closePrice', style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+            backgroundColor: isPending ? const Color(0xFFFF9900) : AppColors.bullish,
+            content: Text(
+              isPending ? '🗑️ Cancelled Pending Order $sym' : '✅ Closed position @ \$$closePrice',
+              style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+            ),
           ),
         );
       }
-      _fetchTrades();
-      _fetchAccountInfo();
+      await Future.wait([_fetchTrades(), _fetchAccountInfo()]);
     } catch (e) {
+      String msg = e.toString();
+      if (e is DioException && e.response?.data != null) {
+        final data = e.response!.data;
+        if (data is Map && data.containsKey('detail')) {
+          msg = data['detail'].toString();
+        }
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(backgroundColor: AppColors.bearish, content: Text('Failed to close: $e')),
+          SnackBar(backgroundColor: AppColors.bearish, content: Text('Failed: $msg')),
         );
       }
     }
@@ -376,11 +478,12 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
   Widget build(BuildContext context) {
     final closed = _trades.where((t) => t['status'] == 'closed').toList();
     final openList = _trades.where((t) => t['status'] == 'open').toList();
+    final pendingList = _trades.where((t) => t['status'] == 'pending').toList();
 
-    final wins = closed.where((t) => ((t['pnl'] ?? 0) as num) > 0).toList();
+    final wins = closed.where((t) => ((t['pnl'] as num?)?.toDouble() ?? 0.0) > 0).toList();
     final winRate = closed.isNotEmpty ? ((wins.length / closed.length) * 100).toStringAsFixed(0) : '0';
-    final realizedPnl = closed.fold(0.0, (acc, t) => acc + (((t['pnl'] ?? 0) as num).toDouble()));
-    final unrealizedPnl = openList.fold(0.0, (acc, t) => acc + (((t['live_pnl'] ?? 0) as num).toDouble()));
+    final realizedPnl = closed.fold(0.0, (acc, t) => acc + ((t['pnl'] as num?)?.toDouble() ?? 0.0));
+    final unrealizedPnl = openList.fold(0.0, (acc, t) => acc + ((t['live_pnl'] as num?)?.toDouble() ?? 0.0));
     final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
 
     return Scaffold(
@@ -394,6 +497,46 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
         ),
         backgroundColor: AppColors.surface,
         actions: [
+          // Live WebSocket Status Badge
+          Container(
+            margin: const EdgeInsets.symmetric(vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+            decoration: BoxDecoration(
+              color: _wsState == WsConnectionState.connected
+                  ? AppColors.bullish.withValues(alpha: 0.15)
+                  : const Color(0xFFFFD700).withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                color: _wsState == WsConnectionState.connected
+                    ? AppColors.bullish.withValues(alpha: 0.6)
+                    : const Color(0xFFFFD700).withValues(alpha: 0.6),
+                width: 0.8,
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: _wsState == WsConnectionState.connected ? AppColors.bullish : const Color(0xFFFFD700),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  _wsState == WsConnectionState.connected ? '⚡ WS' : '🟡 Poll',
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.bold,
+                    color: _wsState == WsConnectionState.connected ? AppColors.bullish : const Color(0xFFFFD700),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 6),
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Refresh Journal',
@@ -449,13 +592,41 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
 
                       const SizedBox(height: 10),
 
-                      // Two Distinct Tabs: Open Positions vs Trade History
-                      _buildTabsHeader(openList.length, closed.length),
+                      // Three Distinct Tabs: Open Positions vs Pending Orders vs Trade History
+                      _buildTabsHeader(openList.length, pendingList.length, closed.length),
 
                       const SizedBox(height: 8),
 
                       if (_selectedTab == 0) ...[
                         // Tab 0: Open Positions
+                        if (pendingList.isNotEmpty) ...[
+                          InkWell(
+                            onTap: () => setState(() => _selectedTab = 1),
+                            borderRadius: BorderRadius.circular(8),
+                            child: Container(
+                              margin: const EdgeInsets.only(bottom: 10),
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFFD700).withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: const Color(0xFFFFD700).withValues(alpha: 0.6), width: 1),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.hourglass_top, color: Color(0xFFFFD700), size: 16),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      'มี ${pendingList.length} คำสั่งที่กำลังรอดักราคา (Pending Orders)',
+                                      style: const TextStyle(color: Color(0xFFFFD700), fontSize: 12, fontWeight: FontWeight.bold),
+                                    ),
+                                  ),
+                                  const Text('แตะดูคำสั่ง →', style: TextStyle(color: Color(0xFFFFD700), fontSize: 11, fontWeight: FontWeight.bold)),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
                         if (openList.isEmpty)
                           Container(
                             padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 20),
@@ -524,8 +695,42 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                           )
                         else
                           ...openList.map((t) => _buildTradeItem(t)),
+                      ] else if (_selectedTab == 1) ...[
+                        // Tab 1: Pending Orders
+                        if (pendingList.isEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 20),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF141926),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: const Color(0xFF2E384D).withValues(alpha: 0.6)),
+                            ),
+                            child: const Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.hourglass_empty, size: 44, color: Colors.white24),
+                                  SizedBox(height: 10),
+                                  Text(
+                                    'ไม่มีคำสั่งรอดักราคา (No Pending Orders)',
+                                    style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 14),
+                                  ),
+                                  SizedBox(height: 4),
+                                  Text(
+                                    'คำสั่ง Limit ที่ตั้งรอดักโซน Order Block ในอนาคตจะแสดงที่นี่และรอราคาลงมาแตะ',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(color: AppColors.textMuted, fontSize: 11),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          )
+                        else
+                          ...pendingList.map((t) => _buildTradeItem(t)),
                       ] else ...[
-                        // Tab 1: Trade History (Closed Trades)
+                        // Tab 2: Trade History (Closed Trades)
+                        _buildDisciplineScorecard(),
+                        const SizedBox(height: 8),
                         if (closed.isNotEmpty)
                           _buildHistoryFilterBar(closed.length, wins.length, closed.length - wins.length),
 
@@ -786,6 +991,10 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
     final date = (t['opened_at'] ?? '').toString().split('T').first;
     final tradeCurrency = (t['currency'] ?? (_activeProfileMode == 'live' ? 'THB' : 'USD')).toString().toUpperCase();
     final currSym = tradeCurrency == 'THB' ? '฿' : '\$';
+    final aiReview = t['ai_review']?.toString() ?? '';
+    final executionRating = (t['execution_rating'] as num?)?.toInt() ?? 5;
+    final lessons = t['lessons']?.toString() ?? '';
+    final tags = (t['tags'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? <String>[];
 
     return _TradeCard(
       id: id,
@@ -803,11 +1012,16 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
       rr: 2.3,
       date: date,
       currSym: currSym,
+      aiReview: aiReview,
+      executionRating: executionRating,
+      lessons: lessons,
+      tags: tags,
       onClose: () => _closeTrade(id),
+      onAudit: () => _showTradeAuditModal(context, t),
     );
   }
 
-  Widget _buildTabsHeader(int openCount, int closedCount) {
+  Widget _buildTabsHeader(int openCount, int pendingCount, int closedCount) {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 6),
       padding: const EdgeInsets.all(4),
@@ -825,7 +1039,7 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
               onTap: () => setState(() => _selectedTab = 0),
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 150),
-                padding: const EdgeInsets.symmetric(vertical: 9),
+                padding: const EdgeInsets.symmetric(vertical: 8),
                 decoration: BoxDecoration(
                   color: _selectedTab == 0 ? const Color(0xFF00E5FF).withValues(alpha: 0.15) : Colors.transparent,
                   borderRadius: BorderRadius.circular(8),
@@ -836,28 +1050,28 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                   children: [
                     Icon(
                       Icons.bolt,
-                      size: 16,
+                      size: 14,
                       color: _selectedTab == 0 ? const Color(0xFF00E5FF) : Colors.white54,
                     ),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: 4),
                     Text(
-                      'Open Positions',
+                      'Open',
                       style: TextStyle(
-                        fontSize: 13,
+                        fontSize: 12,
                         fontWeight: FontWeight.bold,
                         color: _selectedTab == 0 ? const Color(0xFF00E5FF) : Colors.white70,
                       ),
                     ),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: 4),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                       decoration: BoxDecoration(
                         color: openCount > 0 ? AppColors.bullish.withValues(alpha: 0.25) : const Color(0xFF252540),
-                        borderRadius: BorderRadius.circular(10),
+                        borderRadius: BorderRadius.circular(8),
                         border: openCount > 0 ? Border.all(color: AppColors.bullish.withValues(alpha: 0.6), width: 0.8) : null,
                       ),
                       child: Text(
-                        '$openCount Active',
+                        '$openCount',
                         style: TextStyle(
                           fontSize: 10,
                           fontWeight: FontWeight.bold,
@@ -870,46 +1084,99 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
               ),
             ),
           ),
-          const SizedBox(width: 6),
-          // Tab 1: Trade History
+          const SizedBox(width: 4),
+          // Tab 1: Pending Orders
           Expanded(
             child: InkWell(
               borderRadius: BorderRadius.circular(8),
               onTap: () => setState(() => _selectedTab = 1),
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 150),
-                padding: const EdgeInsets.symmetric(vertical: 9),
+                padding: const EdgeInsets.symmetric(vertical: 8),
                 decoration: BoxDecoration(
-                  color: _selectedTab == 1 ? const Color(0xFF5CA3FF).withValues(alpha: 0.15) : Colors.transparent,
+                  color: _selectedTab == 1 ? const Color(0xFFFFD700).withValues(alpha: 0.15) : Colors.transparent,
                   borderRadius: BorderRadius.circular(8),
-                  border: _selectedTab == 1 ? Border.all(color: const Color(0xFF5CA3FF), width: 1.2) : null,
+                  border: _selectedTab == 1 ? Border.all(color: const Color(0xFFFFD700), width: 1.2) : null,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.hourglass_top,
+                      size: 14,
+                      color: _selectedTab == 1 ? const Color(0xFFFFD700) : Colors.white54,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Pending',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: _selectedTab == 1 ? const Color(0xFFFFD700) : Colors.white70,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: pendingCount > 0 ? const Color(0xFFFFD700).withValues(alpha: 0.25) : const Color(0xFF252540),
+                        borderRadius: BorderRadius.circular(8),
+                        border: pendingCount > 0 ? Border.all(color: const Color(0xFFFFD700).withValues(alpha: 0.8), width: 0.8) : null,
+                      ),
+                      child: Text(
+                        '$pendingCount',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: pendingCount > 0 ? const Color(0xFFFFD700) : Colors.white54,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          // Tab 2: Trade History
+          Expanded(
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => setState(() => _selectedTab = 2),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(
+                  color: _selectedTab == 2 ? const Color(0xFF5CA3FF).withValues(alpha: 0.15) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8),
+                  border: _selectedTab == 2 ? Border.all(color: const Color(0xFF5CA3FF), width: 1.2) : null,
                 ),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Icon(
                       Icons.history,
-                      size: 16,
-                      color: _selectedTab == 1 ? const Color(0xFF5CA3FF) : Colors.white54,
+                      size: 14,
+                      color: _selectedTab == 2 ? const Color(0xFF5CA3FF) : Colors.white54,
                     ),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: 4),
                     Text(
-                      'Trade History',
+                      'History',
                       style: TextStyle(
-                        fontSize: 13,
+                        fontSize: 12,
                         fontWeight: FontWeight.bold,
-                        color: _selectedTab == 1 ? const Color(0xFF5CA3FF) : Colors.white70,
+                        color: _selectedTab == 2 ? const Color(0xFF5CA3FF) : Colors.white70,
                       ),
                     ),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: 4),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                       decoration: BoxDecoration(
                         color: const Color(0xFF252540),
-                        borderRadius: BorderRadius.circular(10),
+                        borderRadius: BorderRadius.circular(8),
                       ),
                       child: Text(
-                        '$closedCount Closed',
+                        '$closedCount',
                         style: const TextStyle(
                           fontSize: 10,
                           fontWeight: FontWeight.bold,
@@ -967,6 +1234,391 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildDisciplineScorecard() {
+    final sc = _scorecardData ?? {};
+    final score = (sc['discipline_score'] as num?)?.toInt() ?? 95;
+    final planPct = (sc['plan_adherence_pct'] as num?)?.toDouble() ?? 100.0;
+    final avgRating = (sc['avg_execution_rating'] as num?)?.toDouble() ?? 5.0;
+    final winRate = (sc['win_rate'] as num?)?.toDouble() ?? 100.0;
+    final avgRr = (sc['avg_rr'] as num?)?.toDouble() ?? 2.35;
+    final bestSetups = (sc['best_setups'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? ['Order Block Retest', 'Liquidity Sweep'];
+
+    final isGreat = score >= 85;
+    final isGood = score >= 70 && score < 85;
+    final scoreColor = isGreat ? AppColors.bullish : (isGood ? const Color(0xFFFFD700) : AppColors.bearish);
+    final scoreBadge = isGreat ? '🛡️ Strict Institutional Compliance' : (isGood ? '⚖️ Moderate Discipline' : '⚠️ Rule Leakage Warning');
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF141926),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: scoreColor.withValues(alpha: 0.4), width: 1.2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.psychology, size: 16, color: scoreColor),
+                  const SizedBox(width: 6),
+                  const Text(
+                    'DISCIPLINE & EXECUTION SCORECARD',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white70, letterSpacing: 0.5),
+                  ),
+                ],
+              ),
+              InkWell(
+                onTap: _fetchScorecard,
+                child: const Row(
+                  children: [
+                    Icon(Icons.refresh, size: 12, color: Color(0xFF93C5FD)),
+                    SizedBox(width: 2),
+                    Text('Sync', style: TextStyle(fontSize: 10, color: Color(0xFF93C5FD), fontWeight: FontWeight.w600)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text(
+                '$score',
+                style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: scoreColor, fontFamily: 'monospace'),
+              ),
+              const Text(' / 100', style: TextStyle(fontSize: 12, color: Colors.white38)),
+              const SizedBox(width: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: scoreColor.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: scoreColor.withValues(alpha: 0.6), width: 0.8),
+                ),
+                child: Text(
+                  scoreBadge,
+                  style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.bold, color: scoreColor),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: (score / 100.0).clamp(0.0, 1.0),
+              backgroundColor: const Color(0xFF232A38),
+              valueColor: AlwaysStoppedAnimation<Color>(scoreColor),
+              minHeight: 5,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              _scorecardMiniStat('Plan Followed', '${planPct.toStringAsFixed(0)}%', AppColors.bullish),
+              _scorecardMiniStat('Win Rate', '${winRate.toStringAsFixed(0)}%', AppColors.bullish),
+              _scorecardMiniStat('Avg R:R', '${avgRr.toStringAsFixed(2)}R', const Color(0xFFFFD700)),
+              _scorecardMiniStat('AI Rating', '${avgRating.toStringAsFixed(1)} ⭐', const Color(0xFF00E5FF)),
+            ],
+          ),
+          if (bestSetups.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            const Divider(height: 1, color: Color(0xFF222938)),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                const Text('Top Edge: ', style: TextStyle(fontSize: 10, color: Colors.white38)),
+                Expanded(
+                  child: Wrap(
+                    spacing: 4,
+                    runSpacing: 2,
+                    children: bestSetups.map((s) {
+                      return Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1E283D),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: const Color(0xFF334466), width: 0.6),
+                        ),
+                        child: Text(s, style: const TextStyle(fontSize: 8.5, color: Color(0xFF93C5FD), fontWeight: FontWeight.w600)),
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _scorecardMiniStat(String label, String value, Color color) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: const TextStyle(fontSize: 9, color: Colors.white38)),
+        const SizedBox(height: 2),
+        Text(value, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: color, fontFamily: 'monospace')),
+      ],
+    );
+  }
+
+  void _showTradeAuditModal(BuildContext context, Map<String, dynamic> trade) {
+    final sym = trade['symbol'] ?? 'BTC/USDT';
+    final dir = (trade['direction'] ?? 'long').toString().toUpperCase();
+    final pnl = ((trade['pnl'] ?? 0.0) as num).toDouble();
+    final pnlPct = ((trade['pnl_pct'] ?? 0.0) as num).toDouble();
+    final isWin = pnl >= 0;
+    final color = isWin ? AppColors.bullish : AppColors.bearish;
+    final rating = (trade['execution_rating'] as num?)?.toInt() ?? 5;
+    final aiReview = trade['ai_review']?.toString() ?? 'การเทรดนี้เป็นไปตามระบบบริหารความเสี่ยงและกฎการเข้าออเดอร์';
+    final lessons = trade['lessons']?.toString() ?? 'รักษาวินัยตามแผนอย่างสม่ำเสมอ';
+    final tags = (trade['tags'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? <String>[];
+    final entry = (trade['entry'] as num?)?.toDouble() ?? 0.0;
+    final closeP = (trade['close_price'] as num?)?.toDouble() ?? entry;
+    final sl = (trade['stop_loss'] as num?)?.toDouble() ?? 0.0;
+    final tp = (trade['take_profit'] as num?)?.toDouble() ?? 0.0;
+    final tradeId = trade['id']?.toString() ?? '';
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF10141E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 16,
+                right: 16,
+                top: 16,
+                bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.psychology, size: 20, color: Color(0xFF00E5FF)),
+                          const SizedBox(width: 8),
+                          Text(
+                            'AI Post-Trade Audit ($sym)',
+                            style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 18, color: Colors.white54),
+                        onPressed: () => Navigator.pop(ctx),
+                      ),
+                    ],
+                  ),
+                  const Divider(color: Color(0xFF222938)),
+                  const SizedBox(height: 6),
+
+                  // Execution Rating & Realized Result
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF161C2A),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: color.withValues(alpha: 0.4), width: 1),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('EXECUTION RATING', style: TextStyle(fontSize: 9.5, color: Colors.white38, fontWeight: FontWeight.bold)),
+                            const SizedBox(height: 4),
+                            Row(
+                              children: [
+                                Row(
+                                  children: List.generate(
+                                    5,
+                                    (i) => Icon(
+                                      i < rating ? Icons.star : Icons.star_border,
+                                      size: 16,
+                                      color: const Color(0xFFFFD700),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Text('$rating / 5', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFFFFD700))),
+                              ],
+                            ),
+                          ],
+                        ),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            const Text('REALIZED PNL', style: TextStyle(fontSize: 9.5, color: Colors.white38, fontWeight: FontWeight.bold)),
+                            const SizedBox(height: 4),
+                            Text(
+                              '${isWin ? '+' : ''}\$${pnl.toStringAsFixed(2)} (${isWin ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)',
+                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: color, fontFamily: 'monospace'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // Tags
+                  if (tags.isNotEmpty)
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: tags.map((t) {
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF232E45),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: const Color(0xFF3B4D72), width: 0.8),
+                          ),
+                          child: Text(t, style: const TextStyle(fontSize: 10.5, color: Color(0xFF93C5FD), fontWeight: FontWeight.bold)),
+                        );
+                      }).toList(),
+                    ),
+                  const SizedBox(height: 10),
+
+                  // Cognitive AI Review
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF141926),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFF2E384D)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.smart_toy_outlined, size: 14, color: Color(0xFF00E5FF)),
+                            SizedBox(width: 6),
+                            Text('Institutional AI Critique', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          aiReview,
+                          style: const TextStyle(fontSize: 12, color: Colors.white, height: 1.4),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // Lessons Learned
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1A1A28),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFFFFD700).withValues(alpha: 0.3)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.lightbulb_outline, size: 14, color: Color(0xFFFFD700)),
+                            SizedBox(width: 6),
+                            Text('Key Lesson Learned', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFFFFD700))),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          lessons,
+                          style: const TextStyle(fontSize: 12, color: Colors.white70, height: 1.4),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+
+                  // Price Parameters Summary
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      _auditParamItem('Side', dir, color),
+                      _auditParamItem('Entry', '\$${entry.toStringAsFixed(2)}', Colors.white70),
+                      _auditParamItem('Exit', '\$${closeP.toStringAsFixed(2)}', Colors.white),
+                      _auditParamItem('SL', '\$${sl.toStringAsFixed(2)}', AppColors.bearish),
+                      _auditParamItem('TP', '\$${tp.toStringAsFixed(2)}', AppColors.bullish),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+
+                  // Regenerate Review Button
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: () async {
+                        try {
+                          await AppApi.dio.post(AppApi.url('/api/v1/journal/entries/$tradeId/ai-review'));
+                          await _fetchTrades();
+                          await _fetchScorecard();
+                          if (ctx.mounted) Navigator.pop(ctx);
+                        } catch (_) {}
+                      },
+                      icon: const Icon(Icons.refresh, size: 14, color: Color(0xFF93C5FD)),
+                      label: const Text('🔄 Re-Audit Trade with AI', style: TextStyle(color: Color(0xFF93C5FD), fontSize: 12, fontWeight: FontWeight.bold)),
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: Color(0xFF3B4D72)),
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _auditParamItem(String label, String value, Color color) {
+    return Column(
+      children: [
+        Text(label, style: const TextStyle(fontSize: 9.5, color: Colors.white38)),
+        const SizedBox(height: 2),
+        Text(value, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: color, fontFamily: 'monospace')),
+      ],
     );
   }
 
@@ -1418,10 +2070,13 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
 }
 
 class _TradeCard extends StatelessWidget {
-  final String id, tag, symbol, direction, date, status, closeReason;
+  final String id, tag, symbol, direction, date, status, closeReason, aiReview, lessons;
+  final int executionRating;
+  final List<String> tags;
   final double entry, livePrice, closePrice, size, pnl, pnlUsd, rr;
   final String currSym;
   final VoidCallback onClose;
+  final VoidCallback? onAudit;
 
   const _TradeCard({
     required this.id,
@@ -1439,7 +2094,12 @@ class _TradeCard extends StatelessWidget {
     required this.rr,
     required this.date,
     this.currSym = '\$',
+    this.aiReview = '',
+    this.executionRating = 5,
+    this.lessons = '',
+    this.tags = const [],
     required this.onClose,
+    this.onAudit,
   });
 
   String _formatPrice(double price, String sym) {
@@ -1459,16 +2119,20 @@ class _TradeCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isWin = pnlUsd >= 0;
+    final isPending = status == 'pending';
     final isOpen = status == 'open';
+    final isWin = pnlUsd >= 0;
     final isLong = direction == 'LONG';
     final sideColor = isLong ? AppColors.bullish : AppColors.bearish;
-    final pnlColor = isWin ? AppColors.bullish : AppColors.bearish;
+    final pnlColor = isPending ? const Color(0xFFFFD700) : (isWin ? AppColors.bullish : AppColors.bearish);
 
     // Determine status badge text and color
     String statusLabel = '● OPEN';
     Color statusColor = const Color(0xFF00E5FF);
-    if (!isOpen) {
+    if (isPending) {
+      statusLabel = '⏳ PENDING';
+      statusColor = const Color(0xFFFFD700);
+    } else if (!isOpen) {
       if (closeReason.contains('TP')) {
         statusLabel = '🎯 TP HIT';
         statusColor = AppColors.bullish;
@@ -1485,23 +2149,26 @@ class _TradeCard extends StatelessWidget {
     }
 
     final exitP = closePrice > 0 ? closePrice : livePrice;
+    final distPct = entry > 0 ? ((livePrice - entry) / entry * 100).abs() : 0.0;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Expanded(
-                  child: Row(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: (!isOpen && !isPending) ? onAudit : null,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       // Direction Badge
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                         decoration: BoxDecoration(
                           color: sideColor.withValues(alpha: 0.15),
                           borderRadius: BorderRadius.circular(4),
@@ -1509,17 +2176,14 @@ class _TradeCard extends StatelessWidget {
                         ),
                         child: Text(direction, style: TextStyle(color: sideColor, fontWeight: FontWeight.bold, fontSize: 11)),
                       ),
-                      const SizedBox(width: 8),
-                      Flexible(
-                        child: Text(
-                          symbol,
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                      const SizedBox(width: 6),
+                      Text(
+                        symbol,
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                       ),
                       const SizedBox(width: 6),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
                         decoration: BoxDecoration(
                           color: statusColor.withValues(alpha: 0.15),
                           borderRadius: BorderRadius.circular(4),
@@ -1536,66 +2200,140 @@ class _TradeCard extends StatelessWidget {
                       ),
                     ],
                   ),
-                ),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: pnlColor.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: pnlColor, width: 0.8),
-                  ),
-                  child: Text(
-                    '${isWin ? '+' : ''}$currSym${pnlUsd.toStringAsFixed(2)} (${isWin ? '+' : ''}${pnl.toStringAsFixed(2)}%)',
-                    style: TextStyle(color: pnlColor, fontWeight: FontWeight.bold, fontSize: 11, fontFamily: 'monospace'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '$tag  •  Size: $size',
-                    style: const TextStyle(fontSize: 11, color: Color(0xFF93C5FD), fontWeight: FontWeight.w600),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text(date, style: const TextStyle(fontSize: 10, color: Colors.white38)),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    isOpen
-                        ? 'Entry: \$${_formatPrice(entry, symbol)}  ➜  Live: \$${_formatPrice(livePrice, symbol)}'
-                        : 'Entry: \$${_formatPrice(entry, symbol)}  ➜  Exit: \$${_formatPrice(exitP, symbol)}${closeReason.isNotEmpty ? ' ($closeReason)' : ''}',
-                    style: const TextStyle(fontSize: 11, color: Colors.white70, fontFamily: 'monospace'),
-                  ),
-                ),
-                if (isOpen) ...[
-                  const SizedBox(width: 8),
-                  InkWell(
-                    onTap: onClose,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: AppColors.bearish.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(4),
-                        border: Border.all(color: AppColors.bearish, width: 0.8),
-                      ),
-                      child: const Text('Close ✕', style: TextStyle(color: AppColors.bearish, fontSize: 11, fontWeight: FontWeight.bold)),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: pnlColor.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: pnlColor, width: 0.8),
+                    ),
+                    child: Text(
+                      isPending
+                          ? 'รอ Match (ห่าง ${distPct.toStringAsFixed(2)}%)'
+                          : '${isWin ? '+' : ''}$currSym${pnlUsd.toStringAsFixed(2)} (${isWin ? '+' : ''}${pnl.toStringAsFixed(2)}%)',
+                      style: TextStyle(color: pnlColor, fontWeight: FontWeight.bold, fontSize: 11, fontFamily: 'monospace'),
                     ),
                   ),
                 ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '$tag  •  Size: $size',
+                      style: const TextStyle(fontSize: 11, color: Color(0xFF93C5FD), fontWeight: FontWeight.w600),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(date, style: const TextStyle(fontSize: 10, color: Colors.white38)),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      isPending
+                          ? 'เป้าเข้า (Entry): \$${_formatPrice(entry, symbol)}  ➜  ตลาดสด: \$${_formatPrice(livePrice, symbol)}'
+                          : (isOpen
+                              ? 'Entry: \$${_formatPrice(entry, symbol)}  ➜  Live: \$${_formatPrice(livePrice, symbol)}'
+                              : 'Entry: \$${_formatPrice(entry, symbol)}  ➜  Exit: \$${_formatPrice(exitP, symbol)}${closeReason.isNotEmpty ? ' ($closeReason)' : ''}'),
+                      style: const TextStyle(fontSize: 11, color: Colors.white70, fontFamily: 'monospace'),
+                    ),
+                  ),
+                  if (isOpen || isPending) ...[
+                    const SizedBox(width: 8),
+                    InkWell(
+                      onTap: onClose,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: AppColors.bearish.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: AppColors.bearish, width: 0.8),
+                        ),
+                        child: Text(
+                          isPending ? 'Cancel ✕' : 'Close ✕',
+                          style: const TextStyle(color: AppColors.bearish, fontSize: 11, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              // AI Review & Execution Rating for Closed Trades
+              if (!isOpen && !isPending) ...[
+                const SizedBox(height: 8),
+                const Divider(height: 1, color: Color(0xFF222938)),
+                const SizedBox(height: 6),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF141926),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: const Color(0xFF2E384D), width: 0.8),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.smart_toy_outlined, size: 13, color: Color(0xFF00E5FF)),
+                          const SizedBox(width: 4),
+                          const Text('AI Cognitive Review:', style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))),
+                          const Spacer(),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: List.generate(
+                              5,
+                              (i) => Icon(
+                                i < executionRating ? Icons.star : Icons.star_border,
+                                size: 12,
+                                color: const Color(0xFFFFD700),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          Text('$executionRating/5', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFFFFD700))),
+                        ],
+                      ),
+                      if (aiReview.isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          aiReview,
+                          style: const TextStyle(fontSize: 11, color: Colors.white70, height: 1.3),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      if (tags.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 4,
+                          runSpacing: 4,
+                          children: tags.map((tg) {
+                            return Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF252540),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(color: const Color(0xFF3E4C6D), width: 0.6),
+                              ),
+                              child: Text(tg, style: const TextStyle(fontSize: 9, color: Color(0xFF93C5FD), fontWeight: FontWeight.w600)),
+                            );
+                          }).toList(),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
               ],
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

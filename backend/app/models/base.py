@@ -1,4 +1,4 @@
-﻿"""SQLAlchemy Base and Database Session setup."""
+"""SQLAlchemy Base and Database Session setup."""
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase

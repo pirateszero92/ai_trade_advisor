@@ -1,4 +1,4 @@
-﻿"""Prompt Version ORM Model."""
+"""Prompt Version ORM Model."""
 
 from datetime import datetime
 import uuid

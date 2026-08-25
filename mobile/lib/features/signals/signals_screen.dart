@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
+import '../../core/api/ws_client.dart';
 import '../settings/settings_screen.dart';
 
 class SignalsScreen extends ConsumerStatefulWidget {
@@ -25,18 +26,69 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
   int _tagCounter = 101;
   String _activeMode = 'paper'; // 'live' or 'paper'
 
+  StreamSubscription<Map<String, dynamic>>? _wsPriceSub;
+  StreamSubscription<Map<String, dynamic>>? _wsSignalSub;
+  StreamSubscription<WsConnectionState>? _wsStateSub;
+  WsConnectionState _wsState = WsConnectionState.disconnected;
+
   @override
   void initState() {
     super.initState();
     final isPaper = ref.read(settingsProvider).isPaperMode;
     _activeMode = isPaper ? 'paper' : 'live';
+
+    _wsState = AppWebSocketClient.instance.currentState;
+    _wsStateSub = AppWebSocketClient.instance.connectionStateStream.listen((state) {
+      if (mounted) setState(() => _wsState = state);
+    });
+    _wsPriceSub = AppWebSocketClient.instance.priceStream.listen(_onWsPriceTick);
+    _wsSignalSub = AppWebSocketClient.instance.signalStream.listen(_onWsSignalAlert);
+
     _fetchSignals();
     _fetchPositions();
     _startLiveTicker();
   }
 
+  void _onWsPriceTick(Map<String, dynamic> ticks) {
+    if (!mounted || ticks.isEmpty) return;
+    setState(() {
+      for (var entry in ticks.entries) {
+        final val = entry.value;
+        if (val is Map<String, dynamic>) {
+          final p = (val['price'] as num?)?.toDouble();
+          if (p != null && p > 0) {
+            final norm = _normalizeSym(entry.key);
+            for (var s in _signals) {
+              if (_normalizeSym(s['symbol']?.toString() ?? '') == norm) {
+                s['live_price'] = p;
+                if (val['change_24h'] != null) {
+                  s['change_24h'] = (val['change_24h'] as num).toDouble();
+                }
+              }
+            }
+          }
+        }
+      }
+    });
+  }
+
+  void _onWsSignalAlert(Map<String, dynamic> msg) {
+    if (!mounted) return;
+    final payload = msg['data'] as Map<String, dynamic>? ?? msg;
+    final sym = payload['symbol']?.toString();
+    if (sym != null && sym.isNotEmpty) {
+      setState(() {
+        _signals.removeWhere((s) => s['symbol'] == sym);
+        _signals.insert(0, payload);
+      });
+    }
+  }
+
   @override
   void dispose() {
+    _wsPriceSub?.cancel();
+    _wsSignalSub?.cancel();
+    _wsStateSub?.cancel();
     _liveTimer?.cancel();
     super.dispose();
   }
@@ -82,39 +134,34 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
       final prices = resp.data['prices'] as Map<String, dynamic>? ?? {};
       if (prices.isEmpty || !mounted) return;
 
+      final priceMap = <String, double>{};
+      for (var entry in prices.entries) {
+        final pData = entry.value as Map<String, dynamic>;
+        final p = (pData['price'] as num?)?.toDouble();
+        if (p != null && p > 0) {
+          priceMap[_normalizeSym(entry.key)] = p;
+        }
+      }
+
       setState(() {
         for (var s in _signals) {
-          final rawSym = s['symbol']?.toString() ?? '';
-          final normSym = _normalizeSym(rawSym);
-          for (var entry in prices.entries) {
-            if (entry.key == rawSym || _normalizeSym(entry.key) == normSym) {
-              final pData = entry.value as Map<String, dynamic>;
-              final p = (pData['price'] as num?)?.toDouble();
-              if (p != null && p > 0) {
-                s['live_price'] = p;
-              }
-              break;
-            }
+          final normSym = _normalizeSym(s['symbol']?.toString() ?? '');
+          final p = priceMap[normSym];
+          if (p != null && p > 0) {
+            s['live_price'] = p;
           }
         }
 
         for (var p in _positions) {
-          final rawSym = p['symbol']?.toString() ?? '';
-          final normSym = _normalizeSym(rawSym);
-          for (var entry in prices.entries) {
-            if (entry.key == rawSym || _normalizeSym(entry.key) == normSym) {
-              final pData = entry.value as Map<String, dynamic>;
-              final price = (pData['price'] as num?)?.toDouble();
-              if (price != null && price > 0) {
-                p['live_price'] = price;
-                final entryPrice = (p['entry'] as num?)?.toDouble() ?? price;
-                final isLong = (p['direction'] ?? 'long').toString().toLowerCase() == 'long';
-                final size = (p['position_size'] ?? p['size'] ?? 1.0) as num;
-                p['live_pnl'] = isLong ? (price - entryPrice) * size.toDouble() : (entryPrice - price) * size.toDouble();
-                p['live_pnl_pct'] = entryPrice > 0 ? (isLong ? (price - entryPrice) / entryPrice : (entryPrice - price) / entryPrice) * 100 : 0.0;
-              }
-              break;
-            }
+          final normSym = _normalizeSym(p['symbol']?.toString() ?? '');
+          final price = priceMap[normSym];
+          if (price != null && price > 0) {
+            p['live_price'] = price;
+            final entryPrice = (p['entry'] as num?)?.toDouble() ?? price;
+            final isLong = (p['direction'] ?? 'long').toString().toLowerCase() == 'long';
+            final size = (p['position_size'] ?? p['size'] ?? 1.0) as num;
+            p['live_pnl'] = isLong ? (price - entryPrice) * size.toDouble() : (entryPrice - price) * size.toDouble();
+            p['live_pnl_pct'] = entryPrice > 0 ? (isLong ? (price - entryPrice) / entryPrice : (entryPrice - price) / entryPrice) * 100 : 0.0;
           }
         }
       });
@@ -280,21 +327,25 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
         rawSl: rawSl,
         rawTp: rawTp,
         signalRR: signalRR,
-        tagCounter: _tagCounter++,
+        tagCounter: _tagCounter,
         formatPrice: _formatPrice,
       ),
     );
 
     if (result != null && result['confirmed'] == true) {
+      final tagId = _tagCounter++;
       final entry = result['entry'] as double;
       final safeSl = result['stop_loss'] as double;
       final safeTp = result['take_profit'] as double;
       final selectedQty = result['position_size'] as double;
       final entryMode = result['entry_mode'] as String;
-      final tag = '#${sym.replaceAll('/', '')}-${dir.toUpperCase()}-${entryMode == 'recommended' ? 'LIM' : 'MKT'}-$_tagCounter';
+      final tag = '#${sym.replaceAll('/', '')}-${dir.toUpperCase()}-${entryMode == 'recommended' ? 'LIM' : 'MKT'}-$tagId';
 
       try {
         final dio = AppApi.dio;
+        final signalEx = signal['exchange'] as String?;
+        final targetExchange = signalEx ?? (_activeMode == 'live' ? 'innovestx' : 'binance');
+
         final resp = await dio.post(
           AppApi.url('/api/v1/trades/place'),
           data: {
@@ -307,7 +358,7 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
             'size': selectedQty,
             'tag': tag,
             'mode': _activeMode,
-            'exchange': _activeMode == 'live' ? 'innovestx' : 'binance',
+            'exchange': targetExchange,
           },
         );
 
@@ -549,6 +600,46 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
         ),
         backgroundColor: AppColors.surface,
         actions: [
+          // Live WebSocket Status Badge
+          Container(
+            margin: const EdgeInsets.symmetric(vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+            decoration: BoxDecoration(
+              color: _wsState == WsConnectionState.connected
+                  ? AppColors.bullish.withValues(alpha: 0.15)
+                  : const Color(0xFFFFD700).withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                color: _wsState == WsConnectionState.connected
+                    ? AppColors.bullish.withValues(alpha: 0.6)
+                    : const Color(0xFFFFD700).withValues(alpha: 0.6),
+                width: 0.8,
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: _wsState == WsConnectionState.connected ? AppColors.bullish : const Color(0xFFFFD700),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  _wsState == WsConnectionState.connected ? '⚡ WS' : '🟡 Poll',
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.bold,
+                    color: _wsState == WsConnectionState.connected ? AppColors.bullish : const Color(0xFFFFD700),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 6),
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Refresh Signals',
@@ -845,10 +936,11 @@ class _SignalCard extends StatelessWidget {
     final isLong = direction == 'LONG';
     final color = isLong ? AppColors.bullish : AppColors.bearish;
 
-    final isGradeA = confluence >= 80;
-    final isGradeB = confluence >= 65 && confluence < 80;
-    final gradeText = isGradeA ? 'GRADE A+' : (isGradeB ? 'GRADE B' : 'GRADE C (WAIT)');
-    final gradeColor = isGradeA ? AppColors.bullish : (isGradeB ? AppColors.neutral : const Color(0xFFFF9900));
+    final isSupremeA = confluence >= 85;
+    final isGradeA = confluence >= 70;
+    final isGradeB = confluence >= 55 && confluence < 70;
+    final gradeText = isSupremeA ? '🌟 SUPREME A+' : (isGradeA ? '💎 GRADE A' : (isGradeB ? '⚖️ GRADE B' : '⏳ WAIT'));
+    final gradeColor = isSupremeA ? const Color(0xFF00E5FF) : (isGradeA ? AppColors.bullish : (isGradeB ? AppColors.neutral : const Color(0xFFFF9900)));
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -1080,7 +1172,7 @@ class _SignalCard extends StatelessWidget {
                     ),
                     Expanded(
                       flex: 18,
-                      child: _levelInfo('R:R', '${rr ?? 2.2}R', AppColors.neutral),
+                      child: _levelInfo('R:R', '${(rr != null && rr! > 0) ? rr : 2.2}R', AppColors.neutral),
                     ),
                   ],
                 ),
@@ -1166,10 +1258,23 @@ class _SignalCard extends StatelessWidget {
             const SizedBox(height: 10),
             Row(
               children: [
-                const Text('Institutional Confluence: ', style: TextStyle(fontSize: 11, color: Colors.white38)),
+                const Text('Confluence: ', style: TextStyle(fontSize: 11, color: Colors.white38)),
                 Text(
                   '$confluence/100',
                   style: TextStyle(fontSize: 11, color: gradeColor, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                  decoration: BoxDecoration(
+                    color: gradeColor.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: gradeColor.withValues(alpha: 0.6), width: 0.8),
+                  ),
+                  child: Text(
+                    gradeText,
+                    style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: gradeColor),
+                  ),
                 ),
                 const Spacer(),
                 const Text('Proactive Alert ✓', style: TextStyle(fontSize: 10, color: AppColors.bullish, fontWeight: FontWeight.bold)),
@@ -1239,11 +1344,14 @@ class _OrderConfirmationDialog extends StatefulWidget {
 }
 
 class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
-  late String _entryMode; // 'recommended' or 'market'
+  late String _entryMode; // 'recommended', 'market', or 'custom'
   late double _recommendedEntry;
   late double _livePrice;
   late double _selectedRR;
   late TextEditingController _qtyController;
+  late TextEditingController _customEntryController;
+  late TextEditingController _customSlController;
+  late TextEditingController _customTpController;
   late double _selectedQty;
   Timer? _liveTimer;
 
@@ -1268,6 +1376,15 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
     final defaultQty = isStock ? 5.0 : (isForex ? 0.10 : 0.10);
     _selectedQty = defaultQty;
     _qtyController = TextEditingController(text: defaultQty.toStringAsFixed(isStock ? 0 : 2));
+
+    final isLong = widget.direction == 'long';
+    final initialSlDist = _getSlDistance(_recommendedEntry);
+    final initialSl = widget.rawSl ?? (isLong ? _recommendedEntry - initialSlDist : _recommendedEntry + initialSlDist);
+    final initialTp = widget.rawTp ?? (isLong ? _recommendedEntry + initialSlDist * _selectedRR : _recommendedEntry - initialSlDist * _selectedRR);
+
+    _customEntryController = TextEditingController(text: _recommendedEntry.toStringAsFixed(2));
+    _customSlController = TextEditingController(text: initialSl.toStringAsFixed(2));
+    _customTpController = TextEditingController(text: initialTp.toStringAsFixed(2));
 
     _startLivePricePolling();
   }
@@ -1299,10 +1416,18 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
   void dispose() {
     _liveTimer?.cancel();
     _qtyController.dispose();
+    _customEntryController.dispose();
+    _customSlController.dispose();
+    _customTpController.dispose();
     super.dispose();
   }
 
-  double get _currentEntry => _entryMode == 'recommended' ? _recommendedEntry : _livePrice;
+  double get _currentEntry {
+    if (_entryMode == 'custom') {
+      return double.tryParse(_customEntryController.text) ?? _recommendedEntry;
+    }
+    return _entryMode == 'recommended' ? _recommendedEntry : _livePrice;
+  }
 
   double _getSlDistance(double entryPrice) {
     if (widget.rawSl != null && widget.rawSl! > 0) {
@@ -1328,16 +1453,24 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
         ? [1.0, 5.0, 10.0, 50.0, 100.0]
         : (isForex ? [0.01, 0.05, 0.10, 0.50, 1.00] : [0.05, 0.10, 0.25, 0.50, 1.00]);
 
-    final entry = _currentEntry;
+    final isCustom = _entryMode == 'custom';
+    final entry = isCustom
+        ? (double.tryParse(_customEntryController.text) ?? _recommendedEntry)
+        : _currentEntry;
     final slDistance = _getSlDistance(entry);
-    final sl = isLong ? (entry - slDistance) : (entry + slDistance);
-    var tp = isLong ? (entry + slDistance * _selectedRR) : (entry - slDistance * _selectedRR);
+    final sl = isCustom
+        ? (double.tryParse(_customSlController.text) ?? (isLong ? entry - slDistance : entry + slDistance))
+        : (isLong ? (entry - slDistance) : (entry + slDistance));
+    var tp = isCustom
+        ? (double.tryParse(_customTpController.text) ?? (isLong ? entry + slDistance * _selectedRR : entry - slDistance * _selectedRR))
+        : (isLong ? (entry + slDistance * _selectedRR) : (entry - slDistance * _selectedRR));
 
-    // Forward-looking guard: ensure TP is always ahead of current live price
-    if (isLong && tp <= _livePrice && _livePrice > 0) {
-      tp = _livePrice + slDistance * _selectedRR;
-    } else if (!isLong && tp >= _livePrice && _livePrice > 0) {
-      tp = _livePrice - slDistance * _selectedRR;
+    if (!isCustom) {
+      if (isLong && tp <= _livePrice && _livePrice > 0) {
+        tp = _livePrice + slDistance * _selectedRR;
+      } else if (!isLong && tp >= _livePrice && _livePrice > 0) {
+        tp = _livePrice - slDistance * _selectedRR;
+      }
     }
 
     final posVal = entry * _selectedQty;
@@ -1345,88 +1478,95 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
     final gainAmount = (tp - entry).abs() * _selectedQty;
     final riskPct = entry > 0 ? (slDistance / entry) * 100 : 1.0;
     final gainPct = riskPct * _selectedRR;
-
-    final isThb = widget.activeMode == 'live' || sym.toUpperCase().contains('THB');
-    final currSym = isThb ? '฿' : '\$';
-    final modeBadgeText = widget.activeMode == 'live' ? '🟣 LIVE (INNOVESTX)' : '🧪 PAPER';
-    final modeBadgeColor = widget.activeMode == 'live' ? const Color(0xFF9B59B6) : const Color(0xFF00E5FF);
-
-    final diffFromLivePct = _recommendedEntry > 0 ? ((_livePrice - _recommendedEntry) / _recommendedEntry * 100) : 0.0;
+    final diffFromLivePct = _livePrice > 0 ? ((entry - _livePrice) / _livePrice) * 100 : 0.0;
 
     return AlertDialog(
-      backgroundColor: AppColors.surface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      backgroundColor: const Color(0xFF0F141E),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: (isLong ? AppColors.bullish : AppColors.bearish).withValues(alpha: 0.6),
+          width: 1.5,
+        ),
+      ),
       titlePadding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-      contentPadding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-      title: Row(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      actionsPadding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: (isLong ? AppColors.bullish : AppColors.bearish).withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: isLong ? AppColors.bullish : AppColors.bearish),
+                ),
+                child: Text(
+                  dir.toUpperCase(),
+                  style: TextStyle(
+                    color: isLong ? AppColors.bullish : AppColors.bearish,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  sym,
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E2533),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  widget.signal['timeframe']?.toString() ?? '1h',
+                  style: const TextStyle(fontSize: 11, color: AppColors.textMuted),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
           Container(
-            padding: const EdgeInsets.all(6),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
-              color: (isLong ? AppColors.bullish : AppColors.bearish).withValues(alpha: 0.2),
+              color: const Color(0xFF19202E),
               borderRadius: BorderRadius.circular(6),
             ),
-            child: Icon(
-              isLong ? Icons.arrow_upward : Icons.arrow_downward,
-              color: isLong ? AppColors.bullish : AppColors.bearish,
-              size: 18,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  'ยืนยันส่งคำสั่ง $sym (${dir.toUpperCase()})',
-                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 2),
                 Row(
                   children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                      decoration: BoxDecoration(
-                        color: modeBadgeColor.withValues(alpha: 0.2),
-                        borderRadius: BorderRadius.circular(4),
-                        border: Border.all(color: modeBadgeColor, width: 0.8),
-                      ),
-                      child: Text(
-                        modeBadgeText,
-                        style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: modeBadgeColor),
+                    const Text('โหมด: ', style: TextStyle(fontSize: 11, color: AppColors.textMuted)),
+                    Text(
+                      widget.activeMode.toUpperCase(),
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: widget.activeMode == 'live' ? AppColors.bullish : Colors.orange,
                       ),
                     ),
-                    const SizedBox(width: 6),
-                    // Real-time Live Price Indicator in Header (matches Image 3)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF00E5FF).withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(4),
-                        border: Border.all(color: const Color(0xFF00E5FF), width: 0.8),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 5,
-                            height: 5,
-                            decoration: const BoxDecoration(
-                              color: Color(0xFF00E5FF),
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            'สด ${widget.formatPrice(_livePrice, sym)}',
-                            style: const TextStyle(
-                              fontSize: 9,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xFF00E5FF),
-                              fontFamily: 'monospace',
-                            ),
-                          ),
-                        ],
+                  ],
+                ),
+                Row(
+                  children: [
+                    const Text('ตลาดสด: ', style: TextStyle(fontSize: 11, color: AppColors.textMuted)),
+                    Text(
+                      widget.formatPrice(_livePrice, sym),
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                        fontFamily: 'monospace',
                       ),
                     ),
                   ],
@@ -1447,17 +1587,15 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
             ),
             const SizedBox(height: 6),
 
-            // 2 Entry Selection Buttons: 1) Recommended (OB Zone) vs 2) Market (Live)
             Row(
               children: [
-                // 1. Recommended Position Price Button
                 Expanded(
                   child: InkWell(
                     borderRadius: BorderRadius.circular(8),
                     onTap: () => setState(() => _entryMode = 'recommended'),
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 200),
-                      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+                      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
                       decoration: BoxDecoration(
                         color: _entryMode == 'recommended'
                             ? const Color(0xFF2E82FE).withValues(alpha: 0.25)
@@ -1475,25 +1613,25 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
                             children: [
                               Icon(
                                 Icons.gps_fixed,
-                                size: 12,
+                                size: 11,
                                 color: _entryMode == 'recommended' ? const Color(0xFF5CA3FF) : Colors.white60,
                               ),
-                              const SizedBox(width: 4),
+                              const SizedBox(width: 3),
                               Text(
-                                'ราคาแนะนำ (OB)',
+                                'ราคาแนะนำ',
                                 style: TextStyle(
-                                  fontSize: 10,
+                                  fontSize: 9.5,
                                   fontWeight: FontWeight.bold,
                                   color: _entryMode == 'recommended' ? const Color(0xFF5CA3FF) : Colors.white70,
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 3),
+                          const SizedBox(height: 2),
                           Text(
                             widget.formatPrice(_recommendedEntry, sym),
                             style: TextStyle(
-                              fontSize: 13,
+                              fontSize: 11.5,
                               fontWeight: FontWeight.bold,
                               color: _entryMode == 'recommended' ? Colors.white : Colors.white70,
                               fontFamily: 'monospace',
@@ -1504,16 +1642,15 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 6),
 
-                // 2. Real-time Market Price Button
                 Expanded(
                   child: InkWell(
                     borderRadius: BorderRadius.circular(8),
                     onTap: () => setState(() => _entryMode = 'market'),
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 200),
-                      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+                      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
                       decoration: BoxDecoration(
                         color: _entryMode == 'market'
                             ? const Color(0xFF00E5FF).withValues(alpha: 0.25)
@@ -1529,26 +1666,76 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
                           Row(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              const Icon(Icons.bolt, size: 13, color: Color(0xFF00E5FF)),
-                              const SizedBox(width: 4),
+                              const Icon(Icons.bolt, size: 12, color: Color(0xFF00E5FF)),
+                              const SizedBox(width: 3),
                               Text(
-                                'ราคาตลาด (สด)',
+                                'ตลาดสด',
                                 style: TextStyle(
-                                  fontSize: 10,
+                                  fontSize: 9.5,
                                   fontWeight: FontWeight.bold,
                                   color: _entryMode == 'market' ? const Color(0xFF00E5FF) : Colors.white70,
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 3),
+                          const SizedBox(height: 2),
                           Text(
                             widget.formatPrice(_livePrice, sym),
                             style: TextStyle(
-                              fontSize: 13,
+                              fontSize: 11.5,
                               fontWeight: FontWeight.bold,
                               color: _entryMode == 'market' ? const Color(0xFF00E5FF) : Colors.white70,
                               fontFamily: 'monospace',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+
+                Expanded(
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(8),
+                    onTap: () => setState(() => _entryMode = 'custom'),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                      decoration: BoxDecoration(
+                        color: _entryMode == 'custom'
+                            ? const Color(0xFFFFB300).withValues(alpha: 0.25)
+                            : const Color(0xFF19202E),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: _entryMode == 'custom' ? const Color(0xFFFFB300) : AppColors.border,
+                          width: _entryMode == 'custom' ? 1.8 : 1.0,
+                        ),
+                      ),
+                      child: Column(
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Icon(Icons.edit, size: 11, color: Color(0xFFFFB300)),
+                              const SizedBox(width: 3),
+                              Text(
+                                'กำหนดเอง',
+                                style: TextStyle(
+                                  fontSize: 9.5,
+                                  fontWeight: FontWeight.bold,
+                                  color: _entryMode == 'custom' ? const Color(0xFFFFB300) : Colors.white70,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'Limit อิสระ',
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.bold,
+                              color: _entryMode == 'custom' ? const Color(0xFFFFD54F) : Colors.white70,
                             ),
                           ),
                         ],
@@ -1560,36 +1747,45 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
             ),
             const SizedBox(height: 8),
 
-            // Helper Info Tag
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
               decoration: BoxDecoration(
-                color: _entryMode == 'recommended' ? const Color(0xFF141D2D) : const Color(0xFF0E2229),
+                color: _entryMode == 'recommended'
+                    ? const Color(0xFF141D2D)
+                    : (_entryMode == 'custom' ? const Color(0xFF2A200B) : const Color(0xFF0E2229)),
                 borderRadius: BorderRadius.circular(6),
                 border: Border.all(
                   color: _entryMode == 'recommended'
                       ? const Color(0xFF2E82FE).withValues(alpha: 0.4)
-                      : const Color(0xFF00E5FF).withValues(alpha: 0.4),
+                      : (_entryMode == 'custom' ? const Color(0xFFFFB300).withValues(alpha: 0.4) : const Color(0xFF00E5FF).withValues(alpha: 0.4)),
                   width: 0.8,
                 ),
               ),
               child: Row(
                 children: [
                   Icon(
-                    _entryMode == 'recommended' ? Icons.info_outline : Icons.bolt,
+                    _entryMode == 'recommended'
+                        ? Icons.info_outline
+                        : (_entryMode == 'custom' ? Icons.hourglass_top : Icons.bolt),
                     size: 13,
-                    color: _entryMode == 'recommended' ? const Color(0xFF5CA3FF) : const Color(0xFF00E5FF),
+                    color: _entryMode == 'recommended'
+                        ? const Color(0xFF5CA3FF)
+                        : (_entryMode == 'custom' ? const Color(0xFFFFB300) : const Color(0xFF00E5FF)),
                   ),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
                       _entryMode == 'recommended'
                           ? 'ตั้ง Limit Order รอราคาลงมาแตะโซน OB • ตลาดสด: ${widget.formatPrice(_livePrice, sym)} (${diffFromLivePct > 0 ? '+' : ''}${diffFromLivePct.toStringAsFixed(2)}%)'
-                          : 'ส่งคำสั่งทันทีที่ราคาตลาดสด ${widget.formatPrice(_livePrice, sym)} (Real-time Live Sync)',
+                          : (_entryMode == 'custom'
+                              ? 'กำหนดราคา Limit, SL, และ TP ตามที่คุณต้องการ'
+                              : 'ส่งคำสั่งทันทีที่ราคาตลาดสด ${widget.formatPrice(_livePrice, sym)} (Real-time Live Sync)'),
                       style: TextStyle(
                         fontSize: 10,
-                        color: _entryMode == 'recommended' ? const Color(0xFF90CAF9) : const Color(0xFF80DEEA),
+                        color: _entryMode == 'recommended'
+                            ? const Color(0xFF90CAF9)
+                            : (_entryMode == 'custom' ? const Color(0xFFFFD54F) : const Color(0xFF80DEEA)),
                       ),
                     ),
                   ),
@@ -1598,35 +1794,55 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
             ),
             const SizedBox(height: 10),
 
-            // Summary 3-box Levels Card (Entry / Stop Loss / Take Profit)
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: const Color(0xFF141926),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: AppColors.border),
+            // Summary 3-box Levels Card or Custom Editable Inputs
+            if (isCustom) ...[
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF141926),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFFFFB300).withValues(alpha: 0.5)),
+                ),
+                child: Column(
+                  children: [
+                    _buildCustomPriceRow('💵 ราคาเข้า (Entry):', _customEntryController, const Color(0xFFFFB300)),
+                    const SizedBox(height: 6),
+                    _buildCustomPriceRow('🛑 จุดตัดขาดทุน (SL):', _customSlController, AppColors.bearish),
+                    const SizedBox(height: 6),
+                    _buildCustomPriceRow('🎯 เป้าทำกำไร (TP):', _customTpController, AppColors.bullish),
+                  ],
+                ),
               ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _dialogItem(
-                    _entryMode == 'recommended' ? 'Entry (แนะนำ)' : 'Entry (สด)',
-                    widget.formatPrice(entry, sym),
-                    _entryMode == 'recommended' ? const Color(0xFF5CA3FF) : Colors.white,
-                  ),
-                  _dialogItem(
-                    'Stop Loss (-${riskPct.toStringAsFixed(1)}%)',
-                    widget.formatPrice(sl, sym),
-                    AppColors.bearish,
-                  ),
-                  _dialogItem(
-                    'Take Profit (+${gainPct.toStringAsFixed(1)}%)',
-                    widget.formatPrice(tp, sym),
-                    AppColors.bullish,
-                  ),
-                ],
+            ] else ...[
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF141926),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    _dialogItem(
+                      _entryMode == 'recommended' ? 'Entry (แนะนำ)' : 'Entry (สด)',
+                      widget.formatPrice(entry, sym),
+                      _entryMode == 'recommended' ? const Color(0xFF5CA3FF) : Colors.white,
+                    ),
+                    _dialogItem(
+                      'Stop Loss (-${riskPct.toStringAsFixed(1)}%)',
+                      widget.formatPrice(sl, sym),
+                      AppColors.bearish,
+                    ),
+                    _dialogItem(
+                      'Take Profit (+${gainPct.toStringAsFixed(1)}%)',
+                      widget.formatPrice(tp, sym),
+                      AppColors.bullish,
+                    ),
+                  ],
+                ),
               ),
-            ),
+            ],
             const SizedBox(height: 10),
 
             // Target R:R Ratio Selection
@@ -1853,6 +2069,43 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
         Text(label, style: const TextStyle(fontSize: 10, color: AppColors.textMuted)),
         const SizedBox(height: 2),
         Text(val, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: col, fontFamily: 'monospace')),
+      ],
+    );
+  }
+
+  Widget _buildCustomPriceRow(String label, TextEditingController ctrl, Color col) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 110,
+          child: Text(
+            label,
+            style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: col),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Container(
+            height: 32,
+            decoration: BoxDecoration(
+              color: const Color(0xFF0F141E),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: col.withValues(alpha: 0.5), width: 0.8),
+            ),
+            child: TextField(
+              controller: ctrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: col, fontFamily: 'monospace'),
+              decoration: const InputDecoration(
+                contentPadding: EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                isDense: true,
+                border: InputBorder.none,
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+          ),
+        ),
       ],
     );
   }

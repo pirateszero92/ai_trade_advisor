@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'app/router.dart';
 import 'app/theme.dart';
 import 'core/api/api_client.dart';
+import 'core/api/ws_client.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -14,6 +15,7 @@ void main() async {
       AppApi.setBaseUrl(savedUrl);
     }
   } catch (_) {}
+  AppWebSocketClient.instance.init();
   runApp(const ProviderScope(child: AITradeAdvisorApp()));
 }
 

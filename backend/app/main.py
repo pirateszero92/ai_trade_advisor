@@ -2,10 +2,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-from app.api import signals, trades, chart, settings_api, journal_api
+from app.api import signals, trades, chart, settings_api, journal_api, briefing_api
 from app.api import chat_history_api
 from app.api.ws import router as ws_router
 from app.core.config import get_settings
+from app.engines.price_hub import price_hub
 
 
 @asynccontextmanager
@@ -15,11 +16,25 @@ async def lifespan(app: FastAPI):
     # Init SQLite chat history DB
     await chat_history_api.init_db()
     logger.info("[Chat] SQLite chat history DB initialized")
+    
+    # Start In-Memory Price Hub streaming daemon
+    try:
+        await price_hub.start_stream()
+        logger.info("[PriceHub] Central In-Memory Price Hub stream online")
+    except Exception as e:
+        logger.error(f"[STARTUP] PriceHub stream failed to start: {e}")
+
     from app.services.event_trigger import MarketMonitor
     monitor = MarketMonitor.get_instance()
-    await monitor.start()
+    try:
+        await monitor.start()
+    except Exception as e:
+        logger.error(f"[STARTUP] MarketMonitor failed to start: {e}. API running without proactive background scanning.")
+    
     yield
+    
     monitor.stop()
+    await price_hub.stop_stream()
     try:
         from app.engines.market_data import close_shared_http_client
         await close_shared_http_client()
@@ -31,8 +46,8 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="AI Trade Advisor API",
-        version="1.0.1",
-        description="SMC-based AI trading advisor",
+        version="1.0.2",
+        description="SMC-based AI trading advisor with Full-Duplex WebSocket Push Hub",
         lifespan=lifespan,
     )
     app.add_middleware(
@@ -48,11 +63,12 @@ def create_app() -> FastAPI:
     app.include_router(settings_api.router, prefix="/api/v1/settings", tags=["settings"])
     app.include_router(journal_api.router, prefix="/api/v1/journal", tags=["journal"])
     app.include_router(chat_history_api.router, prefix="/api/v1/chat", tags=["chat-history"])
+    app.include_router(briefing_api.router, prefix="/api/v1/briefing", tags=["briefing"])
     app.include_router(ws_router, prefix="/ws", tags=["websocket"])
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "version": "1.0.1"}
+        return {"status": "ok"}
 
     return app
 
@@ -62,4 +78,9 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
     cfg = get_settings()
-    uvicorn.run("app.main:app", host=cfg.api_host, port=cfg.api_port, reload=True)
+    uvicorn.run(
+        "app.main:app",
+        host=cfg.api_host,
+        port=cfg.api_port,
+        reload=(cfg.app_env == "development"),
+    )

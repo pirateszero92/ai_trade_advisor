@@ -1,4 +1,4 @@
-﻿"""Signal ORM Model."""
+"""Signal ORM Model."""
 
 from datetime import datetime
 import uuid

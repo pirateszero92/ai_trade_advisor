@@ -1,5 +1,5 @@
 {
-  "local_endpoint": "http://host.docker.internal:11434/v1",
+  "local_endpoint": "http://10.148.155.208:11434",
   "local_model": "gpt-oss:120b-cloud",
   "gemini_key": "",
   "gemini_model": "gemini-2.0-flash",
@@ -10,9 +10,9 @@
   "auto_invalidation": true,
   "target_rr": 2.0,
   "default_sl_pct": 1.0,
-  "risk_per_trade": 3.0,
-  "max_daily_loss": 9.0,
-  "max_open_positions": 6,
+  "risk_per_trade": 1.0,
+  "max_daily_loss": 3.0,
+  "max_open_positions": 3,
   "watchlist": [
     {
       "symbol": "BTC/USDT",
@@ -36,7 +36,84 @@
       "exchange": "binance"
     },
     {
-      "symbol": "EURUSD",
+      "symbol": "BNB/USDT",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "XRP/USDT",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "ADA/USDT",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "DOGE/USDT",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "AVAX/USDT",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "LINK/USDT",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "SUI/USDT",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "NEAR/USDT",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "DOT/USDT",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "PEPE/USDT",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "SHIB/USDT",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "XAUUSD",
       "timeframe": "1h",
       "htf_timeframe": "4h",
       "market_type": "forex",
@@ -44,115 +121,73 @@
     },
     {
       "symbol": "AAPL",
-      "timeframe": "1d",
-      "htf_timeframe": "1w",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
       "market_type": "stock",
       "exchange": "alpaca"
     },
     {
       "symbol": "TSLA",
-      "timeframe": "1d",
-      "htf_timeframe": "1w",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
       "market_type": "stock",
       "exchange": "alpaca"
     },
     {
       "symbol": "NVDA",
-      "timeframe": "1d",
-      "htf_timeframe": "1w",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
       "market_type": "stock",
       "exchange": "alpaca"
     },
     {
-      "symbol": "BTC/THB",
+      "symbol": "MSFT",
       "timeframe": "1h",
       "htf_timeframe": "4h",
-      "market_type": "crypto",
-      "exchange": "innovestx"
+      "market_type": "stock",
+      "exchange": "alpaca"
     },
     {
-      "symbol": "ADA/THB",
-      "timeframe": "15m",
+      "symbol": "QQQ",
+      "timeframe": "1h",
       "htf_timeframe": "4h",
-      "market_type": "crypto",
-      "exchange": "innovestx"
+      "market_type": "stock",
+      "exchange": "alpaca"
     },
     {
-      "symbol": "BNB/THB",
-      "timeframe": "15m",
+      "symbol": "SPY",
+      "timeframe": "1h",
       "htf_timeframe": "4h",
-      "market_type": "crypto",
-      "exchange": "innovestx"
+      "market_type": "stock",
+      "exchange": "alpaca"
     },
     {
-      "symbol": "ETH/THB",
-      "timeframe": "15m",
+      "symbol": "MSTR",
+      "timeframe": "1h",
       "htf_timeframe": "4h",
-      "market_type": "crypto",
-      "exchange": "innovestx"
+      "market_type": "stock",
+      "exchange": "alpaca"
     },
     {
-      "symbol": "UNI/THB",
-      "timeframe": "15m",
+      "symbol": "PLTR",
+      "timeframe": "1h",
       "htf_timeframe": "4h",
-      "market_type": "crypto",
-      "exchange": "innovestx"
+      "market_type": "stock",
+      "exchange": "alpaca"
     },
     {
-      "symbol": "SUSHI/THB",
-      "timeframe": "15m",
+      "symbol": "COIN",
+      "timeframe": "1h",
       "htf_timeframe": "4h",
-      "market_type": "crypto",
-      "exchange": "innovestx"
+      "market_type": "stock",
+      "exchange": "alpaca"
     },
     {
-      "symbol": "XRP/THB",
-      "timeframe": "15m",
+      "symbol": "AMZN",
+      "timeframe": "1h",
       "htf_timeframe": "4h",
-      "market_type": "crypto",
-      "exchange": "innovestx"
-    },
-    {
-      "symbol": "AVAX/THB",
-      "timeframe": "15m",
-      "htf_timeframe": "4h",
-      "market_type": "crypto",
-      "exchange": "innovestx"
-    },
-    {
-      "symbol": "CRV/THB",
-      "timeframe": "15m",
-      "htf_timeframe": "4h",
-      "market_type": "crypto",
-      "exchange": "innovestx"
-    },
-    {
-      "symbol": "SAND/THB",
-      "timeframe": "15m",
-      "htf_timeframe": "4h",
-      "market_type": "crypto",
-      "exchange": "innovestx"
-    },
-    {
-      "symbol": "SOL/THB",
-      "timeframe": "15m",
-      "htf_timeframe": "4h",
-      "market_type": "crypto",
-      "exchange": "innovestx"
-    },
-    {
-      "symbol": "XAUT/THB",
-      "timeframe": "15m",
-      "htf_timeframe": "4h",
-      "market_type": "crypto",
-      "exchange": "innovestx"
-    },
-    {
-      "symbol": "XAUUSD",
-      "timeframe": "15m",
-      "htf_timeframe": "4h",
-      "market_type": "forex",
-      "exchange": "mt5"
+      "market_type": "stock",
+      "exchange": "alpaca"
     }
   ]
 }

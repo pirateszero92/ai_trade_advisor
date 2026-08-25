@@ -1,4 +1,4 @@
-﻿"""Trade ORM Model."""
+"""Trade ORM Model."""
 
 from datetime import datetime
 import uuid
