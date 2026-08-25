@@ -360,37 +360,45 @@ class MarketMonitor:
                     if t.get("status") == "open" and t.get("symbol") == symbol:
                         t_dir = str(t.get("direction", "")).lower()
                         t_entry = float(t.get("entry", live_price))
-                        # Require confirmed opposite structure (score >= 65) with CHoCH and adverse price movement
-                        if t_dir == "short" and (direction == "long" and ltf_sig.choch and confluence >= 65 and live_price > t_entry):
-                            closed = auto_close_trade_sync(t["id"], "Structure Invalidation (Market turned Bullish) ⚠️", live_price)
+                        # Confirmed opposite structure (score >= 65) with CHoCH reversal
+                        if t_dir == "short" and (direction == "long" and ltf_sig.choch and confluence >= 65):
+                            is_profit = live_price < t_entry
+                            reason_msg = "Opposite Signal Early TP (Bullish Reversal) 🎯" if is_profit else "Structure Invalidation (Market turned Bullish) ⚠️"
+                            closed = auto_close_trade_sync(t["id"], reason_msg, live_price)
                             if closed:
-                                logger.info(f"⚡ AUTO CUT LOSS: {symbol} Short position closed due to confirmed bullish reversal (confluence={confluence})")
+                                pnl_val = closed.get("pnl", 0.0)
+                                logger.info(f"⚡ AUTO EXIT: {symbol} Short position closed due to confirmed bullish reversal (confluence={confluence}, PnL=${pnl_val:+.2f})")
                                 await broadcast({"type": "trade_closed", "data": closed})
                                 await self.notifier.send_signal_alert(
                                     symbol=symbol,
                                     timeframe=tf.upper(),
                                     direction="closed",
-                                    message=f"[Structure Invalidation] ปิดสถานะ SHORT {symbol} อัตโนมัติเนื่องจากโครงสร้างตลาดกลับตัวเป็น BULLISH (Confluence {confluence}/100) | PnL: ${closed.get('pnl', 0):+.2f}",
+                                    message=f"[{reason_msg}] ปิดสถานะ SHORT {symbol} อัตโนมัติเนื่องจากโครงสร้างตลาดกลับตัวเป็น BULLISH (Confluence {confluence}/100) | Realized PnL: ${pnl_val:+.2f}",
                                     confluence_score=confluence,
                                     entry=t.get("entry", 0),
                                     sl=t.get("stop_loss", 0),
                                     tp=t.get("take_profit", 0),
+                                    exit_price=live_price,
                                 )
                         # If open long and new confirmed structure is strong bearish with CHoCH
-                        elif t_dir == "long" and (direction == "short" and ltf_sig.choch and confluence >= 65 and live_price < t_entry):
-                            closed = auto_close_trade_sync(t["id"], "Structure Invalidation (Market turned Bearish) ⚠️", live_price)
+                        elif t_dir == "long" and (direction == "short" and ltf_sig.choch and confluence >= 65):
+                            is_profit = live_price > t_entry
+                            reason_msg = "Opposite Signal Early TP (Bearish Reversal) 🎯" if is_profit else "Structure Invalidation (Market turned Bearish) ⚠️"
+                            closed = auto_close_trade_sync(t["id"], reason_msg, live_price)
                             if closed:
-                                logger.info(f"⚡ AUTO CUT LOSS: {symbol} Long position closed due to confirmed bearish reversal (confluence={confluence})")
+                                pnl_val = closed.get("pnl", 0.0)
+                                logger.info(f"⚡ AUTO EXIT: {symbol} Long position closed due to confirmed bearish reversal (confluence={confluence}, PnL=${pnl_val:+.2f})")
                                 await broadcast({"type": "trade_closed", "data": closed})
                                 await self.notifier.send_signal_alert(
                                     symbol=symbol,
                                     timeframe=tf.upper(),
                                     direction="closed",
-                                    message=f"[Structure Invalidation] ปิดสถานะ LONG {symbol} อัตโนมัติเนื่องจากโครงสร้างตลาดกลับตัวเป็น BEARISH (Confluence {confluence}/100) | PnL: ${closed.get('pnl', 0):+.2f}",
+                                    message=f"[{reason_msg}] ปิดสถานะ LONG {symbol} อัตโนมัติเนื่องจากโครงสร้างตลาดกลับตัวเป็น BEARISH (Confluence {confluence}/100) | Realized PnL: ${pnl_val:+.2f}",
                                     confluence_score=confluence,
                                     entry=t.get("entry", 0),
                                     sl=t.get("stop_loss", 0),
                                     tp=t.get("take_profit", 0),
+                                    exit_price=live_price,
                                 )
 
             # 5. Calculate entry, SL, TP based on entry_mode
