@@ -44,16 +44,22 @@ def _load_runtime_settings():
             import json
             data = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
             cfg = get_settings()
+            if "provider" in data and data["provider"]:
+                _ai.active_provider = data["provider"]
+            elif "active_provider" in data and data["active_provider"]:
+                _ai.active_provider = data["active_provider"]
             if "local_endpoint" in data and data["local_endpoint"]:
                 cfg.local_llm_endpoint = data["local_endpoint"]
             if "local_model" in data and data["local_model"]:
                 cfg.local_llm_model = data["local_model"]
-            if "gemini_key" in data and data["gemini_key"]:
-                cfg.gemini_api_key = data["gemini_key"]
+            gem = data.get("gemini_api_key") or data.get("gemini_key")
+            if gem and not ("****" in gem or gem.startswith("***")):
+                cfg.gemini_api_key = gem
             if "gemini_model" in data and data["gemini_model"]:
                 cfg.gemini_model = data["gemini_model"]
-            if "openrouter_key" in data and data["openrouter_key"]:
-                cfg.openrouter_api_key = data["openrouter_key"]
+            op = data.get("openrouter_api_key") or data.get("openrouter_key")
+            if op and not ("****" in op or op.startswith("***")):
+                cfg.openrouter_api_key = op
             if "openrouter_model" in data and data["openrouter_model"]:
                 cfg.openrouter_model = data["openrouter_model"]
             if "risk_per_trade" in data and data["risk_per_trade"]:
@@ -90,8 +96,10 @@ class LLMConfigRequest(BaseModel):
     local_endpoint: Optional[str] = None
     local_model: Optional[str] = None
     gemini_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None
     gemini_model: Optional[str] = None
     openrouter_key: Optional[str] = None
+    openrouter_api_key: Optional[str] = None
     openrouter_model: Optional[str] = None
 
 
@@ -155,7 +163,7 @@ async def get_llm_config(_key: str = Depends(verify_api_key)):
     """Get active runtime LLM configuration with masked secrets."""
     cfg = get_settings()
     return {
-        "provider": "local",
+        "provider": getattr(_ai, "active_provider", "local"),
         "local_endpoint": cfg.local_llm_endpoint,
         "local_model": cfg.local_llm_model,
         "gemini_key": _mask_secret(cfg.gemini_api_key),
@@ -172,16 +180,26 @@ async def update_llm_config(req: LLMConfigRequest, _key: str = Depends(verify_ap
     """Update runtime LLM settings in memory and persist to .env."""
     cfg = get_settings()
     
+    if req.provider is not None:
+        _ai.active_provider = req.provider.strip()
     if req.local_endpoint is not None:
         cfg.local_llm_endpoint = req.local_endpoint.strip()
     if req.local_model is not None:
         cfg.local_llm_model = req.local_model.strip()
-    if req.gemini_key is not None:
-        cfg.gemini_api_key = req.gemini_key.strip()
+    
+    gem_k = req.gemini_api_key if req.gemini_api_key is not None else req.gemini_key
+    if gem_k is not None:
+        clean_gem = gem_k.strip()
+        if clean_gem and not ("****" in clean_gem or clean_gem.startswith("***")):
+            cfg.gemini_api_key = clean_gem
     if req.gemini_model is not None:
         cfg.gemini_model = req.gemini_model.strip()
-    if req.openrouter_key is not None:
-        cfg.openrouter_api_key = req.openrouter_key.strip()
+        
+    open_k = req.openrouter_api_key if req.openrouter_api_key is not None else req.openrouter_key
+    if open_k is not None:
+        clean_open = open_k.strip()
+        if clean_open and not ("****" in clean_open or clean_open.startswith("***")):
+            cfg.openrouter_api_key = clean_open
     if req.openrouter_model is not None:
         cfg.openrouter_model = req.openrouter_model.strip()
 
@@ -226,6 +244,7 @@ async def update_llm_config(req: LLMConfigRequest, _key: str = Depends(verify_ap
             except Exception:
                 pass
         current_data.update({
+            "provider": getattr(_ai, "active_provider", "local"),
             "local_endpoint": cfg.local_llm_endpoint,
             "local_model": cfg.local_llm_model,
             "gemini_key": cfg.gemini_api_key,
@@ -241,6 +260,7 @@ async def update_llm_config(req: LLMConfigRequest, _key: str = Depends(verify_ap
         "status": "ok",
         "message": "LLM configuration updated successfully",
         "current": {
+            "provider": getattr(_ai, "active_provider", "local"),
             "local_endpoint": cfg.local_llm_endpoint,
             "local_model": cfg.local_llm_model,
             "gemini_model": cfg.gemini_model,

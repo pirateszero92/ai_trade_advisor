@@ -78,6 +78,7 @@ class AIEngine:
 
     def __init__(self):
         self.cfg = get_settings()
+        self.active_provider: str = "local"
         self._system_prompt: Optional[str] = None
         self._active_prompt_file: Optional[str] = None
 
@@ -97,7 +98,10 @@ class AIEngine:
             {"role": "user", "content": context_msg},
         ]
 
-        for provider in FALLBACK_CHAIN:
+        active = getattr(self, "active_provider", "local")
+        chain = [active] + [p for p in FALLBACK_CHAIN if p != active]
+
+        for provider in chain:
             try:
                 raw = await self._dispatch(provider, messages)
                 analysis = self._parse_response(raw)
@@ -167,7 +171,10 @@ class AIEngine:
             })
         full_messages.extend(messages)
 
-        for provider in FALLBACK_CHAIN:
+        active = getattr(self, "active_provider", "local")
+        chain = [active] + [p for p in FALLBACK_CHAIN if p != active]
+
+        for provider in chain:
             try:
                 res = await self._dispatch(provider, full_messages)
                 if res and res.strip():
@@ -351,7 +358,7 @@ class AIEngine:
                 "stream": False,
             }
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=12.0) as client:
             r = await client.post(api_url, json=payload)
             if r.status_code == 200:
                 resp_data = r.json()
@@ -390,7 +397,8 @@ class AIEngine:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4))
     async def _call_gemini(self, messages: list[dict]) -> str:
-        return await self._call_gemini_custom(messages, self.cfg.gemini_api_key, self.cfg.gemini_model)
+        cfg = get_settings()
+        return await self._call_gemini_custom(messages, cfg.gemini_api_key, cfg.gemini_model)
 
     async def _call_gemini_custom(self, messages: list[dict], api_key: str, model: str) -> str:
         if not api_key:
@@ -427,7 +435,8 @@ class AIEngine:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4))
     async def _call_openrouter(self, messages: list[dict]) -> str:
-        return await self._call_openrouter_custom(messages, self.cfg.openrouter_api_key, self.cfg.openrouter_model)
+        cfg = get_settings()
+        return await self._call_openrouter_custom(messages, cfg.openrouter_api_key, cfg.openrouter_model)
 
     async def _call_openrouter_custom(self, messages: list[dict], api_key: str, model: str) -> str:
         if not api_key:

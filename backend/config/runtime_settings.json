@@ -1,5 +1,5 @@
 {
-  "local_endpoint": "http://10.148.155.208:11434",
+  "local_endpoint": "http://host.docker.internal:11434/v1",
   "local_model": "gpt-oss:120b-cloud",
   "gemini_key": "",
   "gemini_model": "gemini-2.0-flash",
@@ -10,9 +10,9 @@
   "auto_invalidation": true,
   "target_rr": 2.0,
   "default_sl_pct": 1.0,
-  "risk_per_trade": 1.0,
-  "max_daily_loss": 3.0,
-  "max_open_positions": 3,
+  "risk_per_trade": 3.0,
+  "max_daily_loss": 9.0,
+  "max_open_positions": 6,
   "watchlist": [
     {
       "symbol": "BTC/USDT",
