@@ -273,8 +273,8 @@ class SMCEngine:
             except Exception as e:
                 logger.warning(f"Error computing advanced indicators for {symbol}: {e}")
 
-            # 9. Trade setup (Limit OB zone vs Market price)
-            self._compute_trade_setup(signal, entry_mode=entry_mode)
+            # 9. Trade setup (Limit OB zone vs Market price) with dynamic ATR buffer
+            self._compute_trade_setup(signal, entry_mode=entry_mode, df=df)
 
             # 10. Confluence score (0-100 scale)
             signal.confluence = self._compute_confluence(signal)
@@ -712,10 +712,13 @@ class SMCEngine:
     # ------------------------------------------------------------------
 
     def _compute_trade_setup(
-        self, signal: SMCSignal, entry_mode: Literal["limit", "market"] = "limit"
+        self,
+        signal: SMCSignal,
+        entry_mode: Literal["limit", "market"] = "limit",
+        df: Optional[pd.DataFrame] = None,
     ) -> None:
         """
-        Derive entry, SL, TP, and R:R from detected SMC structures.
+        Derive entry, SL, TP, and R:R from detected SMC structures with dynamic ATR buffer.
         Modifies ``signal`` in-place.
         """
         price = signal.current_price
@@ -732,24 +735,36 @@ class SMCEngine:
             signal.direction = "wait"
             return
 
+        # Compute 14-period ATR for volatility-adaptive SL buffer
+        atr = 0.0
+        if df is not None and len(df) >= 14:
+            tr1 = df["high"] - df["low"]
+            tr2 = (df["high"] - df["close"].shift()).abs()
+            tr3 = (df["low"] - df["close"].shift()).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            atr = float(tr.rolling(14).mean().iloc[-1])
+
+        # Buffer: max(0.2% price, 0.25 * ATR)
+        base_buffer = max(price * 0.002, atr * 0.25) if atr > 0 else (price * 0.002)
+
         if direction == "bullish":
             signal.direction = "long"
             if entry_mode == "limit":
                 if ob and ob.direction == "bullish":
                     entry = ob.mid
-                    sl = ob.bottom * 0.998
+                    sl = ob.bottom - base_buffer
                 elif fvg and fvg.direction == "bullish":
                     entry = fvg.mid
-                    sl = fvg.bottom * 0.998
+                    sl = fvg.bottom - base_buffer
                 else:
                     entry = price
-                    sl = entry * 0.992
+                    sl = entry - max(entry * 0.008, atr * 1.2) if atr > 0 else (entry * 0.992)
             else:  # market entry
                 entry = price
-                sl = (ob.bottom * 0.998) if (ob and ob.direction == "bullish") else (entry * 0.992)
+                sl = (ob.bottom - base_buffer) if (ob and ob.direction == "bullish") else (entry - max(entry * 0.008, atr * 1.2) if atr > 0 else (entry * 0.992))
 
             if sl >= entry:
-                sl = entry * 0.992
+                sl = entry - max(entry * 0.008, atr * 1.2) if atr > 0 else (entry * 0.992)
             sl_dist = abs(entry - sl)
 
             # TP: Use Buy-side Liquidity (Equal Highs above entry) as structural target
@@ -771,19 +786,19 @@ class SMCEngine:
             if entry_mode == "limit":
                 if ob and ob.direction == "bearish":
                     entry = ob.mid
-                    sl = ob.top * 1.002
+                    sl = ob.top + base_buffer
                 elif fvg and fvg.direction == "bearish":
                     entry = fvg.mid
-                    sl = fvg.top * 1.002
+                    sl = fvg.top + base_buffer
                 else:
                     entry = price
-                    sl = entry * 1.008
+                    sl = entry + max(entry * 0.008, atr * 1.2) if atr > 0 else (entry * 1.008)
             else:  # market entry
                 entry = price
-                sl = (ob.top * 1.002) if (ob and ob.direction == "bearish") else (entry * 1.008)
+                sl = (ob.top + base_buffer) if (ob and ob.direction == "bearish") else (entry + max(entry * 0.008, atr * 1.2) if atr > 0 else (entry * 1.008))
 
             if sl <= entry:
-                sl = entry * 1.008
+                sl = entry + max(entry * 0.008, atr * 1.2) if atr > 0 else (entry * 1.008)
             sl_dist = abs(entry - sl)
 
             # TP: Use Sell-side Liquidity (Equal Lows below entry) as structural target

@@ -98,6 +98,21 @@ def auto_close_trade_sync(trade_id: str, reason: str, close_price: float) -> Opt
     return trade
 
 
+def update_trade_sl_sync(trade_id: str, new_sl: float, note: str = "") -> Optional[dict]:
+    global _trades
+    _trades = _load_trades()
+    trade = _trades.get(trade_id)
+    if not trade or trade.get("status") != "open":
+        return None
+
+    trade["stop_loss"] = round(new_sl, 6)
+    if note:
+        trade["sl_note"] = note
+    _trades[trade_id] = trade
+    _save_trades()
+    return trade
+
+
 def _load_paper_config() -> dict:
     if PAPER_CONFIG_FILE.exists():
         try:

@@ -173,7 +173,7 @@ class MarketMonitor:
             await asyncio.sleep(self.interval)
 
     async def _run_position_monitor_loop(self):
-        """Fast loop checking open positions TP/SL and live PnL every 6 seconds."""
+        """Fast high-frequency loop checking open positions TP/SL, Breakeven Shield, and live PnL every 1.5s."""
         while self.running:
             try:
                 await self._check_open_positions_tp_sl()
@@ -181,12 +181,12 @@ class MarketMonitor:
                 break
             except Exception as e:
                 logger.error(f"Error in position monitor loop: {e}")
-            await asyncio.sleep(6)
+            await asyncio.sleep(1.5)
 
     async def _check_open_positions_tp_sl(self):
-        """Auto-monitor open positions and execute TP/SL exits automatically."""
+        """Auto-monitor open positions and execute TP/SL exits & Auto-Breakeven shields automatically."""
         try:
-            from app.api.trades import get_all_trades, auto_close_trade_sync
+            from app.api.trades import get_all_trades, auto_close_trade_sync, update_trade_sl_sync
             trades_dict = get_all_trades()
             open_trades = [t for t in trades_dict.values() if t.get("status") == "open"]
             if not open_trades:
@@ -200,17 +200,24 @@ class MarketMonitor:
                 tp = float(trade.get("take_profit", 0.0))
                 trade_id = trade.get("id")
 
+                if entry <= 0:
+                    continue
+
+                sl_dist = abs(entry - sl) if sl > 0 else 0.0
+
                 # Detect correct market type
                 s_up = sym.upper().replace("/", "").replace("-", "")
                 if any(f in s_up for f in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "AUDUSD", "USDCAD"]):
                     m_type = "forex"
-                elif "/" in sym or "USDT" in s_up:
+                elif "/" in sym or "USDT" in s_up or "THB" in s_up:
                     m_type = "crypto"
                 else:
                     m_type = "stock"
 
-                # Get latest live ticker price
+                # Get latest live ticker price & extreme candle high/low for wick guard
                 current_price = 0.0
+                high_price = 0.0
+                low_price = 0.0
                 try:
                     ticker_data = await asyncio.wait_for(self.market_data.get_ticker_24h(sym, m_type), timeout=1.5)
                     current_price = float(ticker_data.get("price", 0.0))
@@ -221,35 +228,72 @@ class MarketMonitor:
                     df = await self.market_data.get_ohlcv(sym, "1m", m_type, limit=5)
                     if not df.empty:
                         current_price = float(df["close"].iloc[-1])
+                        high_price = float(df["high"].iloc[-1])
+                        low_price = float(df["low"].iloc[-1])
 
                 if current_price <= 0.0:
                     continue
 
-                # Check TP / SL hit with full trailing & breakeven support
+                if high_price <= 0.0:
+                    high_price = current_price
+                if low_price <= 0.0:
+                    low_price = current_price
+
+                # -------------------------------------------------------------
+                # 1. Auto Break-Even Shield (Move SL to entry when in >= 1.0R profit)
+                # -------------------------------------------------------------
+                if sl_dist > 0:
+                    if dir_ == "long":
+                        half_tp = entry + (tp - entry) * 0.5 if tp > entry else entry + sl_dist
+                        if (current_price >= (entry + sl_dist) or current_price >= half_tp) and sl < entry:
+                            new_sl = round(entry * 1.0005, 6)  # Breakeven + small fee buffer
+                            updated = update_trade_sl_sync(trade_id, new_sl, "🛡️ Breakeven Shield (1.0R Reached)")
+                            if updated:
+                                logger.info(f"🛡️ AUTO BREAKEVEN: {sym} {trade.get('tag', trade_id)} Stop Loss moved to ${new_sl:.2f} (Risk-Free)")
+                                await broadcast({"type": "trade_updated", "data": updated})
+                                sl = new_sl  # Update local reference
+                    else:  # short
+                        half_tp = entry - (entry - tp) * 0.5 if tp < entry else entry - sl_dist
+                        if (current_price <= (entry - sl_dist) or current_price <= half_tp) and sl > entry:
+                            new_sl = round(entry * 0.9995, 6)  # Breakeven - small fee buffer
+                            updated = update_trade_sl_sync(trade_id, new_sl, "🛡️ Breakeven Shield (1.0R Reached)")
+                            if updated:
+                                logger.info(f"🛡️ AUTO BREAKEVEN: {sym} {trade.get('tag', trade_id)} Stop Loss moved to ${new_sl:.2f} (Risk-Free)")
+                                await broadcast({"type": "trade_updated", "data": updated})
+                                sl = new_sl  # Update local reference
+
+                # -------------------------------------------------------------
+                # 2. Check TP / SL Hit (Checking live price and extreme wick)
+                # -------------------------------------------------------------
                 hit_reason = None
+                exit_price = current_price
                 if dir_ == "long":
-                    if tp > 0 and current_price >= tp:
+                    if tp > 0 and (current_price >= tp or high_price >= tp):
                         hit_reason = "Take Profit (TP Hit) 🎯"
-                    elif sl > 0 and current_price <= sl:
+                        exit_price = tp
+                    elif sl > 0 and (current_price <= sl or low_price <= sl):
                         hit_reason = "Stop Loss (SL Hit) 🛑"
+                        exit_price = sl
                 else:
-                    if tp > 0 and current_price <= tp:
+                    if tp > 0 and (current_price <= tp or low_price <= tp):
                         hit_reason = "Take Profit (TP Hit) 🎯"
-                    elif sl > 0 and current_price >= sl:
+                        exit_price = tp
+                    elif sl > 0 and (current_price >= sl or high_price >= sl):
                         hit_reason = "Stop Loss (SL Hit) 🛑"
+                        exit_price = sl
 
                 if hit_reason:
-                    closed = auto_close_trade_sync(trade_id, hit_reason, current_price)
+                    closed = auto_close_trade_sync(trade_id, hit_reason, exit_price)
                     if closed:
                         pnl = closed.get("pnl", 0.0)
                         pnl_pct = closed.get("pnl_pct", 0.0)
-                        logger.info(f"⚡ AUTO EXIT: {sym} {closed.get('tag', trade_id)} closed by {hit_reason} at ${current_price:.2f} (PnL: ${pnl:.2f})")
+                        logger.info(f"⚡ AUTO EXIT: {sym} {closed.get('tag', trade_id)} closed by {hit_reason} at ${exit_price:.2f} (PnL: ${pnl:.2f})")
                         await broadcast({"type": "trade_closed", "data": closed})
                         await self.notifier.send_signal_alert(
                             symbol=sym,
                             timeframe="1M",
                             direction="closed",
-                            message=f"[{hit_reason}] Position {closed.get('tag', sym)} ปิดสถานะอัตโนมัติที่ราคา ${current_price:.2f} | Realized PnL: ${pnl:+.2f} ({pnl_pct:+.2f}%)",
+                            message=f"[{hit_reason}] Position {closed.get('tag', sym)} ปิดสถานะอัตโนมัติที่ราคา ${exit_price:.2f} | Realized PnL: ${pnl:+.2f} ({pnl_pct:+.2f}%)",
                             confluence_score=100,
                             entry=entry,
                             sl=sl,
