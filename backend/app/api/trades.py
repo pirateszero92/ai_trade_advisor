@@ -237,6 +237,26 @@ async def place_order(
         logger.error(f"Failed to execute trade {req.symbol} ({effective_mode}): {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Check initial status for Paper Trading (Pending Limit vs Open Market)
+    initial_status = "open"
+    if effective_mode == "paper":
+        is_limit = "-LIM-" in (req.tag or "").upper() or getattr(req, "order_type", "limit") == "limit"
+        if is_limit:
+            try:
+                from app.engines.market_data import MarketDataEngine
+                mde = MarketDataEngine()
+                s_up = req.symbol.upper()
+                mtype = "forex" if any(f in s_up for f in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]) else ("crypto" if "/" in s_up or "USDT" in s_up or "THB" in s_up else "stock")
+                tk = await mde.get_ticker_24h(req.symbol, mtype)
+                cur_p = float(tk.get("price", entry))
+                if cur_p > 0:
+                    if dir_ == "long" and cur_p > entry * 1.0005:
+                        initial_status = "pending"
+                    elif dir_ == "short" and cur_p < entry * 0.9995:
+                        initial_status = "pending"
+            except Exception:
+                pass
+
     trade_id = str(uuid4())
     tag_name = req.tag if (req.tag and req.tag.strip()) else f"POS-{trade_id[:8]}"
     trade = {
@@ -250,7 +270,7 @@ async def place_order(
         "stop_loss": sl,
         "take_profit": tp,
         "opened_at": datetime.now(timezone.utc).isoformat(),
-        "status": "open",
+        "status": initial_status,
         "notes": req.notes,
         "pnl": 0.0,
         "pnl_pct": 0.0,

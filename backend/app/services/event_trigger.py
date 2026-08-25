@@ -184,10 +184,39 @@ class MarketMonitor:
             await asyncio.sleep(1.5)
 
     async def _check_open_positions_tp_sl(self):
-        """Auto-monitor open positions and execute TP/SL exits & Auto-Breakeven shields automatically."""
+        """Auto-monitor open positions and execute TP/SL exits, Pending limit fills & Auto-Breakeven shields automatically."""
         try:
-            from app.api.trades import get_all_trades, auto_close_trade_sync, update_trade_sl_sync
+            from app.api.trades import get_all_trades, auto_close_trade_sync, update_trade_sl_sync, _save_trades
             trades_dict = get_all_trades()
+
+            # 0. Check pending limit orders first
+            pending_trades = [t for t in trades_dict.values() if t.get("status") == "pending"]
+            for ptrade in pending_trades:
+                psym = ptrade["symbol"]
+                pdir = ptrade.get("direction", "long").lower()
+                pentry = float(ptrade.get("entry", 0.0))
+                pid = ptrade.get("id")
+                psup = psym.upper().replace("/", "").replace("-", "")
+                pmtype = "forex" if any(f in psup for f in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]) else ("crypto" if "/" in psym or "USDT" in psup or "THB" in psup else "stock")
+                try:
+                    pticker = await asyncio.wait_for(self.market_data.get_ticker_24h(psym, pmtype), timeout=1.5)
+                    pprice = float(pticker.get("price", 0.0))
+                    if pprice > 0:
+                        # Check if limit touched
+                        filled = False
+                        if pdir == "long" and pprice <= pentry:
+                            filled = True
+                        elif pdir == "short" and pprice >= pentry:
+                            filled = True
+                        if filled:
+                            ptrade["status"] = "open"
+                            ptrade["filled_at"] = time.time()
+                            _save_trades()
+                            logger.info(f"⚡ LIMIT ORDER FILLED: {psym} {ptrade.get('tag', pid)} filled at ${pprice:.2f}")
+                            await broadcast({"type": "trade_updated", "data": ptrade})
+                except Exception:
+                    pass
+
             open_trades = [t for t in trades_dict.values() if t.get("status") == "open"]
             if not open_trades:
                 return
