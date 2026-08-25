@@ -93,21 +93,26 @@ class AdvancedIndicatorsEngine:
         # 3. Squeeze condition (BB inside KC)
         squeeze_on = (bb_lower > kc_lower) & (bb_upper < kc_upper)
 
-        # 4. Momentum Value
+        # 4. Momentum Value via Rolling Linear Regression (matches LazyBear / TradingView TTM Squeeze)
+        # delta = close - avg(donchian_mid, kc_sma) as the series to regress
         donchian_mid = (high.rolling(window=kc_length).max() + low.rolling(window=kc_length).min()) / 2.0
         kc_sma = close.rolling(window=kc_length).mean()
         avg_baseline = (donchian_mid + kc_sma) / 2.0
         delta = close - avg_baseline
 
-        x = np.arange(kc_length)
-        x_mean = x.mean()
-        denom = np.sum((x - x_mean) ** 2)
-        weights = (1.0 / kc_length) + ((x - x_mean) * (kc_length - 1 - x_mean) / (denom or 1.0))
-
         delta_vals = delta.values
-        hist_vals = np.full_like(delta_vals, 0.0)
-        if len(delta_vals) >= kc_length:
-            hist_vals[kc_length - 1:] = np.convolve(delta_vals, weights[::-1], mode="valid")
+        n_vals = len(delta_vals)
+        hist_vals = np.full(n_vals, np.nan)
+
+        # Rolling LinReg: fit a line to the last kc_length values, take the last fitted value
+        x = np.arange(kc_length, dtype=float)
+        for i in range(kc_length - 1, n_vals):
+            window = delta_vals[i - kc_length + 1: i + 1]
+            if np.any(np.isnan(window)):
+                continue
+            coeffs = np.polyfit(x, window, 1)
+            hist_vals[i] = np.polyval(coeffs, x[-1])
+
         hist = pd.Series(hist_vals, index=delta.index).fillna(0.0)
 
         curr_squeeze_on = bool(squeeze_on.iloc[-1])
@@ -176,14 +181,30 @@ class AdvancedIndicatorsEngine:
         hl_range = high - low
         hl_range = hl_range.replace(0, 1e-8)
 
-        buy_ratio = ((close - low) + (close - open_p).clip(lower=0)) / (hl_range * 1.5)
-        buy_ratio = buy_ratio.clip(lower=0.05, upper=0.95)
+        # Candle-anatomy based buy/sell volume estimation
+        # Separate body pressure from wick pressure for more accurate delta
+        body_up = (close - open_p).clip(lower=0)          # Bullish body size
+        body_down = (open_p - close).clip(lower=0)        # Bearish body size
+        wick_up = high - close.clip(lower=open_p)         # Upper wick (selling pressure)
+        wick_down = close.clip(upper=open_p) - low        # Lower wick (buying pressure)
+
+        # Buy proxy: bullish body + lower wick support (buyers defended)
+        # Sell proxy: bearish body + upper wick resistance (sellers absorbed)
+        buy_proxy = body_up + wick_down * 0.5
+        sell_proxy = body_down + wick_up * 0.5
+        total_proxy = (buy_proxy + sell_proxy).replace(0, 1e-8)
+        buy_ratio = (buy_proxy / total_proxy).clip(lower=0.05, upper=0.95)
 
         buy_vol = vol * buy_ratio
         sell_vol = vol * (1.0 - buy_ratio)
         delta_series = buy_vol - sell_vol
 
-        cvd_series = delta_series.cumsum()
+        # CVD: Rolling 200-bar window to prevent unbounded drift
+        # Normalize by rolling std for cross-symbol/timeframe comparability
+        cvd_window = min(200, len(delta_series))
+        cvd_series = delta_series.rolling(window=cvd_window, min_periods=1).sum()
+        cvd_std = cvd_series.rolling(window=cvd_window, min_periods=1).std().replace(0, 1.0)
+        cvd_normalized = cvd_series / cvd_std   # Z-score style CVD
 
         vol_sma20 = vol.rolling(window=min(20, len(vol))).mean()
         curr_vol = float(vol.iloc[-1])
@@ -191,7 +212,7 @@ class AdvancedIndicatorsEngine:
         volume_spike = curr_vol >= (avg_vol * 1.5)
 
         curr_delta = float(delta_series.iloc[-1])
-        curr_cvd = float(cvd_series.iloc[-1])
+        curr_cvd = float(cvd_normalized.iloc[-1])
         curr_total_vol = curr_vol if curr_vol > 0 else 1.0
         delta_ratio = float(np.clip(curr_delta / curr_total_vol, -1.0, 1.0))
 

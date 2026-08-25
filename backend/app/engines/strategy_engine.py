@@ -26,7 +26,7 @@ DEFAULT_STRATEGY: dict[str, Any] = {
         "require_ob": True,
         "require_fvg": False,
         "require_liquidity_sweep": False,
-        "min_rr": 2.0,
+        "min_rr": 1.5,       # Aligned with RiskEngine.MIN_RR (was 2.0, risk_engine uses 1.5)
         "allowed_directions": ["long", "short"],
         "htf_alignment_required": False,
     },

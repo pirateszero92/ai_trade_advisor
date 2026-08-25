@@ -248,9 +248,9 @@ class SMCEngine:
             # 5. Fair Value Gaps
             signal.fvg = self._detect_fvg(df, ob_dir)
 
-            # 6. Equal levels (liquidity pools)
-            signal.equal_highs = self._detect_equal_levels(df, "high")
-            signal.equal_lows = self._detect_equal_levels(df, "low")
+            # 6. Equal levels (liquidity pools) — use swing points for accuracy & performance
+            signal.equal_highs = self._detect_equal_levels(df, "high", swing_points=swing_highs)
+            signal.equal_lows = self._detect_equal_levels(df, "low", swing_points=swing_lows)
 
             # 7. Liquidity sweeps
             self._detect_liquidity_sweep(df, signal)
@@ -349,10 +349,12 @@ class SMCEngine:
         """
         Detect Break of Structure (BOS) and Change of Character (CHoCH).
 
-        BOS: price breaks in the same direction as the prevailing trend,
-        confirming continuation.
-        CHoCH: price breaks in the opposite direction, signalling a potential
-        reversal.
+        BOS (Break of Structure): Price closes beyond a prior swing level in the SAME
+        direction as the existing bias — confirms trend continuation (Higher Highs / Lower Lows).
+
+        CHoCH (Change of Character): Price closes beyond a prior swing level AGAINST the
+        existing bias — signals a potential reversal. First sign institutional money is
+        repositioning.
 
         Modifies ``signal`` in-place.
         """
@@ -360,26 +362,30 @@ class SMCEngine:
         last_close = closes[-1]
 
         if kind == "bullish" and len(swing_highs) >= 2:
-            prev_high = swing_highs[-2].price
-            last_high = swing_highs[-1].price
-            if last_close > last_high:
-                if last_high > prev_high:
+            # Reference the PRIOR swing high (second-to-last) as the structural level
+            prev_swing_high = swing_highs[-2].price
+
+            if last_close > prev_swing_high:
+                # Price closed above prior swing high
+                if signal.bias == "bullish":
+                    # Continuation: Higher High in existing bullish trend → BOS
                     signal.bos = True
-                    if signal.bias == "neutral":
-                        signal.bias = "bullish"
-                else:
+                elif signal.bias in ("bearish", "neutral"):
+                    # Reversal: busts above swing high against bearish/neutral bias → CHoCH
                     signal.choch = True
                     signal.bias = "bullish"
 
         elif kind == "bearish" and len(swing_lows) >= 2:
-            prev_low = swing_lows[-2].price
-            last_low = swing_lows[-1].price
-            if last_close < last_low:
-                if last_low < prev_low:
+            # Reference the PRIOR swing low (second-to-last) as the structural level
+            prev_swing_low = swing_lows[-2].price
+
+            if last_close < prev_swing_low:
+                # Price closed below prior swing low
+                if signal.bias == "bearish":
+                    # Continuation: Lower Low in existing bearish trend → BOS
                     signal.bos = True
-                    if signal.bias == "neutral":
-                        signal.bias = "bearish"
-                else:
+                elif signal.bias in ("bullish", "neutral"):
+                    # Reversal: breaks below swing low against bullish/neutral bias → CHoCH
                     signal.choch = True
                     signal.bias = "bearish"
 
@@ -414,6 +420,7 @@ class SMCEngine:
         closes = df["close"].values
         highs = df["high"].values
         lows = df["low"].values
+        opens = df["open"].values
         n = len(df)
         last_close = closes[-1]
 
@@ -428,13 +435,23 @@ class SMCEngine:
                     future_high = np.max(highs[i + 1 : i + 4])
                     body_size = opens[i] - closes[i]
                     if future_high > opens[i] + body_size * 2 and last_close > opens[i]:
-                        # Not mitigated: last close is above OB bottom
-                        if last_close > lows[i]:
+                        ob_top = float(opens[i])
+                        ob_bottom = float(lows[i])
+
+                        # Mitigation check: has price re-entered the OB zone after formation?
+                        mitigated = False
+                        for j in range(i + 4, n - 1):
+                            if lows[j] <= ob_top:  # Price re-entered OB zone
+                                mitigated = True
+                                break
+
+                        # Only return unmitigated OBs — mitigated ones are less reliable
+                        if not mitigated and last_close > ob_bottom:
                             return Zone(
                                 kind="ob",
                                 direction="bullish",
-                                top=float(opens[i]),
-                                bottom=float(lows[i]),
+                                top=ob_top,
+                                bottom=ob_bottom,
                                 index=i,
                                 timestamp=df.index[i],
                             )
@@ -447,12 +464,22 @@ class SMCEngine:
                     future_low = np.min(lows[i + 1 : i + 4])
                     body_size = closes[i] - opens[i]
                     if future_low < opens[i] - body_size * 2 and last_close < opens[i]:
-                        if last_close < highs[i]:
+                        ob_top = float(highs[i])
+                        ob_bottom = float(opens[i])
+
+                        # Mitigation check: has price re-entered the OB zone after formation?
+                        mitigated = False
+                        for j in range(i + 4, n - 1):
+                            if highs[j] >= ob_bottom:  # Price re-entered OB zone
+                                mitigated = True
+                                break
+
+                        if not mitigated and last_close < ob_top:
                             return Zone(
                                 kind="ob",
                                 direction="bearish",
-                                top=float(highs[i]),
-                                bottom=float(opens[i]),
+                                top=ob_top,
+                                bottom=ob_bottom,
                                 index=i,
                                 timestamp=df.index[i],
                             )
@@ -531,11 +558,15 @@ class SMCEngine:
     # ------------------------------------------------------------------
 
     def _detect_equal_levels(
-        self, df: pd.DataFrame, kind: Literal["high", "low"]
+        self, df: pd.DataFrame, kind: Literal["high", "low"],
+        swing_points: Optional[list[SwingPoint]] = None,
     ) -> list[float]:
         """
-        Detect clusters of swing highs or lows that form equal price levels
-        (buy-side / sell-side liquidity pools).
+        Detect clusters of confirmed swing highs or swing lows that form equal price
+        levels (buy-side / sell-side liquidity pools).
+
+        Uses pre-computed swing points instead of every bar to avoid O(n^2) scanning
+        and to eliminate false positives from random bar-level clusters.
 
         Parameters
         ----------
@@ -543,25 +574,40 @@ class SMCEngine:
             OHLCV DataFrame.
         kind:
             ``"high"`` for equal highs, ``"low"`` for equal lows.
+        swing_points:
+            Pre-computed swing highs or lows. If provided, only these levels are compared.
 
         Returns
         -------
-        List of price levels (floats).
+        List of price levels (floats), most recent 5.
         """
-        series = df["high"] if kind == "high" else df["low"]
-        values = series.values
-        n = len(values)
         tol = self.EQL_TOLERANCE
         equal_levels: list[float] = []
 
-        for i in range(1, n):
-            for j in range(i + 1, min(i + 20, n)):
+        if swing_points and len(swing_points) >= 2:
+            # Efficient: compare only swing point prices
+            prices = [sp.price for sp in swing_points]
+            for i in range(len(prices)):
+                for j in range(i + 1, len(prices)):
+                    ref = prices[i]
+                    if ref == 0:
+                        continue
+                    if abs(prices[j] - ref) / ref <= tol:
+                        equal_levels.append(float(round(ref, 6)))
+                        break
+        else:
+            # Fallback: scan all bars (slower but works without swing data)
+            series = df["high"] if kind == "high" else df["low"]
+            values = series.values
+            n = len(values)
+            for i in range(max(0, n - 100), n):   # Only scan last 100 bars
                 ref = values[i]
                 if ref == 0:
                     continue
-                if abs(values[j] - ref) / ref <= tol:
-                    equal_levels.append(float(round(ref, 6)))
-                    break
+                for j in range(i + 1, min(i + 20, n)):
+                    if abs(values[j] - ref) / ref <= tol:
+                        equal_levels.append(float(round(ref, 6)))
+                        break
 
         # Deduplicate clusters
         unique: list[float] = []
@@ -705,7 +751,20 @@ class SMCEngine:
             if sl >= entry:
                 sl = entry * 0.992
             sl_dist = abs(entry - sl)
-            tp = entry + (sl_dist * 2.5)
+
+            # TP: Use Buy-side Liquidity (Equal Highs above entry) as structural target
+            # Falls back to 2.5R minimum if no structural level found above entry
+            rr_based_tp = entry + (sl_dist * 2.5)
+            structural_tp = None
+            if signal.equal_highs:
+                above_entry = [lvl for lvl in signal.equal_highs if lvl > entry + sl_dist]
+                if above_entry:
+                    structural_tp = min(above_entry)  # Nearest liquidity pool above
+
+            if structural_tp and structural_tp > rr_based_tp:
+                tp = structural_tp   # Structural target offers better R:R
+            else:
+                tp = rr_based_tp     # Minimum 2.5R
 
         else:  # bearish
             signal.direction = "short"
@@ -726,7 +785,19 @@ class SMCEngine:
             if sl <= entry:
                 sl = entry * 1.008
             sl_dist = abs(entry - sl)
-            tp = entry - (sl_dist * 2.5)
+
+            # TP: Use Sell-side Liquidity (Equal Lows below entry) as structural target
+            rr_based_tp = entry - (sl_dist * 2.5)
+            structural_tp = None
+            if signal.equal_lows:
+                below_entry = [lvl for lvl in signal.equal_lows if lvl < entry - sl_dist]
+                if below_entry:
+                    structural_tp = max(below_entry)  # Nearest liquidity pool below
+
+            if structural_tp and structural_tp < rr_based_tp:
+                tp = structural_tp   # Structural target offers better R:R
+            else:
+                tp = rr_based_tp     # Minimum 2.5R
 
         signal.entry = round(entry, 6)
         signal.stop_loss = round(sl, 6)

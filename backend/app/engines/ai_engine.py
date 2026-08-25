@@ -466,14 +466,60 @@ class AIEngine:
             f"**Current Price**: {sig['current_price']} | **Entry Type**: {sig.get('entry_type', 'limit')}",
             f"**HTF Bias**: {sig['htf_bias']} | **LTF Bias**: {sig['bias']}",
             f"- BOS: {'✅' if sig['bos'] else '❌'} | CHoCH: {'✅' if sig['choch'] else '❌'}",
-            f"- Liquidity Swept: {'✅' if sig['liquidity_swept'] else '❌'} ({sig['sweep_direction']})",
-            f"- In Premium: {sig['in_premium']} | In Discount: {sig['in_discount']}",
-            f"- Equilibrium: {sig['equilibrium']}",
+            f"- Liquidity Swept: {'✅' if sig['liquidity_swept'] else '❌'} (Direction: {sig['sweep_direction']}, Level: {sig.get('sweep_price', 'N/A')})",
+            f"- In Premium: {sig['in_premium']} | In Discount: {sig['in_discount']} | Equilibrium: {sig['equilibrium']}",
+        ]
+
+        # Order Block (critical for entry decision)
+        ob = sig.get("order_block")
+        if ob:
+            lines.append(
+                f"- Order Block ({ob['direction'].upper()}): "
+                f"Top={ob['top']:.4f}, Bottom={ob['bottom']:.4f}, Mid={ob['mid']:.4f}"
+                f"{' [MITIGATED]' if ob.get('mitigated') else ' [ACTIVE]'}"
+            )
+        else:
+            lines.append("- Order Block: ❌ Not detected")
+
+        # Fair Value Gap
+        fvg = sig.get("fvg")
+        if fvg:
+            lines.append(
+                f"- FVG ({fvg['direction'].upper()}): "
+                f"Top={fvg['top']:.4f}, Bottom={fvg['bottom']:.4f}, Mid={fvg['mid']:.4f}"
+                f"{' [MITIGATED]' if fvg.get('mitigated') else ' [ACTIVE]'}"
+            )
+        else:
+            lines.append("- FVG: ❌ Not detected")
+
+        # Liquidity Pool Levels (Equal Highs / Equal Lows)
+        eq_highs = sig.get("equal_highs", [])
+        eq_lows = sig.get("equal_lows", [])
+        if eq_highs:
+            lines.append(f"- Buy-side Liquidity (Equal Highs): {[round(p, 4) for p in eq_highs[-3:]]}")
+        if eq_lows:
+            lines.append(f"- Sell-side Liquidity (Equal Lows): {[round(p, 4) for p in eq_lows[-3:]]}")
+
+        # Proposed Trade Levels
+        lines.extend([
+            f"",
+            f"## Proposed Trade Setup",
+            f"- Direction: {sig.get('direction', 'wait').upper()}",
+            f"- Entry: {sig.get('entry', 'N/A')}",
+            f"- Stop Loss: {sig.get('stop_loss', 'N/A')}",
+            f"- Take Profit: {sig.get('take_profit', 'N/A')}",
+            f"- Risk:Reward: {sig.get('risk_reward', 0.0):.2f}R",
+        ])
+
+        # Quantitative Indicators
+        lines.extend([
+            f"",
+            f"## Quantitative Indicators",
             f"- Squeeze Status: {sig.get('squeeze_status', 'no_squeeze')} | Momentum: {sig.get('squeeze_momentum', 0.0)} ({sig.get('momentum_direction', '')})",
-            f"- Volume Delta: {sig.get('volume_delta', 0.0)} (Ratio: {sig.get('delta_ratio', 0.0)}) | Absorption: {'✅' if sig.get('delta_absorption') else '❌'} ({sig.get('delta_status', '')})",
+            f"- Volume Delta: {sig.get('volume_delta', 0.0)} (Ratio: {sig.get('delta_ratio', 0.0):.3f}) | Absorption: {'✅' if sig.get('delta_absorption') else '❌'} | {sig.get('delta_status', '')}",
             f"- Volume Spike: {'✅' if sig.get('volume_spike') else '❌'}",
             f"- Confluence Score: {sig.get('confluence_score', sig.get('confluence', 0))}/100",
-        ]
+        ])
 
         if portfolio_state:
             lines.extend([
