@@ -6,6 +6,8 @@ class StrategyGateView {
     required this.rejectionReasons,
     required this.confluence,
     required this.minConfluence,
+    this.hasLiquiditySweep = false,
+    this.hasSqueezeFire = false,
   });
 
   factory StrategyGateView.fromPayload(Map<String, dynamic>? payload) {
@@ -49,6 +51,21 @@ class StrategyGateView {
         ? Map<String, dynamic>.from(policyRaw)
         : const <String, dynamic>{};
 
+    final evidence = source['evidence'] is List
+        ? (source['evidence'] as List).map((e) => e.toString().toLowerCase()).toList()
+        : <String>[];
+    final triggerEvidence = source['trigger_evidence'] is List
+        ? (source['trigger_evidence'] as List).map((e) => e.toString().toLowerCase()).toList()
+        : <String>[];
+
+    final hasSweep = source['liquidity_swept'] == true ||
+        evidence.any((e) => e.contains('sweep')) ||
+        triggerEvidence.any((e) => e.contains('sweep'));
+
+    final hasSqueeze = source['squeeze_status'] == 'squeeze_fire' ||
+        evidence.any((e) => e.contains('squeeze')) ||
+        triggerEvidence.any((e) => e.contains('squeeze'));
+
     return StrategyGateView(
       approved: approved,
       action: action,
@@ -57,6 +74,8 @@ class StrategyGateView {
       confluence: ((source['confluence'] as num?)?.toInt() ?? 0).clamp(0, 100),
       minConfluence:
           ((policy['min_confluence'] as num?)?.toDouble() ?? 0).clamp(0, 100),
+      hasLiquiditySweep: hasSweep,
+      hasSqueezeFire: hasSqueeze,
     );
   }
 
@@ -66,6 +85,8 @@ class StrategyGateView {
   final List<String> rejectionReasons;
   final int confluence;
   final double minConfluence;
+  final bool hasLiquiditySweep;
+  final bool hasSqueezeFire;
 
   bool get allowsLong => approved && action == 'long';
   bool get allowsShort => approved && action == 'short';
@@ -81,8 +102,12 @@ class StrategyGateView {
     return 'NEUTRAL';
   }
 
+  bool get isGradeS =>
+      confluence >= 85 ||
+      (confluence >= 75 && (hasLiquiditySweep || hasSqueezeFire));
+
   String get setupGradeLabel {
-    if (confluence >= 85) return '🌟 SETUP A+';
+    if (isGradeS) return '👑 SETUP S';
     if (confluence >= 70) return '💎 SETUP A';
     if (confluence >= 55) return '⚖️ SETUP B';
     return '⏳ SETUP C';

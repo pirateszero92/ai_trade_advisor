@@ -1245,14 +1245,14 @@ class _SignalCard extends StatelessWidget {
         ? AppColors.bullish
         : (isShort ? AppColors.bearish : AppColors.neutral);
 
-    final isSupremeA = confluence >= 85;
-    final isGradeA = confluence >= 70;
+    final isGradeS = gate.isGradeS;
+    final isGradeA = !isGradeS && confluence >= 70;
     final isGradeB = confluence >= 55 && confluence < 70;
     final gradeText = gate.setupGradeLabel;
-    final gradeColor = isSupremeA
-        ? const Color(0xFF00E5FF)
+    final gradeColor = isGradeS
+        ? const Color(0xFFFFD700)
         : (isGradeA
-            ? AppColors.bullish
+            ? const Color(0xFF00E5FF)
             : (isGradeB ? AppColors.neutral : const Color(0xFFFF9900)));
 
     final rawSetupDir = gate.setupDirection.trim().toLowerCase();

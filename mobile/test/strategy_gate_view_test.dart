@@ -58,4 +58,29 @@ void main() {
     expect(gate.allowsLong, isTrue);
     expect(gate.allowsShort, isFalse);
   });
+
+  test('Grade S setup recognized when confluence >= 85 or has liquidity sweep/squeeze fire', () {
+    final gate1 = StrategyGateView.fromPayload({
+      'confluence': 86,
+      'strategy': {'approved': true, 'direction': 'long', 'setup_direction': 'long'},
+    });
+    expect(gate1.isGradeS, isTrue);
+    expect(gate1.setupGradeLabel, '👑 SETUP S');
+
+    final gate2 = StrategyGateView.fromPayload({
+      'confluence': 78,
+      'liquidity_swept': true,
+      'strategy': {'approved': true, 'direction': 'long', 'setup_direction': 'long'},
+    });
+    expect(gate2.isGradeS, isTrue);
+    expect(gate2.setupGradeLabel, '👑 SETUP S');
+
+    final gate3 = StrategyGateView.fromPayload({
+      'confluence': 76,
+      'squeeze_status': 'squeeze_fire',
+      'strategy': {'approved': true, 'direction': 'long', 'setup_direction': 'long'},
+    });
+    expect(gate3.isGradeS, isTrue);
+    expect(gate3.setupGradeLabel, '👑 SETUP S');
+  });
 }
