@@ -1287,9 +1287,25 @@ class _SignalCard extends StatelessWidget {
     final resolvedSetupDir = resolveSetupDir();
     final isSetupLong = resolvedSetupDir == 'LONG';
     final isSetupShort = resolvedSetupDir == 'SHORT';
-    final setupDirColor = isSetupLong
+    final displayDirText = isSetupLong
+        ? 'LONG'
+        : (isSetupShort ? 'SHORT' : 'NEUTRAL');
+    final displayDirIcon = isSetupLong
+        ? Icons.arrow_upward
+        : (isSetupShort ? Icons.arrow_downward : Icons.remove);
+    final displayDirColor = isSetupLong
         ? AppColors.bullish
-        : (isSetupShort ? AppColors.bearish : AppColors.neutral);
+        : (isSetupShort ? AppColors.bearish : Colors.white60);
+    final displayDirBg = isSetupLong
+        ? AppColors.bullish.withValues(alpha: 0.15)
+        : (isSetupShort
+            ? AppColors.bearish.withValues(alpha: 0.15)
+            : const Color(0xFF252540));
+    final displayDirBorder = isSetupLong
+        ? AppColors.bullish.withValues(alpha: 0.7)
+        : (isSetupShort
+            ? AppColors.bearish.withValues(alpha: 0.7)
+            : Colors.white24);
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -1314,22 +1330,14 @@ class _SignalCard extends StatelessWidget {
                               ? Icons.arrow_upward
                               : (isShort
                                   ? Icons.arrow_downward
-                                  : (isSetupLong
-                                      ? Icons.arrow_upward
-                                      : (isSetupShort
-                                          ? Icons.arrow_downward
-                                          : Icons.hourglass_empty))),
+                                  : Icons.hourglass_empty),
                           size: 13,
                           color: Colors.black,
                         ),
                         label: Text(
                           isLong
                               ? 'BUY / LONG'
-                              : (isShort
-                                  ? 'SELL / SHORT'
-                                  : (resolvedSetupDir.isNotEmpty
-                                      ? 'WAIT ($resolvedSetupDir)'
-                                      : 'WAIT')),
+                              : (isShort ? 'SELL / SHORT' : 'WAIT'),
                           style: const TextStyle(
                               color: Colors.black,
                               fontWeight: FontWeight.bold,
@@ -1451,41 +1459,6 @@ class _SignalCard extends StatelessWidget {
                                       fontSize: 8,
                                       fontWeight: FontWeight.bold,
                                       color: Color(0xFF00E5FF))),
-                            ),
-                          ],
-                          if (resolvedSetupDir.isNotEmpty) ...[
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: setupDirColor.withValues(alpha: 0.15),
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(
-                                  color: setupDirColor.withValues(alpha: 0.7),
-                                  width: 0.8,
-                                ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    isSetupLong
-                                        ? Icons.arrow_upward
-                                        : Icons.arrow_downward,
-                                    size: 10,
-                                    color: setupDirColor,
-                                  ),
-                                  const SizedBox(width: 2),
-                                  Text(
-                                    resolvedSetupDir,
-                                    style: TextStyle(
-                                      fontSize: 9,
-                                      fontWeight: FontWeight.bold,
-                                      color: setupDirColor,
-                                    ),
-                                  ),
-                                ],
-                              ),
                             ),
                           ],
                           Container(
@@ -1820,42 +1793,38 @@ class _SignalCard extends StatelessWidget {
                         color: gradeColor),
                   ),
                 ),
-                if (resolvedSetupDir.isNotEmpty) ...[
-                  const SizedBox(width: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 6, vertical: 1.5),
-                    decoration: BoxDecoration(
-                      color: setupDirColor.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(
-                        color: setupDirColor.withValues(alpha: 0.7),
-                        width: 0.8,
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          isSetupLong
-                              ? Icons.arrow_upward
-                              : Icons.arrow_downward,
-                          size: 9,
-                          color: setupDirColor,
-                        ),
-                        const SizedBox(width: 2),
-                        Text(
-                          resolvedSetupDir,
-                          style: TextStyle(
-                            fontSize: 9,
-                            fontWeight: FontWeight.bold,
-                            color: setupDirColor,
-                          ),
-                        ),
-                      ],
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 6, vertical: 1.5),
+                  decoration: BoxDecoration(
+                    color: displayDirBg,
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                      color: displayDirBorder,
+                      width: 0.8,
                     ),
                   ),
-                ],
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        displayDirIcon,
+                        size: 9,
+                        color: displayDirColor,
+                      ),
+                      const SizedBox(width: 2),
+                      Text(
+                        displayDirText,
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                          color: displayDirColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
                 if (gate.minConfluence > 0) ...[
                   const SizedBox(width: 8),
                   Text(
