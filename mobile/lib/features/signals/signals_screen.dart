@@ -451,6 +451,8 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
             'tag': tag,
             'mode': 'paper',
             'exchange': targetExchange,
+            'auto_be': true,
+            'trailing_stop': true,
             'idempotency_key': '${DateTime.now().microsecondsSinceEpoch}-$tag',
           },
         );

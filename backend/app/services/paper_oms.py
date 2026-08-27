@@ -575,7 +575,7 @@ class PaperOMS:
                     slippage_cost_total=ZERO,
                     risk_pct=risk_pct,
                     auto_be=bool(payload.get("auto_be", True)),
-                    trailing_stop=bool(payload.get("trailing_stop", False)),
+                    trailing_stop=bool(payload.get("trailing_stop", True)),
                     favorable_extreme=None,
                     max_r_multiple=ZERO,
                     protection_stage="initial",

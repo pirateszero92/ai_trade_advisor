@@ -10,7 +10,7 @@
   "default_sl_pct": 1.0,
   "risk_per_trade": 1.0,
   "max_daily_loss": 3.0,
-  "max_open_positions": 2,
+  "max_open_positions": 8,
   "watchlist": [
     {
       "symbol": "BTC/USDT",
