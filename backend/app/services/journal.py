@@ -1,8 +1,7 @@
 """Trade Journal and Weekly Review Service."""
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.trade import Trade
 

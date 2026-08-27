@@ -1,18 +1,16 @@
 {
   "local_endpoint": "http://host.docker.internal:11434/v1",
   "local_model": "gpt-oss:120b-cloud",
-  "gemini_key": "",
   "gemini_model": "gemini-2.0-flash",
-  "openrouter_key": "",
   "openrouter_model": "anthropic/claude-3.5-sonnet",
   "entry_mode": "limit",
   "auto_sl_tp": true,
   "auto_invalidation": true,
   "target_rr": 2.0,
   "default_sl_pct": 1.0,
-  "risk_per_trade": 3.0,
-  "max_daily_loss": 9.0,
-  "max_open_positions": 6,
+  "risk_per_trade": 1.0,
+  "max_daily_loss": 3.0,
+  "max_open_positions": 2,
   "watchlist": [
     {
       "symbol": "BTC/USDT",
@@ -71,7 +69,7 @@
       "exchange": "binance"
     },
     {
-      "symbol": "LINK/USDT",
+      "symbol": "NEAR/USDT",
       "timeframe": "1h",
       "htf_timeframe": "4h",
       "market_type": "crypto",
@@ -85,7 +83,7 @@
       "exchange": "binance"
     },
     {
-      "symbol": "NEAR/USDT",
+      "symbol": "LINK/USDT",
       "timeframe": "1h",
       "htf_timeframe": "4h",
       "market_type": "crypto",
@@ -120,6 +118,20 @@
       "exchange": "mt5"
     },
     {
+      "symbol": "EURUSD",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "forex",
+      "exchange": "mt5"
+    },
+    {
+      "symbol": "GBPUSD",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "forex",
+      "exchange": "mt5"
+    },
+    {
       "symbol": "AAPL",
       "timeframe": "1h",
       "htf_timeframe": "4h",
@@ -134,13 +146,6 @@
       "exchange": "alpaca"
     },
     {
-      "symbol": "NVDA",
-      "timeframe": "1h",
-      "htf_timeframe": "4h",
-      "market_type": "stock",
-      "exchange": "alpaca"
-    },
-    {
       "symbol": "MSFT",
       "timeframe": "1h",
       "htf_timeframe": "4h",
@@ -148,21 +153,35 @@
       "exchange": "alpaca"
     },
     {
-      "symbol": "QQQ",
+      "symbol": "NVDA",
       "timeframe": "1h",
       "htf_timeframe": "4h",
       "market_type": "stock",
       "exchange": "alpaca"
     },
     {
-      "symbol": "SPY",
+      "symbol": "AMZN",
       "timeframe": "1h",
       "htf_timeframe": "4h",
       "market_type": "stock",
       "exchange": "alpaca"
     },
     {
-      "symbol": "MSTR",
+      "symbol": "GOOGL",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "META",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "AMD",
       "timeframe": "1h",
       "htf_timeframe": "4h",
       "market_type": "stock",
@@ -183,11 +202,26 @@
       "exchange": "alpaca"
     },
     {
-      "symbol": "AMZN",
+      "symbol": "MSTR",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "SPY",
+      "timeframe": "1h",
+      "htf_timeframe": "4h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "QQQ",
       "timeframe": "1h",
       "htf_timeframe": "4h",
       "market_type": "stock",
       "exchange": "alpaca"
     }
-  ]
+  ],
+  "provider": "local"
 }

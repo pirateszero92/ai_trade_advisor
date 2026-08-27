@@ -28,6 +28,38 @@ def test_squeeze_momentum_calculation():
     print(f"Squeeze Result: status={res.status}, mom={res.momentum}, dir={res.direction}")
 
 
+def test_vectorized_squeeze_matches_linear_regression_reference():
+    np.random.seed(7)
+    n = 80
+    close = 100 + np.cumsum(np.random.normal(0, 0.8, n))
+    high = close + np.random.uniform(0.2, 1.2, n)
+    low = close - np.random.uniform(0.2, 1.2, n)
+    df = pd.DataFrame(
+        {
+            "open": close + np.random.normal(0, 0.2, n),
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": np.random.uniform(100, 1000, n),
+        }
+    )
+    length = 20
+
+    result = AdvancedIndicatorsEngine.compute_squeeze_momentum(
+        df, kc_length=length
+    )
+
+    donchian_mid = (
+        df["high"].rolling(length).max() + df["low"].rolling(length).min()
+    ) / 2.0
+    baseline = (donchian_mid + df["close"].rolling(length).mean()) / 2.0
+    window = (df["close"] - baseline).tail(length).to_numpy()
+    coefficients = np.polyfit(np.arange(length, dtype=float), window, 1)
+    expected = np.polyval(coefficients, length - 1)
+
+    assert result.momentum == round(float(expected), 6)
+
+
 def test_volume_delta_calculation():
     n = 50
     df = pd.DataFrame({

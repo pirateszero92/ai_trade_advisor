@@ -1,5 +1,4 @@
-﻿import pytest
-from app.engines.risk_engine import RiskEngine
+﻿from app.engines.risk_engine import RiskEngine
 from app.engines.smc_engine import SMCSignal
 
 
@@ -30,8 +29,9 @@ def test_risk_engine_approval():
     assert assessment.risk_amount > 0
 
 
-def test_risk_engine_daily_loss_rejection():
+def test_risk_engine_daily_loss_rejection(monkeypatch):
     engine = RiskEngine()
+    monkeypatch.setattr(engine.cfg, "max_daily_loss", 3.0)
     signal = SMCSignal(
         symbol="BTC/USDT",
         timeframe="1h",

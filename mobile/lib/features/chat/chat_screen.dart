@@ -12,7 +12,7 @@ import '../../core/api/api_client.dart';
 
 class ChatMessage {
   final String id;
-  final String role;        // "user" | "assistant"
+  final String role; // "user" | "assistant"
   final String content;
   final DateTime createdAt;
   final bool isLoading;
@@ -118,7 +118,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           _messages.add(ChatMessage(
             id: 'welcome',
             role: 'assistant',
-            content: 'สวัสดีครับ ผม Apex AI advisor ของคุณ 📊\nตลาดวันนี้มีอะไรให้ผมช่วยวิเคราะห์ไหมครับ?',
+            content:
+                'สวัสดีครับ ผม Apex AI advisor ของคุณ 📊\nตลาดวันนี้มีอะไรให้ผมช่วยวิเคราะห์ไหมครับ?',
             createdAt: DateTime.now().toUtc(),
           ));
         }
@@ -134,7 +135,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Future<void> _loadSession(String sessionId) async {
     setState(() => _isHistoryLoading = true);
     try {
-      final resp = await _dio.get(AppApi.url('/api/v1/chat/sessions/$sessionId'));
+      final resp =
+          await _dio.get(AppApi.url('/api/v1/chat/sessions/$sessionId'));
       final data = resp.data as Map<String, dynamic>;
       _sessionId = data['id']?.toString();
       _sessionTitle = data['title'] as String? ?? 'Chat';
@@ -149,7 +151,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           _messages.add(ChatMessage(
             id: 'welcome',
             role: 'assistant',
-            content: 'สวัสดีครับ ผม Apex AI advisor ของคุณ 📊\nตลาดวันนี้มีอะไรให้ผมช่วยวิเคราะห์ไหมครับ?',
+            content:
+                'สวัสดีครับ ผม Apex AI advisor ของคุณ 📊\nตลาดวันนี้มีอะไรให้ผมช่วยวิเคราะห์ไหมครับ?',
             createdAt: DateTime.now().toUtc(),
           ));
         }
@@ -241,7 +244,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     try {
       // Build context window from history (last 15 messages)
       final history = _messages
-          .where((m) => !m.isLoading && m.id != 'welcome' && m.id != 'welcome-new')
+          .where(
+              (m) => !m.isLoading && m.id != 'welcome' && m.id != 'welcome-new')
           .map((m) => {'role': m.role, 'content': m.content})
           .toList();
 
@@ -254,7 +258,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           'ขออภัยครับ เกิดข้อผิดพลาดในการประมวลผลคำตอบ';
 
       final aiMsg = ChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString() + '_ai',
+        id: '${DateTime.now().millisecondsSinceEpoch}_ai',
         role: 'assistant',
         content: reply,
         createdAt: DateTime.now().toUtc(),
@@ -272,7 +276,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       if (_sessionId != null) {
         () async {
           try {
-            await _dio.post(AppApi.url('/api/v1/chat/messages/bulk-save'), data: {
+            await _dio
+                .post(AppApi.url('/api/v1/chat/messages/bulk-save'), data: {
               'session_id': _sessionId,
               'user_content': text,
               'assistant_content': reply,
@@ -285,9 +290,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       setState(() {
         _messages.removeLast();
         _messages.add(ChatMessage(
-          id: DateTime.now().millisecondsSinceEpoch.toString() + '_err',
+          id: '${DateTime.now().millisecondsSinceEpoch}_err',
           role: 'assistant',
-          content: '⚠️ ไม่สามารถเชื่อมต่อกับ AI Engine ได้\nกรุณาตรวจสอบการตั้งค่า Provider ในหน้า Settings',
+          content:
+              '⚠️ ไม่สามารถเชื่อมต่อกับ AI Engine ได้\nกรุณาตรวจสอบการตั้งค่า Provider ในหน้า Settings',
           createdAt: DateTime.now().toUtc(),
         ));
         _isLoading = false;
@@ -309,8 +315,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   void _showSnack(String msg) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(msg)));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   // ------------- history drawer ----------
@@ -344,7 +349,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                 child: Row(
                   children: [
                     const Text('ประวัติการสนทนา',
@@ -358,9 +364,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                         Navigator.pop(ctx);
                         _createNewSession();
                       },
-                      icon: const Icon(Icons.add, size: 16, color: AppColors.bullish),
+                      icon: const Icon(Icons.add,
+                          size: 16, color: AppColors.bullish),
                       label: const Text('ใหม่',
-                          style: TextStyle(color: AppColors.bullish, fontSize: 13)),
+                          style: TextStyle(
+                              color: AppColors.bullish, fontSize: 13)),
                     ),
                   ],
                 ),
@@ -383,7 +391,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Padding(
-                                padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                                padding:
+                                    const EdgeInsets.fromLTRB(16, 12, 16, 4),
                                 child: Text(dayTitle,
                                     style: const TextStyle(
                                         color: Colors.white38,
@@ -420,7 +429,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                                   ),
                                   selected: isActive,
                                   selectedTileColor:
-                                      AppColors.bullish.withOpacity(0.08),
+                                      AppColors.bullish.withValues(alpha: 0.08),
                                   shape: RoundedRectangleBorder(
                                       borderRadius: BorderRadius.circular(8)),
                                   onTap: () {
@@ -454,7 +463,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         title: Row(
           children: [
             CircleAvatar(
-              backgroundColor: AppColors.bullish.withOpacity(0.2),
+              backgroundColor: AppColors.bullish.withValues(alpha: 0.2),
               radius: 16,
               child: const Text('A',
                   style: TextStyle(
@@ -466,12 +475,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text('Apex',
-                      style: TextStyle(
-                          fontSize: 15, fontWeight: FontWeight.bold)),
+                      style:
+                          TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
                   Text(
-                    _sessionTitle.isEmpty ? 'AI Trading Advisor' : _sessionTitle,
-                    style:
-                        const TextStyle(fontSize: 11, color: Colors.white54),
+                    _sessionTitle.isEmpty
+                        ? 'AI Trading Advisor'
+                        : _sessionTitle,
+                    style: const TextStyle(fontSize: 11, color: Colors.white54),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -523,7 +533,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     controller: _scrollController,
                     padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
                     itemCount: _messages.length,
-                    itemBuilder: (ctx, i) => _MessageBubble(message: _messages[i]),
+                    itemBuilder: (ctx, i) =>
+                        _MessageBubble(message: _messages[i]),
                   ),
                 ),
                 _buildInputBar(),
@@ -572,7 +583,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     ),
                   )
                 : IconButton(
-                    icon: const Icon(Icons.send_rounded, color: AppColors.bullish),
+                    icon: const Icon(Icons.send_rounded,
+                        color: AppColors.bullish),
                     onPressed: _sendMessage,
                   ),
           ),
@@ -610,18 +622,20 @@ class _MessageBubble extends StatelessWidget {
                 maxWidth: MediaQuery.of(context).size.width * 0.80),
             decoration: BoxDecoration(
               color: isUser
-                  ? AppColors.bullish.withOpacity(0.18)
+                  ? AppColors.bullish.withValues(alpha: 0.18)
                   : const Color(0xFF1E2533),
               borderRadius: BorderRadius.only(
                 topLeft: const Radius.circular(16),
                 topRight: const Radius.circular(16),
-                bottomLeft:
-                    isUser ? const Radius.circular(16) : const Radius.circular(4),
-                bottomRight:
-                    isUser ? const Radius.circular(4) : const Radius.circular(16),
+                bottomLeft: isUser
+                    ? const Radius.circular(16)
+                    : const Radius.circular(4),
+                bottomRight: isUser
+                    ? const Radius.circular(4)
+                    : const Radius.circular(16),
               ),
               border: isUser
-                  ? Border.all(color: AppColors.bullish.withOpacity(0.25))
+                  ? Border.all(color: AppColors.bullish.withValues(alpha: 0.25))
                   : null,
             ),
             child: Text(
@@ -682,9 +696,9 @@ class _TypingIndicatorState extends State<_TypingIndicator>
       child: Container(
         margin: const EdgeInsets.only(top: 8, bottom: 2),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          color: const Color(0xFF1E2533),
-          borderRadius: const BorderRadius.only(
+        decoration: const BoxDecoration(
+          color: Color(0xFF1E2533),
+          borderRadius: BorderRadius.only(
             topLeft: Radius.circular(16),
             topRight: Radius.circular(16),
             bottomRight: Radius.circular(16),
@@ -704,7 +718,7 @@ class _TypingIndicatorState extends State<_TypingIndicator>
                   height: 7,
                   margin: const EdgeInsets.symmetric(horizontal: 2.5),
                   decoration: BoxDecoration(
-                    color: AppColors.bullish.withOpacity(opacity),
+                    color: AppColors.bullish.withValues(alpha: opacity),
                     shape: BoxShape.circle,
                   ),
                 );

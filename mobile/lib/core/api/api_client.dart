@@ -5,7 +5,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiConfig {
   static const _storage = FlutterSecureStorage();
-  static const _defaultBaseUrl = kIsWeb ? '' : 'http://10.0.2.2:8000'; // Default to Android emulator / local host on mobile
+  static const _defaultBaseUrl = kIsWeb
+      ? ''
+      : 'http://10.0.2.2:8000'; // Default to Android emulator / local host on mobile
 
   static Future<String> getBaseUrl() async {
     if (kIsWeb) return '';
@@ -14,8 +16,22 @@ class ApiConfig {
   }
 
   static Future<void> setBaseUrl(String url) async {
+    _validateBaseUrl(url);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('api_base_url', url);
+    await prefs.setString(
+        'api_base_url', url.trim().replaceAll(RegExp(r'/$'), ''));
+  }
+
+  static void _validateBaseUrl(String value) {
+    final uri = Uri.tryParse(value.trim());
+    if (uri == null ||
+        !uri.hasAuthority ||
+        !{'http', 'https'}.contains(uri.scheme) ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty) {
+      throw const FormatException(
+          'API Base URL must be a valid http(s) URL without credentials');
+    }
   }
 
   static Future<String?> getApiKey() async {
@@ -45,9 +61,53 @@ class ApiConfig {
 
 class AppApi {
   static String? _customBaseUrl;
+  // Live authorization is intentionally process-memory only. It must never be
+  // written to SharedPreferences or secure storage; app restart means Paper.
+  static String? _liveSessionToken;
+  static DateTime? _liveSessionExpiresAt;
+
+  static bool get hasActiveLiveSession {
+    final token = _liveSessionToken;
+    final expiresAt = _liveSessionExpiresAt;
+    if (token == null || token.isEmpty || expiresAt == null) return false;
+    if (!DateTime.now().toUtc().isBefore(expiresAt)) {
+      clearLiveSession();
+      return false;
+    }
+    return true;
+  }
+
+  static DateTime? get liveSessionExpiresAt =>
+      hasActiveLiveSession ? _liveSessionExpiresAt : null;
+
+  static void setLiveSession({
+    required String token,
+    required DateTime expiresAt,
+  }) {
+    if (token.trim().isEmpty ||
+        !DateTime.now().toUtc().isBefore(expiresAt.toUtc())) {
+      throw const FormatException('Invalid or expired Live Session');
+    }
+    _liveSessionToken = token.trim();
+    _liveSessionExpiresAt = expiresAt.toUtc();
+  }
+
+  static void clearLiveSession() {
+    _liveSessionToken = null;
+    _liveSessionExpiresAt = null;
+  }
 
   static void setBaseUrl(String url) {
     final trimmed = url.trim().replaceAll(RegExp(r'/$'), '');
+    final uri = Uri.tryParse(trimmed);
+    if (trimmed.isNotEmpty &&
+        (uri == null ||
+            !uri.hasAuthority ||
+            !{'http', 'https'}.contains(uri.scheme) ||
+            uri.host.isEmpty ||
+            uri.userInfo.isNotEmpty)) {
+      throw const FormatException('Invalid API Base URL');
+    }
     _customBaseUrl = trimmed;
   }
 
@@ -118,21 +178,29 @@ class AppApi {
       InterceptorsWrapper(
         onRequest: (options, handler) async {
           try {
-            if (_cachedApiKey == null) {
-              _cachedApiKey = await ApiConfig.getApiKey();
-            }
+            _cachedApiKey ??= await ApiConfig.getApiKey();
             final key = _cachedApiKey;
             if (key != null && key.isNotEmpty) {
               options.headers['X-API-Key'] = key;
+            }
+            if (hasActiveLiveSession) {
+              options.headers['X-Live-Session-Token'] = _liveSessionToken;
             }
           } catch (e) {
             debugPrint('[API] Error retrieving API key: $e');
           }
           return handler.next(options);
         },
+        onError: (error, handler) {
+          if (error.response?.statusCode == 401 &&
+              error.requestOptions.headers
+                  .containsKey('X-Live-Session-Token')) {
+            clearLiveSession();
+          }
+          return handler.next(error);
+        },
       ),
     );
     return d;
   }
 }
-

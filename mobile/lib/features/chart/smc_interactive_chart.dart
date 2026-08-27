@@ -61,16 +61,22 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
   @override
   Widget build(BuildContext context) {
     if (widget.candles.isEmpty) {
-      return const Center(child: Text('No candles data.', style: TextStyle(color: Colors.white54)));
+      return const Center(
+          child: Text('No candles data.',
+              style: TextStyle(color: Colors.white54)));
     }
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final chartWidth = math.max(10.0, constraints.maxWidth - 70); // 70px right price axis
-        final isOverPriceScale = _hoverOffset != null && _hoverOffset!.dx >= chartWidth;
+        final chartWidth =
+            math.max(10.0, constraints.maxWidth - 70); // 70px right price axis
+        final isOverPriceScale =
+            _hoverOffset != null && _hoverOffset!.dx >= chartWidth;
 
-        final maxScrollRight = math.max(0.0, (widget.candles.length * _candleWidth) - chartWidth * 0.3);
-        final minScrollLeft = math.min(-chartWidth * 0.6, maxScrollRight); // Allow smooth panning into future space
+        final maxScrollRight = math.max(
+            0.0, (widget.candles.length * _candleWidth) - chartWidth * 0.3);
+        final minScrollLeft = math.min(-chartWidth * 0.6,
+            maxScrollRight); // Allow smooth panning into future space
         _scrollOffset = _scrollOffset.clamp(minScrollLeft, maxScrollRight);
 
         return Stack(
@@ -81,13 +87,16 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
                 onPointerSignal: (pointerSignal) {
                   if (pointerSignal is PointerScrollEvent) {
                     setState(() {
-                      final isOverAxis = pointerSignal.localPosition.dx >= chartWidth;
+                      final isOverAxis =
+                          pointerSignal.localPosition.dx >= chartWidth;
                       if (isOverAxis) {
                         // Vertical price scale zoom (TradingView style)
                         if (pointerSignal.scrollDelta.dy < 0) {
-                          _priceScaleMultiplier = (_priceScaleMultiplier * 1.12).clamp(0.1, 10.0);
+                          _priceScaleMultiplier =
+                              (_priceScaleMultiplier * 1.12).clamp(0.1, 10.0);
                         } else {
-                          _priceScaleMultiplier = (_priceScaleMultiplier / 1.12).clamp(0.1, 10.0);
+                          _priceScaleMultiplier =
+                              (_priceScaleMultiplier / 1.12).clamp(0.1, 10.0);
                         }
                       } else {
                         // Horizontal candle width zoom
@@ -110,7 +119,8 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
                   },
                   onScaleStart: (details) {
                     _lastScale = 1.0;
-                    _isDraggingPriceScale = details.localFocalPoint.dx >= chartWidth;
+                    _isDraggingPriceScale =
+                        details.localFocalPoint.dx >= chartWidth;
                   },
                   onScaleUpdate: (details) {
                     setState(() {
@@ -121,11 +131,15 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
                           final dy = details.focalPointDelta.dy;
                           if (dy != 0) {
                             final factor = math.pow(0.985, dy).toDouble();
-                            _priceScaleMultiplier = (_priceScaleMultiplier * factor).clamp(0.1, 10.0);
+                            _priceScaleMultiplier =
+                                (_priceScaleMultiplier * factor)
+                                    .clamp(0.1, 10.0);
                           }
                         } else {
                           // Pan chart horizontally
-                          _scrollOffset = (_scrollOffset + details.focalPointDelta.dx).clamp(minScrollLeft, maxScrollRight);
+                          _scrollOffset =
+                              (_scrollOffset + details.focalPointDelta.dx)
+                                  .clamp(minScrollLeft, maxScrollRight);
                           _hoverOffset = details.localFocalPoint;
                         }
                       } else {
@@ -133,9 +147,12 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
                         final scaleDelta = details.scale / _lastScale;
                         _lastScale = details.scale;
                         if (_isDraggingPriceScale) {
-                          _priceScaleMultiplier = (_priceScaleMultiplier * scaleDelta).clamp(0.1, 10.0);
+                          _priceScaleMultiplier =
+                              (_priceScaleMultiplier * scaleDelta)
+                                  .clamp(0.1, 10.0);
                         } else {
-                          _candleWidth = (_candleWidth * scaleDelta).clamp(4.0, 40.0);
+                          _candleWidth =
+                              (_candleWidth * scaleDelta).clamp(4.0, 40.0);
                         }
                       }
                     });
@@ -157,7 +174,9 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
                     });
                   },
                   child: MouseRegion(
-                    cursor: isOverPriceScale ? SystemMouseCursors.resizeUpDown : SystemMouseCursors.basic,
+                    cursor: isOverPriceScale
+                        ? SystemMouseCursors.resizeUpDown
+                        : SystemMouseCursors.basic,
                     onHover: (event) {
                       setState(() {
                         _hoverOffset = event.localPosition;
@@ -195,11 +214,16 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
               left: 10,
               child: Row(
                 children: [
-                  _controlBtn(icon: Icons.add, tooltip: 'Zoom In', onTap: _zoomIn),
+                  _controlBtn(
+                      icon: Icons.add, tooltip: 'Zoom In', onTap: _zoomIn),
                   const SizedBox(width: 6),
-                  _controlBtn(icon: Icons.remove, tooltip: 'Zoom Out', onTap: _zoomOut),
+                  _controlBtn(
+                      icon: Icons.remove, tooltip: 'Zoom Out', onTap: _zoomOut),
                   const SizedBox(width: 6),
-                  _controlBtn(icon: Icons.restart_alt, tooltip: 'Reset Zoom & Pan (Auto-fit)', onTap: _resetView),
+                  _controlBtn(
+                      icon: Icons.restart_alt,
+                      tooltip: 'Reset Zoom & Pan (Auto-fit)',
+                      onTap: _resetView),
                 ],
               ),
             ),
@@ -209,10 +233,13 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
     );
   }
 
-  Widget _controlBtn({required IconData icon, required String tooltip, required VoidCallback onTap}) {
+  Widget _controlBtn(
+      {required IconData icon,
+      required String tooltip,
+      required VoidCallback onTap}) {
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1E2533).withOpacity(0.9),
+        color: const Color(0xFF1E2533).withValues(alpha: 0.9),
         borderRadius: BorderRadius.circular(6),
         border: Border.all(color: AppColors.border),
       ),
@@ -263,8 +290,8 @@ class _SMCUnifiedPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final priceAxisWidth = 70.0;
-    final timeAxisHeight = 26.0;
+    const priceAxisWidth = 70.0;
+    const timeAxisHeight = 26.0;
 
     final chartWidth = size.width - priceAxisWidth;
     final chartHeight = size.height - timeAxisHeight;
@@ -274,10 +301,11 @@ class _SMCUnifiedPainter extends CustomPainter {
     // 1. Calculate visible candle range based on scroll offset and candle width
     // Candles are ordered [0: newest, ..., N: oldest]
     // Index 0 is displayed at: chartWidth - rightPadding + scrollOffset
-    final rightPadding = 20.0;
+    const rightPadding = 20.0;
     final rawStart = ((scrollOffset - rightPadding) / candleWidth).floor() - 1;
     final startIndex = rawStart.clamp(0, candles.length - 1);
-    final rawEnd = ((chartWidth - rightPadding + scrollOffset) / candleWidth).ceil() + 3;
+    final rawEnd =
+        ((chartWidth - rightPadding + scrollOffset) / candleWidth).ceil() + 3;
     final endIndex = rawEnd.clamp(startIndex, candles.length - 1);
 
     if (startIndex > endIndex || startIndex >= candles.length) return;
@@ -318,8 +346,10 @@ class _SMCUnifiedPainter extends CustomPainter {
 
     // Apply user vertical price scale multiplier & vertical pan offset
     final basePriceSpan = maxPrice - minPrice;
-    final paddedMinPrice = minPrice - (basePriceSpan > 0 ? basePriceSpan * 0.06 : 1.0);
-    final paddedMaxPrice = maxPrice + (basePriceSpan > 0 ? basePriceSpan * 0.06 : 1.0);
+    final paddedMinPrice =
+        minPrice - (basePriceSpan > 0 ? basePriceSpan * 0.06 : 1.0);
+    final paddedMaxPrice =
+        maxPrice + (basePriceSpan > 0 ? basePriceSpan * 0.06 : 1.0);
     final baseMidPrice = (paddedMaxPrice + paddedMinPrice) / 2.0;
     final baseHalfSpan = (paddedMaxPrice - paddedMinPrice) / 2.0;
 
@@ -350,29 +380,34 @@ class _SMCUnifiedPainter extends CustomPainter {
     // A. Draw Grid Lines & Price Axis Labels
     // ------------------------------------------------------------------------
     final gridPaint = Paint()
-      ..color = const Color(0xFF1E2533).withOpacity(0.6)
+      ..color = const Color(0xFF1E2533).withValues(alpha: 0.6)
       ..strokeWidth = 1.0;
 
-    final numPriceTicks = 7;
+    const numPriceTicks = 7;
     for (int i = 0; i <= numPriceTicks; i++) {
       final y = (chartHeight / numPriceTicks) * i;
       canvas.drawLine(Offset(0, y), Offset(chartWidth, y), gridPaint);
 
       // Price label on right axis
       final priceAtTick = yToPrice(y);
-      final priceStr = priceAtTick < 10 ? priceAtTick.toStringAsFixed(4) : priceAtTick.toStringAsFixed(2);
+      final priceStr = priceAtTick < 10
+          ? priceAtTick.toStringAsFixed(4)
+          : priceAtTick.toStringAsFixed(2);
       _drawText(
         canvas,
         text: priceStr,
         offset: Offset(chartWidth + 6, y - 6),
-        style: const TextStyle(fontSize: 10, color: Colors.white54, fontFamily: 'monospace'),
+        style: const TextStyle(
+            fontSize: 10, color: Colors.white54, fontFamily: 'monospace'),
       );
     }
 
     // Right axis vertical divider
-    canvas.drawLine(Offset(chartWidth, 0), Offset(chartWidth, chartHeight), Paint()..color = AppColors.border);
+    canvas.drawLine(Offset(chartWidth, 0), Offset(chartWidth, chartHeight),
+        Paint()..color = AppColors.border);
     // Bottom time axis horizontal divider
-    canvas.drawLine(Offset(0, chartHeight), Offset(size.width, chartHeight), Paint()..color = AppColors.border);
+    canvas.drawLine(Offset(0, chartHeight), Offset(size.width, chartHeight),
+        Paint()..color = AppColors.border);
 
     // ------------------------------------------------------------------------
     // B. Draw SMC Overlays (Order Blocks, FVGs, EQ 50%) — SYNCHRONIZED TO PRICE
@@ -383,7 +418,8 @@ class _SMCUnifiedPainter extends CustomPainter {
       if (ob != null) {
         final obTop = (ob['top'] as num?)?.toDouble();
         final obBottom = (ob['bottom'] as num?)?.toDouble();
-        final isBullish = (ob['direction'] as String? ?? 'bullish') == 'bullish';
+        final isBullish =
+            (ob['direction'] as String? ?? 'bullish') == 'bullish';
 
         if (obTop != null && obBottom != null) {
           final yTop = priceToY(obTop);
@@ -391,16 +427,19 @@ class _SMCUnifiedPainter extends CustomPainter {
           final boxY = math.min(yTop, yBottom);
           final boxH = (yTop - yBottom).abs().clamp(6.0, chartHeight);
 
-          final obColor = isBullish ? const Color(0xFF00C087) : const Color(0xFFFF6B6B);
+          final obColor =
+              isBullish ? const Color(0xFF00C087) : const Color(0xFFFF6B6B);
           final rect = Rect.fromLTWH(0, boxY, chartWidth, boxH);
 
-          canvas.drawRect(rect, Paint()..color = obColor.withOpacity(0.18));
+          canvas.drawRect(
+              rect, Paint()..color = obColor.withValues(alpha: 0.18));
           final obBorder = Paint()
-            ..color = obColor.withOpacity(0.8)
+            ..color = obColor.withValues(alpha: 0.8)
             ..strokeWidth = 1.2
             ..style = PaintingStyle.stroke;
           canvas.drawLine(Offset(0, boxY), Offset(chartWidth, boxY), obBorder);
-          canvas.drawLine(Offset(0, boxY + boxH), Offset(chartWidth, boxY + boxH), obBorder);
+          canvas.drawLine(Offset(0, boxY + boxH),
+              Offset(chartWidth, boxY + boxH), obBorder);
 
           _drawPillTag(
             canvas,
@@ -408,7 +447,7 @@ class _SMCUnifiedPainter extends CustomPainter {
                 ? '🟢 BULLISH OB [${obBottom.toStringAsFixed(1)} - ${obTop.toStringAsFixed(1)}]'
                 : '🔴 BEARISH OB [${obBottom.toStringAsFixed(1)} - ${obTop.toStringAsFixed(1)}]',
             offset: Offset(8, boxY + 2),
-            bgColor: obColor.withOpacity(0.85),
+            bgColor: obColor.withValues(alpha: 0.85),
             textColor: Colors.black,
           );
         }
@@ -429,19 +468,22 @@ class _SMCUnifiedPainter extends CustomPainter {
           const fvgColor = Color(0xFF9B59B6);
           final rect = Rect.fromLTWH(0, boxY, chartWidth, boxH);
 
-          canvas.drawRect(rect, Paint()..color = fvgColor.withOpacity(0.16));
+          canvas.drawRect(
+              rect, Paint()..color = fvgColor.withValues(alpha: 0.16));
           final fvgBorder = Paint()
-            ..color = fvgColor.withOpacity(0.75)
+            ..color = fvgColor.withValues(alpha: 0.75)
             ..strokeWidth = 1.2
             ..style = PaintingStyle.stroke;
           canvas.drawLine(Offset(0, boxY), Offset(chartWidth, boxY), fvgBorder);
-          canvas.drawLine(Offset(0, boxY + boxH), Offset(chartWidth, boxY + boxH), fvgBorder);
+          canvas.drawLine(Offset(0, boxY + boxH),
+              Offset(chartWidth, boxY + boxH), fvgBorder);
 
           _drawPillTag(
             canvas,
-            text: '⚡ FVG IMBALANCE [${fvgBottom.toStringAsFixed(1)} - ${fvgTop.toStringAsFixed(1)}]',
+            text:
+                '⚡ FVG IMBALANCE [${fvgBottom.toStringAsFixed(1)} - ${fvgTop.toStringAsFixed(1)}]',
             offset: Offset(8, boxY + 2),
-            bgColor: fvgColor.withOpacity(0.85),
+            bgColor: fvgColor.withValues(alpha: 0.85),
             textColor: Colors.white,
           );
         }
@@ -479,7 +521,8 @@ class _SMCUnifiedPainter extends CustomPainter {
         final entry = (pos['entry'] as num?)?.toDouble();
         final sl = (pos['stop_loss'] as num?)?.toDouble();
         final tp = (pos['take_profit'] as num?)?.toDouble();
-        final isLong = (pos['direction']?.toString() ?? 'long').toLowerCase() == 'long';
+        final isLong =
+            (pos['direction']?.toString() ?? 'long').toLowerCase() == 'long';
 
         if (entry != null) {
           final y = priceToY(entry);
@@ -489,7 +532,8 @@ class _SMCUnifiedPainter extends CustomPainter {
           _drawDashedLine(canvas, Offset(0, y), Offset(chartWidth, y), p);
           _drawPillTag(
             canvas,
-            text: '🎯 ${isLong ? 'LONG' : 'SHORT'} ENTRY @ \$${entry.toStringAsFixed(2)}',
+            text:
+                '🎯 ${isLong ? 'LONG' : 'SHORT'} ENTRY @ \$${entry.toStringAsFixed(2)}',
             offset: Offset(12, y - 16),
             bgColor: const Color(0xFF00E5FF),
             textColor: Colors.black,
@@ -540,12 +584,15 @@ class _SMCUnifiedPainter extends CustomPainter {
       if (x < -candleWidth || x > chartWidth + candleWidth) continue;
 
       final isBull = c.close >= c.open;
-      final candleColor = isBull ? const Color(0xFF00C087) : const Color(0xFFFF6B6B);
+      final candleColor =
+          isBull ? const Color(0xFF00C087) : const Color(0xFFFF6B6B);
 
       // Volume Bar (at bottom of chart)
       final volH = maxVol > 0 ? (c.volume / maxVol) * volAreaHeight : 0.0;
-      final volRect = Rect.fromLTWH(x - (bodyWidth * 0.5), chartHeight - volH, bodyWidth, volH);
-      canvas.drawRect(volRect, Paint()..color = candleColor.withOpacity(0.35));
+      final volRect = Rect.fromLTWH(
+          x - (bodyWidth * 0.5), chartHeight - volH, bodyWidth, volH);
+      canvas.drawRect(
+          volRect, Paint()..color = candleColor.withValues(alpha: 0.35));
 
       // Wick (High to Low)
       final yHigh = priceToY(c.high);
@@ -561,7 +608,8 @@ class _SMCUnifiedPainter extends CustomPainter {
       final bodyTop = math.min(yOpen, yClose);
       final bodyHeight = math.max(1.5, (yOpen - yClose).abs());
 
-      final bodyRect = Rect.fromLTWH(x - (bodyWidth * 0.5), bodyTop, bodyWidth, bodyHeight);
+      final bodyRect =
+          Rect.fromLTWH(x - (bodyWidth * 0.5), bodyTop, bodyWidth, bodyHeight);
       canvas.drawRect(bodyRect, Paint()..color = candleColor);
 
       // Time labels at intervals on bottom axis
@@ -571,10 +619,12 @@ class _SMCUnifiedPainter extends CustomPainter {
           canvas,
           text: timeStr,
           offset: Offset(x - 30, chartHeight + 6),
-          style: const TextStyle(fontSize: 9, color: Colors.white38, fontFamily: 'monospace'),
+          style: const TextStyle(
+              fontSize: 9, color: Colors.white38, fontFamily: 'monospace'),
         );
         // Subtle vertical grid line
-        canvas.drawLine(Offset(x, 0), Offset(x, chartHeight), Paint()..color = const Color(0xFF1E2533).withOpacity(0.4));
+        canvas.drawLine(Offset(x, 0), Offset(x, chartHeight),
+            Paint()..color = const Color(0xFF1E2533).withValues(alpha: 0.4));
       }
     }
 
@@ -587,10 +637,13 @@ class _SMCUnifiedPainter extends CustomPainter {
         final curPricePaint = Paint()
           ..color = AppColors.bullish
           ..strokeWidth = 1.2;
-        _drawDashedLine(canvas, Offset(0, curY), Offset(chartWidth, curY), curPricePaint);
+        _drawDashedLine(
+            canvas, Offset(0, curY), Offset(chartWidth, curY), curPricePaint);
 
         // Right Axis Badge
-        final priceStr = currentPrice < 10 ? currentPrice.toStringAsFixed(4) : currentPrice.toStringAsFixed(2);
+        final priceStr = currentPrice < 10
+            ? currentPrice.toStringAsFixed(4)
+            : currentPrice.toStringAsFixed(2);
         final badgeRect = RRect.fromRectAndRadius(
           Rect.fromLTWH(chartWidth + 1, curY - 9, priceAxisWidth - 2, 18),
           const Radius.circular(3),
@@ -600,7 +653,11 @@ class _SMCUnifiedPainter extends CustomPainter {
           canvas,
           text: priceStr,
           offset: Offset(chartWidth + 6, curY - 6),
-          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.black, fontFamily: 'monospace'),
+          style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+              color: Colors.black,
+              fontFamily: 'monospace'),
         );
       }
     }
@@ -608,19 +665,27 @@ class _SMCUnifiedPainter extends CustomPainter {
     // ------------------------------------------------------------------------
     // F. Crosshair & Hover Tooltip
     // ------------------------------------------------------------------------
-    if (hoverOffset != null && hoverOffset!.dx >= 0 && hoverOffset!.dx <= chartWidth && hoverOffset!.dy >= 0 && hoverOffset!.dy <= chartHeight) {
+    if (hoverOffset != null &&
+        hoverOffset!.dx >= 0 &&
+        hoverOffset!.dx <= chartWidth &&
+        hoverOffset!.dy >= 0 &&
+        hoverOffset!.dy <= chartHeight) {
       final hx = hoverOffset!.dx;
       final hy = hoverOffset!.dy;
 
       final crossPaint = Paint()
         ..color = Colors.white38
         ..strokeWidth = 0.8;
-      _drawDashedLine(canvas, Offset(0, hy), Offset(chartWidth, hy), crossPaint);
-      _drawDashedLine(canvas, Offset(hx, 0), Offset(hx, chartHeight), crossPaint);
+      _drawDashedLine(
+          canvas, Offset(0, hy), Offset(chartWidth, hy), crossPaint);
+      _drawDashedLine(
+          canvas, Offset(hx, 0), Offset(hx, chartHeight), crossPaint);
 
       // Price Tag at cursor on right axis
       final hoverPrice = yToPrice(hy);
-      final priceStr = hoverPrice < 10 ? hoverPrice.toStringAsFixed(4) : hoverPrice.toStringAsFixed(2);
+      final priceStr = hoverPrice < 10
+          ? hoverPrice.toStringAsFixed(4)
+          : hoverPrice.toStringAsFixed(2);
       final cursorBadge = RRect.fromRectAndRadius(
         Rect.fromLTWH(chartWidth + 1, hy - 9, priceAxisWidth - 2, 18),
         const Radius.circular(3),
@@ -630,24 +695,35 @@ class _SMCUnifiedPainter extends CustomPainter {
         canvas,
         text: priceStr,
         offset: Offset(chartWidth + 6, hy - 6),
-        style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white, fontFamily: 'monospace'),
+        style: const TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.bold,
+            color: Colors.white,
+            fontFamily: 'monospace'),
       );
 
       // Find nearest candle
-      final nearestIndex = math.max(0, math.min(candles.length - 1, ((chartWidth - rightPadding + scrollOffset - hx) / candleWidth).round()));
+      final nearestIndex = math.max(
+          0,
+          math.min(
+              candles.length - 1,
+              ((chartWidth - rightPadding + scrollOffset - hx) / candleWidth)
+                  .round()));
       if (nearestIndex >= 0 && nearestIndex < candles.length) {
         final nc = candles[nearestIndex];
         final isBull = nc.close >= nc.open;
         final cColor = isBull ? AppColors.bullish : AppColors.bearish;
-        final timeStr = DateFormat('yyyy-MM-dd HH:mm').format(nc.date.toLocal());
+        final timeStr =
+            DateFormat('yyyy-MM-dd HH:mm').format(nc.date.toLocal());
 
         // Header info banner at top
-        final infoText = 'Time: $timeStr  O: ${nc.open.toStringAsFixed(2)}  H: ${nc.high.toStringAsFixed(2)}  L: ${nc.low.toStringAsFixed(2)}  C: ${nc.close.toStringAsFixed(2)}  Vol: ${_formatVol(nc.volume)}';
+        final infoText =
+            'Time: $timeStr  O: ${nc.open.toStringAsFixed(2)}  H: ${nc.high.toStringAsFixed(2)}  L: ${nc.low.toStringAsFixed(2)}  C: ${nc.close.toStringAsFixed(2)}  Vol: ${_formatVol(nc.volume)}';
         _drawPillTag(
           canvas,
           text: infoText,
           offset: const Offset(80, 10),
-          bgColor: const Color(0xFF1E2533).withOpacity(0.9),
+          bgColor: const Color(0xFF1E2533).withValues(alpha: 0.9),
           textColor: cColor,
           borderColor: AppColors.border,
         );
@@ -660,7 +736,8 @@ class _SMCUnifiedPainter extends CustomPainter {
     const dashSpace = 3.0;
     final dx = p2.dx - p1.dx;
     final dy = p2.dy - p1.dy;
-    final count = (math.sqrt(dx * dx + dy * dy) / (dashWidth + dashSpace)).floor();
+    final count =
+        (math.sqrt(dx * dx + dy * dy) / (dashWidth + dashSpace)).floor();
     for (int i = 0; i < count; i++) {
       final startRatio = i / count;
       final endRatio = (i + 0.6) / count;
@@ -682,15 +759,19 @@ class _SMCUnifiedPainter extends CustomPainter {
   }) {
     final textSpan = TextSpan(
       text: text,
-      style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: textColor, fontFamily: 'monospace'),
+      style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+          color: textColor,
+          fontFamily: 'monospace'),
     );
     final textPainter = TextPainter(
       text: textSpan,
       textDirection: TextDirection.ltr,
     )..layout();
 
-    final paddingH = 6.0;
-    final paddingV = 2.0;
+    const paddingH = 6.0;
+    const paddingV = 2.0;
     final rect = RRect.fromRectAndRadius(
       Rect.fromLTWH(
         offset.dx,
@@ -703,13 +784,22 @@ class _SMCUnifiedPainter extends CustomPainter {
 
     canvas.drawRRect(rect, Paint()..color = bgColor);
     if (borderColor != null) {
-      canvas.drawRRect(rect, Paint()..color = borderColor..style = PaintingStyle.stroke..strokeWidth = 1.0);
+      canvas.drawRRect(
+          rect,
+          Paint()
+            ..color = borderColor
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.0);
     }
 
-    textPainter.paint(canvas, Offset(offset.dx + paddingH, offset.dy + paddingV));
+    textPainter.paint(
+        canvas, Offset(offset.dx + paddingH, offset.dy + paddingV));
   }
 
-  void _drawText(Canvas canvas, {required String text, required Offset offset, required TextStyle style}) {
+  void _drawText(Canvas canvas,
+      {required String text,
+      required Offset offset,
+      required TextStyle style}) {
     final tp = TextPainter(
       text: TextSpan(text: text, style: style),
       textDirection: TextDirection.ltr,

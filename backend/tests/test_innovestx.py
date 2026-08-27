@@ -1,8 +1,8 @@
 ﻿"""Unit and integration tests for InnovestX Live Broker Client."""
 
+import os
 import pytest
 from app.engines.innovestx_client import InnovestXClient
-from app.core.config import get_settings
 
 
 def test_innovestx_signature_generation():
@@ -26,6 +26,8 @@ def test_innovestx_signature_generation():
 
 @pytest.mark.anyio
 async def test_innovestx_live_status():
+    if os.getenv("RUN_LIVE_BROKER_TESTS") != "1":
+        pytest.skip("Live broker tests are opt-in")
     client = InnovestXClient()
     if not client.is_configured():
         pytest.skip("InnovestX credentials not set")
@@ -39,6 +41,8 @@ async def test_innovestx_live_status():
 
 @pytest.mark.anyio
 async def test_innovestx_symbols_fetch():
+    if os.getenv("RUN_LIVE_BROKER_TESTS") != "1":
+        pytest.skip("Live broker tests are opt-in")
     client = InnovestXClient()
     if not client.is_configured():
         pytest.skip("InnovestX credentials not set")

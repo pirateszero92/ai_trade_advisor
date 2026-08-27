@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from app.engines.smc_engine import SMCEngine, Zone, SwingPoint
+from app.engines.smc_engine import SMCEngine, SwingPoint
 
 
 def generate_synthetic_ohlcv(bars: int = 100, trend: str = "bullish") -> pd.DataFrame:
@@ -39,6 +39,33 @@ def test_smc_engine_initialization():
     engine = SMCEngine(swing_length=5, internal_swing_length=3)
     assert engine.swing_length == 5
     assert engine.internal_swing_length == 3
+
+
+def test_persistent_structure_bias_requires_aligned_swing_pairs():
+    engine = SMCEngine(swing_length=5, eql_tolerance=0.002)
+    timestamps = pd.date_range("2026-01-01", periods=4, freq="h")
+
+    bullish = engine._infer_persistent_bias(
+        [SwingPoint(0, 100.0, "high", timestamps[0]), SwingPoint(2, 103.0, "high", timestamps[2])],
+        [SwingPoint(1, 90.0, "low", timestamps[1]), SwingPoint(3, 92.0, "low", timestamps[3])],
+    )
+    bearish = engine._infer_persistent_bias(
+        [SwingPoint(0, 103.0, "high", timestamps[0]), SwingPoint(2, 100.0, "high", timestamps[2])],
+        [SwingPoint(1, 92.0, "low", timestamps[1]), SwingPoint(3, 89.0, "low", timestamps[3])],
+    )
+    mixed = engine._infer_persistent_bias(
+        [SwingPoint(0, 100.0, "high", timestamps[0]), SwingPoint(2, 103.0, "high", timestamps[2])],
+        [SwingPoint(1, 92.0, "low", timestamps[1]), SwingPoint(3, 89.0, "low", timestamps[3])],
+    )
+    equal_inside_tolerance = engine._infer_persistent_bias(
+        [SwingPoint(0, 100.0, "high", timestamps[0]), SwingPoint(2, 100.1, "high", timestamps[2])],
+        [SwingPoint(1, 90.0, "low", timestamps[1]), SwingPoint(3, 90.1, "low", timestamps[3])],
+    )
+
+    assert bullish == "bullish"
+    assert bearish == "bearish"
+    assert mixed == "neutral"
+    assert equal_inside_tolerance == "neutral"
 
 
 def test_smc_analysis_structure():

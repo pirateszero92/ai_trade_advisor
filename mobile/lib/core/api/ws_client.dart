@@ -14,16 +14,23 @@ class AppWebSocketClient {
   Timer? _reconnectTimer;
   Timer? _pingTimer;
   bool _disposed = false;
+  int _reconnectAttempts = 0;
 
-  final _connectionStateController = StreamController<WsConnectionState>.broadcast();
-  final _priceStreamController = StreamController<Map<String, dynamic>>.broadcast();
-  final _tradeStreamController = StreamController<Map<String, dynamic>>.broadcast();
-  final _signalStreamController = StreamController<Map<String, dynamic>>.broadcast();
+  final _connectionStateController =
+      StreamController<WsConnectionState>.broadcast();
+  final _priceStreamController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _tradeStreamController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _signalStreamController =
+      StreamController<Map<String, dynamic>>.broadcast();
 
-  Stream<WsConnectionState> get connectionStateStream => _connectionStateController.stream;
+  Stream<WsConnectionState> get connectionStateStream =>
+      _connectionStateController.stream;
   Stream<Map<String, dynamic>> get priceStream => _priceStreamController.stream;
   Stream<Map<String, dynamic>> get tradeStream => _tradeStreamController.stream;
-  Stream<Map<String, dynamic>> get signalStream => _signalStreamController.stream;
+  Stream<Map<String, dynamic>> get signalStream =>
+      _signalStreamController.stream;
 
   WsConnectionState _currentState = WsConnectionState.disconnected;
   WsConnectionState get currentState => _currentState;
@@ -34,31 +41,45 @@ class AppWebSocketClient {
 
   void init() {
     _disposed = false;
-    connect();
+    unawaited(connect());
   }
 
-  void connect() {
-    if (_disposed || _currentState == WsConnectionState.connecting) return;
+  Future<void> connect() async {
+    if (_disposed ||
+        _currentState == WsConnectionState.connecting ||
+        isConnected) {
+      return;
+    }
     _setConnectionState(WsConnectionState.connecting);
 
     try {
-      final wsUri = Uri.parse(AppApi.wsUrl('/ws/stream?api_key=dev'));
+      final wsUri = Uri.parse(AppApi.wsUrl('/ws/stream'));
+      final apiKey = await ApiConfig.getApiKey();
+      if (apiKey == null || apiKey.isEmpty) {
+        throw StateError('API key is not configured');
+      }
+      final encodedKey =
+          base64Url.encode(utf8.encode(apiKey)).replaceAll('=', '');
+      final protocol = 'api-key.$encodedKey';
       debugPrint('[WS-Client] Connecting to $wsUri...');
-      _channel = WebSocketChannel.connect(wsUri);
+      final channel = WebSocketChannel.connect(wsUri, protocols: [protocol]);
+      _channel = channel;
+      await channel.ready.timeout(const Duration(seconds: 10));
 
-      _channel!.stream.listen(
+      channel.stream.listen(
         _onMessage,
         onError: (err) {
           debugPrint('[WS-Client] Connection error: $err');
-          _handleDisconnect();
+          if (identical(_channel, channel)) _handleDisconnect();
         },
         onDone: () {
           debugPrint('[WS-Client] Connection closed cleanly');
-          _handleDisconnect();
+          if (identical(_channel, channel)) _handleDisconnect();
         },
         cancelOnError: true,
       );
 
+      _reconnectAttempts = 0;
       _setConnectionState(WsConnectionState.connected);
       _startPingHeartbeat();
       _subscribeChannels();
@@ -113,6 +134,10 @@ class AppWebSocketClient {
   }
 
   void _handleDisconnect() {
+    if (_currentState == WsConnectionState.disconnected &&
+        _reconnectTimer?.isActive == true) {
+      return;
+    }
     _channel = null;
     _pingTimer?.cancel();
     _setConnectionState(WsConnectionState.disconnected);
@@ -122,9 +147,12 @@ class AppWebSocketClient {
   void _scheduleReconnect() {
     if (_disposed) return;
     _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(const Duration(seconds: 3), () {
+    _reconnectAttempts++;
+    final exponent = _reconnectAttempts.clamp(1, 6);
+    final delaySeconds = (1 << exponent).clamp(2, 60);
+    _reconnectTimer = Timer(Duration(seconds: delaySeconds), () {
       if (!_disposed && !isConnected) {
-        connect();
+        unawaited(connect());
       }
     });
   }
@@ -134,6 +162,20 @@ class AppWebSocketClient {
     if (!_connectionStateController.isClosed) {
       _connectionStateController.add(state);
     }
+  }
+
+  Future<void> reconnect() async {
+    if (_disposed) return;
+    _reconnectTimer?.cancel();
+    _pingTimer?.cancel();
+    final previous = _channel;
+    _channel = null;
+    _reconnectAttempts = 0;
+    _setConnectionState(WsConnectionState.disconnected);
+    try {
+      await previous?.sink.close();
+    } catch (_) {}
+    await connect();
   }
 
   void dispose() {

@@ -6,6 +6,7 @@ daily loss limits, drawdown management, and portfolio correlation warnings.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -30,6 +31,9 @@ class RiskAssessment:
     position_size: float = 0.0          # in units or contracts
     risk_amount: float = 0.0            # account currency at risk
     risk_pct: float = 0.0               # % of account at risk
+    base_risk_pct: float = 0.0
+    regime_risk_multiplier: float = 1.0
+    market_regime: str = "legacy"
 
     # Levels
     entry: Optional[float] = None
@@ -74,6 +78,9 @@ class RiskEngine:
         open_positions: int = 0,
         daily_pnl_pct: float = 0.0,
         drawdown_pct: float = 0.0,
+        contract_multiplier: float = 1.0,
+        quantity_step: float = 0.000001,
+        max_leverage: float = 5.0,
     ) -> RiskAssessment:
         """
         Evaluate the risk of trading a given SMCSignal.
@@ -103,6 +110,37 @@ class RiskEngine:
             risk_reward=signal.risk_reward,
         )
 
+        numeric_inputs = (account_balance, open_positions, daily_pnl_pct, drawdown_pct,
+                          contract_multiplier, quantity_step, max_leverage)
+        if any(not math.isfinite(float(value)) for value in numeric_inputs):
+            assessment.rejection_reason = "Risk inputs must be finite numbers"
+            return assessment
+        if account_balance <= 0:
+            assessment.rejection_reason = "Account balance must be positive"
+            return assessment
+        if open_positions < 0 or contract_multiplier <= 0 or quantity_step <= 0 or max_leverage <= 0:
+            assessment.rejection_reason = "Position count and instrument metadata are invalid"
+            return assessment
+
+        regime_data = getattr(signal, "market_regime", {})
+        regime_policy = (
+            regime_data.get("policy", {}) if isinstance(regime_data, dict) else {}
+        )
+        if regime_policy:
+            assessment.market_regime = str(regime_data.get("regime", "unknown"))
+            assessment.regime_risk_multiplier = float(
+                regime_policy.get("risk_multiplier", 0.0)
+            )
+            if (
+                not regime_data.get("ready", False)
+                or not regime_policy.get("entry_allowed", False)
+                or assessment.regime_risk_multiplier <= 0
+            ):
+                assessment.rejection_reason = (
+                    f"New risk is blocked in {assessment.market_regime} regime"
+                )
+                return assessment
+
         # --- 1. Daily loss limit ---
         if daily_pnl_pct <= -self.cfg.max_daily_loss:
             assessment.daily_loss_ok = False
@@ -128,6 +166,23 @@ class RiskEngine:
             assessment.rejection_reason = "Missing entry, SL, or TP levels"
             return assessment
 
+        levels = (signal.entry, signal.stop_loss, signal.take_profit)
+        if any(not math.isfinite(float(level)) or float(level) <= 0 for level in levels):
+            assessment.sl_valid = False
+            assessment.rejection_reason = "Entry, SL, and TP must be positive finite numbers"
+            return assessment
+
+        if signal.direction == "long":
+            geometry_valid = signal.stop_loss < signal.entry < signal.take_profit
+        elif signal.direction == "short":
+            geometry_valid = signal.take_profit < signal.entry < signal.stop_loss
+        else:
+            geometry_valid = False
+        if not geometry_valid:
+            assessment.sl_valid = False
+            assessment.rejection_reason = "Entry, SL, and TP geometry does not match trade direction"
+            return assessment
+
         sl_dist = abs(signal.entry - signal.stop_loss)
         if sl_dist == 0:
             assessment.sl_valid = False
@@ -138,31 +193,53 @@ class RiskEngine:
         sl_pct = sl_dist / signal.entry
         if sl_pct > self.SL_MAX_PCT:
             assessment.sl_valid = False
-            assessment.warnings.append(
-                f"Wide SL: {sl_pct*100:.2f}% of entry (max {self.SL_MAX_PCT*100:.0f}%)"
+            assessment.rejection_reason = (
+                f"SL is too wide ({sl_pct*100:.2f}% of entry; max {self.SL_MAX_PCT*100:.0f}%)"
             )
+            return assessment
 
         # --- 4. R:R check ---
-        if signal.risk_reward < self.MIN_RR:
+        calculated_rr = abs(signal.take_profit - signal.entry) / sl_dist
+        assessment.risk_reward = round(calculated_rr, 4)
+        effective_min_rr = max(
+            self.MIN_RR,
+            float(regime_policy.get("min_rr", self.MIN_RR)) if regime_policy else self.MIN_RR,
+        )
+        if calculated_rr < effective_min_rr:
             assessment.rr_ok = False
             assessment.approved = False
             assessment.rejection_reason = (
-                f"R:R too low ({signal.risk_reward:.2f} < {self.MIN_RR})"
+                f"R:R too low ({calculated_rr:.2f} < {effective_min_rr})"
             )
             return assessment
 
         # --- 5. Position sizing ---
-        risk_pct = self._adjust_risk(drawdown_pct, assessment)
-        risk_amount = account_balance * (risk_pct / 100)
+        base_risk_pct = self._adjust_risk(drawdown_pct, assessment)
+        assessment.base_risk_pct = base_risk_pct
+        risk_pct = base_risk_pct * assessment.regime_risk_multiplier
+        if assessment.regime_risk_multiplier < 1.0:
+            assessment.tone = "cautious"
+            assessment.warnings.append(
+                f"{assessment.market_regime.title()} regime — risk reduced to "
+                f"{assessment.regime_risk_multiplier:.0%} of the drawdown-adjusted budget"
+            )
+        risk_budget = account_balance * (risk_pct / 100)
         
-        # Hard cap: Max leverage 5x of account balance / entry price
-        max_notional = account_balance * 5.0
-        max_units = max_notional / signal.entry if signal.entry > 0 else 0.0
-        raw_size = risk_amount / sl_dist if sl_dist > 0 else 0.0
-        position_size = min(raw_size, max_units) if max_units > 0 else raw_size
+        # Instrument-aware sizing. contract_multiplier converts a one-point
+        # move in one quantity unit into account currency.
+        max_notional = account_balance * max_leverage
+        max_units = max_notional / (signal.entry * contract_multiplier)
+        raw_size = risk_budget / (sl_dist * contract_multiplier)
+        capped_size = min(raw_size, max_units)
+        position_size = math.floor(capped_size / quantity_step) * quantity_step
+        if position_size <= 0:
+            assessment.rejection_reason = "Account is too small for the instrument quantity step"
+            return assessment
 
-        assessment.risk_pct = risk_pct
-        assessment.risk_amount = round(risk_amount, 2)
+        actual_risk = position_size * sl_dist * contract_multiplier
+
+        assessment.risk_pct = round(actual_risk / account_balance * 100.0, 4)
+        assessment.risk_amount = round(actual_risk, 2)
         assessment.position_size = round(position_size, 6)
 
         # --- 6. Portfolio correlation warning ---
@@ -174,7 +251,7 @@ class RiskEngine:
         assessment.approved = True
         logger.info(
             f"[Risk] APPROVED {signal.symbol} | size={assessment.position_size} "
-            f"risk={assessment.risk_pct:.1f}% rr={signal.risk_reward:.2f}"
+            f"risk={assessment.risk_pct:.2f}% rr={calculated_rr:.2f}"
         )
         return assessment
 

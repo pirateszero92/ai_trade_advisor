@@ -1,6 +1,13 @@
 ﻿import pytest
 import pandas as pd
-from app.engines.market_data import MarketDataEngine, normalize_yfinance_symbol, _prune_caches, _OHLCV_CACHE, _TICKER_CACHE
+from app.engines.market_data import (
+    MarketDataEngine,
+    closed_candle_frame,
+    normalize_yfinance_symbol,
+    _prune_caches,
+    _OHLCV_CACHE,
+    _TICKER_CACHE,
+)
 
 
 def test_symbol_normalization():
@@ -27,7 +34,7 @@ async def test_ohlcv_caching():
 
     import time
     now = time.time()
-    _OHLCV_CACHE["TEST/USDT:1h:crypto:300"] = (now, df_fake)
+    _OHLCV_CACHE["TEST/USDT:1h:crypto:binance:300"] = (now, df_fake)
 
     cached_df = await mde.get_ohlcv("TEST/USDT", "1h", "crypto", limit=300)
     assert not cached_df.empty
@@ -44,3 +51,23 @@ def test_cache_pruning():
 
     _prune_caches(now)
     assert len(_TICKER_CACHE) < 350
+
+
+def test_closed_candle_frame_removes_forming_row_and_keeps_requested_lookback():
+    now = pd.Timestamp("2026-08-27T07:30:00Z")
+    index = pd.date_range("2026-08-27T04:00:00Z", periods=4, freq="h")
+    frame = pd.DataFrame(
+        {
+            "open": [1, 2, 3, 4],
+            "high": [2, 3, 4, 5],
+            "low": [0, 1, 2, 3],
+            "close": [1.5, 2.5, 3.5, 4.5],
+            "volume": [10, 10, 10, 10],
+        },
+        index=index,
+    )
+
+    closed = closed_candle_frame(frame, "1h", limit=3, now=now)
+
+    assert list(closed.index) == list(index[:3])
+    assert closed.index[-1] == pd.Timestamp("2026-08-27T06:00:00Z")

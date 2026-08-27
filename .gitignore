@@ -4,6 +4,8 @@ __pycache__/
 *$py.class
 .venv/
 venv/
+.test-venv/
+.backend-test-venv/
 # Environments & Secrets
 .env
 .env.*
@@ -21,6 +23,7 @@ venv/
 # DB
 *.db
 *.sqlite3
+backend/config/*.json.lock
 
 # Logs
 *.log

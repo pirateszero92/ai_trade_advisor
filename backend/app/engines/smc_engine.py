@@ -6,15 +6,16 @@ Break of Structure (BOS), Change of Character (CHoCH), and premium/discount zone
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import numpy as np
 import pandas as pd
 from loguru import logger
 
+from app.engines.indicator_core import IndicatorDecisionCore
 from app.engines.indicators import AdvancedIndicatorsEngine
+from app.engines.regime_engine import MarketRegimeEngine
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +55,9 @@ class SMCSignal:
 
     # Market structure
     bias: Literal["bullish", "bearish", "neutral"] = "neutral"
+    structure_bias_source: Literal[
+        "fresh_structure_break", "confirmed_swing_trend", "neutral"
+    ] = "neutral"
     htf_bias: Literal["bullish", "bearish", "neutral"] = "neutral"
     bos: bool = False
     choch: bool = False
@@ -77,6 +81,8 @@ class SMCSignal:
 
     # Confluence score (0-100)
     confluence: int = 0
+    indicator_decision: dict[str, Any] = field(default_factory=dict)
+    market_regime: dict[str, Any] = field(default_factory=dict)
 
     # Suggested trade
     direction: Literal["long", "short", "wait"] = "wait"
@@ -94,8 +100,12 @@ class SMCSignal:
     delta_ratio: float = 0.0
     cvd: float = 0.0
     delta_absorption: bool = False
+    delta_absorption_type: Optional[Literal["bullish_absorption", "bearish_absorption"]] = None
     delta_status: str = "Neutral"
+    delta_source: str = "unavailable"
     volume_spike: bool = False
+    squeeze_data_valid: bool = False
+    volume_data_valid: bool = False
 
     # Raw swing data (not serialised to JSON by default)
     swing_highs: list[SwingPoint] = field(default_factory=list, repr=False)
@@ -111,6 +121,7 @@ class SMCSignal:
             "symbol": self.symbol,
             "timeframe": self.timeframe,
             "bias": self.bias,
+            "structure_bias_source": self.structure_bias_source,
             "htf_bias": self.htf_bias,
             "bos": self.bos,
             "choch": self.choch,
@@ -141,6 +152,8 @@ class SMCSignal:
             "current_price": self.current_price,
             "confluence": self.confluence,
             "confluence_score": self.confluence_score,
+            "indicator_decision": self.indicator_decision,
+            "market_regime": self.market_regime,
             "direction": self.direction,
             "entry": self.entry,
             "stop_loss": self.stop_loss,
@@ -154,8 +167,12 @@ class SMCSignal:
             "delta_ratio": self.delta_ratio,
             "cvd": self.cvd,
             "delta_absorption": self.delta_absorption,
+            "delta_absorption_type": self.delta_absorption_type,
             "delta_status": self.delta_status,
+            "delta_source": self.delta_source,
             "volume_spike": self.volume_spike,
+            "squeeze_data_valid": self.squeeze_data_valid,
+            "volume_data_valid": self.volume_data_valid,
         }
 
 
@@ -182,10 +199,24 @@ class SMCEngine:
         swing_length: int = 5,
         internal_swing_length: int = 3,
         eql_tolerance: float = 0.002,
+        order_block_lookback: int = 50,
+        fvg_lookback: int = 30,
+        atr_length: int = 14,
     ):
+        if internal_swing_length >= swing_length:
+            raise ValueError("internal_swing_length must be below swing_length")
+        if min(swing_length, internal_swing_length) < 1:
+            raise ValueError("swing lengths must be positive")
+        if order_block_lookback < 10 or fvg_lookback < 5 or atr_length < 5:
+            raise ValueError("SMC lookbacks are below their safe minimum")
         self.swing_length = swing_length
         self.internal_swing_length = internal_swing_length
         self.eql_tolerance = eql_tolerance
+        self.order_block_lookback = order_block_lookback
+        self.fvg_lookback = fvg_lookback
+        self.atr_length = atr_length
+        self.indicator_core = IndicatorDecisionCore()
+        self.regime_engine = MarketRegimeEngine()
 
     def analyze(
         self,
@@ -194,6 +225,8 @@ class SMCEngine:
         timeframe: str,
         htf_bias: Literal["bullish", "bearish", "neutral"] = "neutral",
         entry_mode: Literal["limit", "market"] = "limit",
+        indicator_config: dict[str, Any] | None = None,
+        regime_config: dict[str, Any] | None = None,
     ) -> SMCSignal:
         """
         Run full SMC analysis pipeline on the given OHLCV DataFrame.
@@ -216,15 +249,26 @@ class SMCEngine:
         SMCSignal
             Complete analysis result object.
         """
-        if df.empty or len(df) < self.DEFAULT_SWING_LENGTH * 2 + 1:
+        required = {"open", "high", "low", "close"}
+        normalized_columns = {str(column).lower() for column in df.columns}
+        if not required.issubset(normalized_columns):
+            logger.error(f"[SMC] Missing OHLC columns for {symbol}: {sorted(required - normalized_columns)}")
+            return SMCSignal(symbol=symbol, timeframe=timeframe, htf_bias=htf_bias)
+        if df.empty or len(df) < self.swing_length * 2 + 1:
             logger.warning(f"[SMC] Insufficient data for {symbol} ({len(df)} bars)")
             return SMCSignal(symbol=symbol, timeframe=timeframe, htf_bias=htf_bias)
 
         df = df.copy()
         df.columns = [c.lower() for c in df.columns]
+        numeric_columns = [column for column in ("open", "high", "low", "close", "volume") if column in df]
+        df[numeric_columns] = df[numeric_columns].apply(pd.to_numeric, errors="coerce")
+        if not np.isfinite(df[["open", "high", "low", "close"]].to_numpy()).all():
+            logger.error(f"[SMC] Non-finite OHLC data for {symbol}")
+            return SMCSignal(symbol=symbol, timeframe=timeframe, htf_bias=htf_bias)
 
         signal = SMCSignal(symbol=symbol, timeframe=timeframe, htf_bias=htf_bias)
         signal.current_price = float(df["close"].iloc[-1])
+        active_indicator_config = indicator_config or self.indicator_core.config()
 
         try:
             # 1. Swing points
@@ -232,7 +276,15 @@ class SMCEngine:
             signal.swing_highs = swing_highs
             signal.swing_lows = swing_lows
 
-            # 2. Market structure (BOS / CHoCH)
+            # 2. Persist the latest confirmed swing trend between fresh
+            # BOS/CHoCH events.  Without this state every non-break candle
+            # becomes neutral, which makes an ordered MTF gate unusably
+            # restrictive and can select the wrong OB/FVG direction.
+            signal.bias = self._infer_persistent_bias(swing_highs, swing_lows)
+            if signal.bias != "neutral":
+                signal.structure_bias_source = "confirmed_swing_trend"
+
+            # A close through structure supersedes the persisted swing trend.
             self._detect_structure(df, swing_highs, swing_lows, signal, "bullish")
             self._detect_structure(df, swing_highs, swing_lows, signal, "bearish")
 
@@ -255,29 +307,59 @@ class SMCEngine:
             # 7. Liquidity sweeps
             self._detect_liquidity_sweep(df, signal)
 
-            # 8. Squeeze Momentum & Volume Delta quantitative analysis
-            try:
-                sq = AdvancedIndicatorsEngine.compute_squeeze_momentum(df)
-                vd = AdvancedIndicatorsEngine.compute_volume_delta(df)
+            # 8. Compute each configured indicator independently. A missing
+            # volume feed must not suppress the Squeeze layer (or vice versa).
+            squeeze_config = active_indicator_config["indicators"]["squeeze_momentum"]
+            if squeeze_config["enabled"]:
+                try:
+                    sq = AdvancedIndicatorsEngine.compute_squeeze_momentum(
+                        df, **squeeze_config["params"]
+                    )
+                    signal.squeeze_status = sq.status
+                    signal.squeeze_momentum = sq.momentum
+                    signal.momentum_direction = sq.direction
+                    signal.squeeze_data_valid = bool(sq.histogram)
+                except Exception as exc:
+                    logger.warning(
+                        "Error computing Squeeze Momentum for {}: {}", symbol, exc
+                    )
 
-                signal.squeeze_status = sq.status
-                signal.squeeze_momentum = sq.momentum
-                signal.momentum_direction = sq.direction
-
-                signal.volume_delta = vd.delta
-                signal.delta_ratio = vd.delta_ratio
-                signal.cvd = vd.cvd
-                signal.delta_absorption = vd.is_absorption
-                signal.delta_status = vd.description
-                signal.volume_spike = vd.volume_spike
-            except Exception as e:
-                logger.warning(f"Error computing advanced indicators for {symbol}: {e}")
+            volume_config = active_indicator_config["indicators"]["volume_delta"]
+            if volume_config["enabled"]:
+                try:
+                    vd = AdvancedIndicatorsEngine.compute_volume_delta(
+                        df, **volume_config["params"]
+                    )
+                    signal.volume_delta = vd.delta
+                    signal.delta_ratio = vd.delta_ratio
+                    signal.cvd = vd.cvd
+                    signal.delta_absorption = vd.is_absorption
+                    signal.delta_absorption_type = vd.absorption_type
+                    signal.delta_status = vd.description
+                    signal.delta_source = vd.source
+                    signal.volume_spike = vd.volume_spike
+                    signal.volume_data_valid = (
+                        "volume" in df and bool((df["volume"] > 0).any())
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Error computing Volume Delta for {}: {}", symbol, exc
+                    )
 
             # 9. Trade setup (Limit OB zone vs Market price) with dynamic ATR buffer
             self._compute_trade_setup(signal, entry_mode=entry_mode, df=df)
 
-            # 10. Confluence score (0-100 scale)
-            signal.confluence = self._compute_confluence(signal)
+            # 10. Configurable, explainable 3-indicator decision score.
+            signal.indicator_decision = self.indicator_core.evaluate(
+                signal, active_indicator_config
+            )
+            signal.confluence = int(signal.indicator_decision["score"])
+
+            # 11. Classify the environment after all three approved layers are
+            # available. Regime is a policy selector, never a fourth score.
+            signal.market_regime = self.regime_engine.classify(
+                df, signal, config=regime_config
+            )
 
         except Exception as exc:
             logger.exception(f"[SMC] Analysis error for {symbol}: {exc}")
@@ -338,6 +420,40 @@ class SMCEngine:
     # Market Structure (BOS / CHoCH)
     # ------------------------------------------------------------------
 
+    def _infer_persistent_bias(
+        self,
+        swing_highs: list[SwingPoint],
+        swing_lows: list[SwingPoint],
+    ) -> Literal["bullish", "bearish", "neutral"]:
+        """Infer the last confirmed external structure from two swing pairs.
+
+        A bullish structure requires both a meaningfully higher high and a
+        higher low; bearish requires both a lower high and a lower low.  Mixed
+        structures and moves inside the equal-level tolerance remain neutral
+        so the decision fails closed rather than guessing a direction.
+        """
+        if len(swing_highs) < 2 or len(swing_lows) < 2:
+            return "neutral"
+
+        previous_high, current_high = swing_highs[-2].price, swing_highs[-1].price
+        previous_low, current_low = swing_lows[-2].price, swing_lows[-1].price
+
+        def meaningfully_above(current: float, previous: float) -> bool:
+            return current > previous + abs(previous) * self.eql_tolerance
+
+        def meaningfully_below(current: float, previous: float) -> bool:
+            return current < previous - abs(previous) * self.eql_tolerance
+
+        if meaningfully_above(current_high, previous_high) and meaningfully_above(
+            current_low, previous_low
+        ):
+            return "bullish"
+        if meaningfully_below(current_high, previous_high) and meaningfully_below(
+            current_low, previous_low
+        ):
+            return "bearish"
+        return "neutral"
+
     def _detect_structure(
         self,
         df: pd.DataFrame,
@@ -370,10 +486,12 @@ class SMCEngine:
                 if signal.bias == "bullish":
                     # Continuation: Higher High in existing bullish trend → BOS
                     signal.bos = True
+                    signal.structure_bias_source = "fresh_structure_break"
                 elif signal.bias in ("bearish", "neutral"):
                     # Reversal: busts above swing high against bearish/neutral bias → CHoCH
                     signal.choch = True
                     signal.bias = "bullish"
+                    signal.structure_bias_source = "fresh_structure_break"
 
         elif kind == "bearish" and len(swing_lows) >= 2:
             # Reference the PRIOR swing low (second-to-last) as the structural level
@@ -384,10 +502,12 @@ class SMCEngine:
                 if signal.bias == "bearish":
                     # Continuation: Lower Low in existing bearish trend → BOS
                     signal.bos = True
+                    signal.structure_bias_source = "fresh_structure_break"
                 elif signal.bias in ("bullish", "neutral"):
                     # Reversal: breaks below swing low against bullish/neutral bias → CHoCH
                     signal.choch = True
                     signal.bias = "bearish"
+                    signal.structure_bias_source = "fresh_structure_break"
 
     # ------------------------------------------------------------------
     # Order Block Detection
@@ -416,7 +536,6 @@ class SMCEngine:
         if len(df) < 10:
             return None
 
-        opens = df["open"].values
         closes = df["close"].values
         highs = df["high"].values
         lows = df["low"].values
@@ -424,8 +543,9 @@ class SMCEngine:
         n = len(df)
         last_close = closes[-1]
 
-        # Look for OB in the last 50 bars (exclude last 3 for confirmation)
-        lookback = min(50, n - 4)
+        # Role profiles express this in bars so 4H structure can deliberately
+        # use a different horizon from a 15m execution trigger.
+        lookback = min(self.order_block_lookback, n - 4)
 
         if direction == "bullish":
             for i in range(n - 4, n - lookback, -1):
@@ -516,16 +636,18 @@ class SMCEngine:
         n = len(df)
         last_close = float(df["close"].iloc[-1])
 
-        lookback = min(30, n - 2)
+        lookback = min(self.fvg_lookback, n - 2)
 
         if direction == "bullish":
             for i in range(n - 2, n - lookback, -1):
-                gap_low = highs[i - 1]
-                gap_high = lows[i + 1] if i + 1 < n else lows[i]
                 if i + 1 >= n:
                     continue
+                gap_low = highs[i - 1]
                 gap_high = lows[i + 1]
-                if gap_high > gap_low and last_close > gap_low:
+                # Any later candle entering the gap mitigates this strict FVG.
+                later_lows = lows[i + 2:n] if i + 2 < n else np.array([])
+                mitigated = bool(later_lows.size and np.any(later_lows <= gap_high))
+                if gap_high > gap_low and not mitigated and last_close > gap_low:
                     return Zone(
                         kind="fvg",
                         direction="bullish",
@@ -541,7 +663,9 @@ class SMCEngine:
                     continue
                 gap_high = lows[i - 1]
                 gap_low = highs[i + 1]
-                if gap_high > gap_low and last_close < gap_high:
+                later_highs = highs[i + 2:n] if i + 2 < n else np.array([])
+                mitigated = bool(later_highs.size and np.any(later_highs >= gap_low))
+                if gap_high > gap_low and not mitigated and last_close < gap_high:
                     return Zone(
                         kind="fvg",
                         direction="bearish",
@@ -581,8 +705,8 @@ class SMCEngine:
         -------
         List of price levels (floats), most recent 5.
         """
-        tol = self.EQL_TOLERANCE
-        equal_levels: list[float] = []
+        tol = self.eql_tolerance
+        equal_levels: list[tuple[int, float]] = []
 
         if swing_points and len(swing_points) >= 2:
             # Efficient: compare only swing point prices
@@ -593,7 +717,7 @@ class SMCEngine:
                     if ref == 0:
                         continue
                     if abs(prices[j] - ref) / ref <= tol:
-                        equal_levels.append(float(round(ref, 6)))
+                        equal_levels.append((swing_points[j].index, float(round((ref + prices[j]) / 2.0, 6))))
                         break
         else:
             # Fallback: scan all bars (slower but works without swing data)
@@ -606,16 +730,19 @@ class SMCEngine:
                     continue
                 for j in range(i + 1, min(i + 20, n)):
                     if abs(values[j] - ref) / ref <= tol:
-                        equal_levels.append(float(round(ref, 6)))
+                        equal_levels.append((j, float(round((ref + values[j]) / 2.0, 6))))
                         break
 
         # Deduplicate clusters
-        unique: list[float] = []
-        for lvl in sorted(set(equal_levels)):
-            if not unique or abs(lvl - unique[-1]) / (unique[-1] or 1) > tol:
-                unique.append(lvl)
+        unique: list[tuple[int, float]] = []
+        for index, level in sorted(equal_levels, key=lambda item: item[0]):
+            existing = next((i for i, (_, value) in enumerate(unique) if abs(level - value) / (value or 1) <= tol), None)
+            if existing is None:
+                unique.append((index, level))
+            elif index > unique[existing][0]:
+                unique[existing] = (index, level)
 
-        return unique[-5:]  # return most recent 5
+        return [level for _, level in sorted(unique, key=lambda item: item[0])[-5:]]
 
     # ------------------------------------------------------------------
     # Premium / Discount Computation
@@ -735,14 +862,14 @@ class SMCEngine:
             signal.direction = "wait"
             return
 
-        # Compute 14-period ATR for volatility-adaptive SL buffer
+        # Compute profile-specific ATR for volatility-adaptive SL buffer.
         atr = 0.0
-        if df is not None and len(df) >= 14:
+        if df is not None and len(df) >= self.atr_length:
             tr1 = df["high"] - df["low"]
             tr2 = (df["high"] - df["close"].shift()).abs()
             tr3 = (df["low"] - df["close"].shift()).abs()
             tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-            atr = float(tr.rolling(14).mean().iloc[-1])
+            atr = float(tr.rolling(self.atr_length).mean().iloc[-1])
 
         # Buffer: max(0.2% price, 0.25 * ATR)
         base_buffer = max(price * 0.002, atr * 0.25) if atr > 0 else (price * 0.002)
@@ -837,84 +964,6 @@ class SMCEngine:
     # ------------------------------------------------------------------
 
     def _compute_confluence(self, signal: SMCSignal) -> int:
-        """
-        Score the strength of the trade setup on a 0-100 scale using the 3-Layer Confluence Matrix:
-        1. SMC Structural Location (Max 40 pts)
-        2. Volume Delta & Absorption (Max 30 pts)
-        3. Squeeze Momentum Timing (Max 30 pts)
-
-        Returns
-        -------
-        int
-            Score in the range 0-100.
-        """
-        score = 0
-
-        # ---- Layer 1: SMC Location (Max 40 pts) ----
-        if signal.htf_bias != "neutral" and signal.htf_bias == signal.bias:
-            score += 8
-
-        # Direction-aligned Order Block
-        if signal.order_block:
-            if (signal.direction == "long" and signal.order_block.direction == "bullish") or \
-               (signal.direction == "short" and signal.order_block.direction == "bearish"):
-                score += 10
-
-        # Direction-aligned Fair Value Gap
-        if signal.fvg:
-            if (signal.direction == "long" and signal.fvg.direction == "bullish") or \
-               (signal.direction == "short" and signal.fvg.direction == "bearish"):
-                score += 6
-
-        # Direction-aligned Liquidity Sweep
-        if signal.liquidity_swept:
-            # Bullish sweep: swept below prior low -> Long confluence
-            # Bearish sweep: swept above prior high -> Short confluence
-            if (signal.direction == "long" and signal.sweep_direction == "low") or \
-               (signal.direction == "short" and signal.sweep_direction == "high"):
-                score += 8
-
-        if signal.direction == "long" and signal.in_discount:
-            score += 5
-        elif signal.direction == "short" and signal.in_premium:
-            score += 5
-        if signal.bos or signal.choch:
-            score += 3
-
-        # ---- Layer 2: Volume Delta & Absorption (Max 30 pts) ----
-        # Direction alignment
-        if signal.direction == "long" and signal.volume_delta > 0:
-            score += 10
-        elif signal.direction == "short" and signal.volume_delta < 0:
-            score += 10
-
-        # Absorption / Smart Money Footprint
-        if signal.delta_absorption:
-            score += 15
-        elif abs(signal.delta_ratio) >= 0.2:
-            score += 8
-
-        # Volume Spike
-        if signal.volume_spike:
-            score += 5
-
-        # ---- Layer 3: Squeeze Momentum Breakout (Max 30 pts) ----
-        if signal.squeeze_status == "squeeze_fire":
-            score += 15
-        elif signal.squeeze_status == "no_squeeze":
-            score += 8
-        elif signal.squeeze_status == "squeeze_on":
-            score -= 5  # Penalize entering right into a dead squeeze compression
-
-        # Momentum acceleration
-        if signal.direction == "long" and signal.momentum_direction == "accelerating_up":
-            score += 15
-        elif signal.direction == "short" and signal.momentum_direction == "accelerating_down":
-            score += 15
-        elif signal.direction == "long" and signal.momentum_direction == "decelerating_up":
-            score += 8
-        elif signal.direction == "short" and signal.momentum_direction == "decelerating_down":
-            score += 8
-
-        # Bound score between 0 and 100
-        return max(0, min(score, 100))
+        """Compatibility wrapper for callers of the previous private scorer."""
+        signal.indicator_decision = self.indicator_core.evaluate(signal)
+        return int(signal.indicator_decision["score"])

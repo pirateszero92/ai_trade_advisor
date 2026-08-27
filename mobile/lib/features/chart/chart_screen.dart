@@ -8,6 +8,7 @@ import 'package:dio/dio.dart';
 import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/ws_client.dart';
+import '../../core/trading/strategy_gate_view.dart';
 import '../settings/settings_screen.dart';
 import 'smc_interactive_chart.dart';
 
@@ -23,7 +24,27 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   String _selectedSymbol = 'BTC/USDT';
   String _selectedExchange = 'binance';
   String _selectedTimeframe = '1h';
-  String _selectedHtfTimeframe = '4h';
+  String get _selectedHtfTimeframe {
+    final watchItem = _watchlistMap[_selectedSymbol];
+    final watchTf = watchItem?['timeframe']?.toString().toLowerCase();
+    final configuredHtf = watchItem?['htf_timeframe']?.toString().toLowerCase();
+    if (watchTf == _selectedTimeframe.toLowerCase() &&
+        configuredHtf != null &&
+        configuredHtf.isNotEmpty) {
+      return configuredHtf;
+    }
+    return const {
+      '1m',
+      '2m',
+      '3m',
+      '5m',
+      '15m',
+      '30m',
+      '1h',
+    }.contains(_selectedTimeframe)
+        ? '4h'
+        : '1w';
+  }
 
   final _timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w'];
   List<String> _cryptoSymbols = [];
@@ -51,14 +72,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   double _selectedRiskPct = 1.0;
   bool _autoBeEnabled = true;
   bool _trailingStopEnabled = true;
-  double _accountCapital = 100000.0;
+  double _accountCapital = 0.0;
 
   // AI Blueprint Execution Suite Controllers & State
   final _bpEntryCtrl = TextEditingController();
   final _bpSlCtrl = TextEditingController();
   final _bpTpCtrl = TextEditingController();
   final _bpTp2Ctrl = TextEditingController();
-  String _bpEntryMode = 'ai'; // 'ai' (AI Plan Limit), 'market' (Market), 'custom' (Custom Price)
+  String _bpEntryMode =
+      'ai'; // 'ai' (AI Plan Limit), 'market' (Market), 'custom' (Custom Price)
   Map<String, dynamic>? _activeAiBlueprint;
   Map<String, dynamic>? _mtfMatrixData;
   bool _isMtfLoading = false;
@@ -66,7 +88,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   void _recalcRiskSize([double? overrideRiskPct]) {
     final riskPct = overrideRiskPct ?? _selectedRiskPct;
     final curEntry = double.tryParse(_bpEntryCtrl.text) ?? _lastPrice;
-    final curSl = double.tryParse(_bpSlCtrl.text) ?? (curEntry > 0 ? curEntry * 0.99 : 0.0);
+    final curSl = double.tryParse(_bpSlCtrl.text) ??
+        (curEntry > 0 ? curEntry * 0.99 : 0.0);
     final slDist = (curEntry - curSl).abs();
 
     if (curEntry <= 0 || slDist <= 0 || _accountCapital <= 0) return;
@@ -78,14 +101,17 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     final maxAllowed = (_accountCapital * 5.0) / curEntry;
     calculatedUnits = calculatedUnits.clamp(0.0001, maxAllowed);
 
-    if (_selectedMarket == 'stock' || _selectedSymbol.toUpperCase().contains('THB')) {
+    if (_selectedMarket == 'stock' ||
+        _selectedSymbol.toUpperCase().contains('THB')) {
       _qtyCtrl.text = calculatedUnits.round().clamp(1, 100000).toString();
     } else if (_selectedSymbol.toUpperCase().contains('BTC')) {
       _qtyCtrl.text = calculatedUnits.toStringAsFixed(4);
-    } else if (_selectedSymbol.toUpperCase().contains('ETH') || _selectedSymbol.toUpperCase().contains('SOL')) {
+    } else if (_selectedSymbol.toUpperCase().contains('ETH') ||
+        _selectedSymbol.toUpperCase().contains('SOL')) {
       _qtyCtrl.text = calculatedUnits.toStringAsFixed(3);
     } else if (_selectedMarket == 'forex') {
-      _qtyCtrl.text = (calculatedUnits / 1000).clamp(0.01, 50.0).toStringAsFixed(2);
+      _qtyCtrl.text =
+          (calculatedUnits / 1000).clamp(0.01, 50.0).toStringAsFixed(2);
     } else {
       _qtyCtrl.text = calculatedUnits.toStringAsFixed(2);
     }
@@ -98,7 +124,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   List<Map<String, String>> _chatMessages = [
     {
       'role': 'assistant',
-      'content': 'สวัสดีครับ ผม Apex AI ที่ปรึกษาการเทรดสถาบันของคุณ กำลังมอนิเตอร์โครงสร้างตลาดสด มีข้อสงสัยหรืออยากให้ช่วยวิเคราะห์จุดไหนของกราฟนี้ไหมครับ?',
+      'content':
+          'สวัสดีครับ ผม Apex AI ที่ปรึกษาการเทรดสถาบันของคุณ กำลังมอนิเตอร์โครงสร้างตลาดสด มีข้อสงสัยหรืออยากให้ช่วยวิเคราะห์จุดไหนของกราฟนี้ไหมครับ?',
     },
   ];
 
@@ -120,7 +147,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     }
   }
 
-  String get _currSym => _selectedSymbol.toUpperCase().contains('THB') ? '฿' : '\$';
+  String get _currSym =>
+      _selectedSymbol.toUpperCase().contains('THB') ? '฿' : '\$';
   String _fmtPrice(double v) {
     if (v == 0) return '0.00';
     if (v > 0 && v < 0.0001) return v.toStringAsFixed(8);
@@ -132,15 +160,18 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   StreamSubscription<Map<String, dynamic>>? _wsPriceSub;
   StreamSubscription<WsConnectionState>? _wsStateSub;
   WsConnectionState _wsState = WsConnectionState.disconnected;
+  final CancelToken _requestCancelToken = CancelToken();
 
   @override
   void initState() {
     super.initState();
     _wsState = AppWebSocketClient.instance.currentState;
-    _wsStateSub = AppWebSocketClient.instance.connectionStateStream.listen((state) {
+    _wsStateSub =
+        AppWebSocketClient.instance.connectionStateStream.listen((state) {
       if (mounted) setState(() => _wsState = state);
     });
-    _wsPriceSub = AppWebSocketClient.instance.priceStream.listen(_onWsPriceTick);
+    _wsPriceSub =
+        AppWebSocketClient.instance.priceStream.listen(_onWsPriceTick);
     _bootstrapFromWatchlist();
     _fetchOpenPositions();
     _startLiveTicker();
@@ -148,9 +179,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   void _onWsPriceTick(Map<String, dynamic> ticks) {
     if (!mounted) return;
-    final normSel = _selectedSymbol.replaceAll('/', '').replaceAll('-', '').replaceAll('_', '').toUpperCase();
+    final normSel = _selectedSymbol
+        .replaceAll('/', '')
+        .replaceAll('-', '')
+        .replaceAll('_', '')
+        .toUpperCase();
     if (ticks.containsKey(normSel) || ticks.containsKey(_selectedSymbol)) {
-      final t = (ticks[normSel] ?? ticks[_selectedSymbol]) as Map<String, dynamic>;
+      final t =
+          (ticks[normSel] ?? ticks[_selectedSymbol]) as Map<String, dynamic>;
       final newPrice = (t['price'] as num?)?.toDouble() ?? 0.0;
       if (newPrice > 0) {
         setState(() {
@@ -166,12 +202,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   }
 
   Future<void> _bootstrapFromWatchlist() async {
-    _fetchChartData();
     await _fetchWatchlist();
+    if (!mounted) return;
+    await _fetchChartData();
   }
 
   @override
   void dispose() {
+    _requestCancelToken.cancel('Chart screen disposed');
     _wsPriceSub?.cancel();
     _wsStateSub?.cancel();
     _liveTickerTimer?.cancel();
@@ -186,12 +224,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     super.dispose();
   }
 
-  Map<String, double> _symbolLivePrices = {};
+  final Map<String, double> _symbolLivePrices = {};
   Map<String, Map<String, dynamic>> _watchlistMap = {};
 
   void _resolveExchangeForCurrentSymbol() {
     final item = _watchlistMap[_selectedSymbol];
-    if (item != null && item['exchange'] != null && item['exchange'].toString().isNotEmpty) {
+    if (item != null &&
+        item['exchange'] != null &&
+        item['exchange'].toString().isNotEmpty) {
       _selectedExchange = item['exchange'].toString().toLowerCase();
     } else {
       if (_selectedSymbol.toUpperCase().contains('THB')) {
@@ -209,7 +249,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   Future<void> _fetchWatchlist() async {
     try {
       final dio = AppApi.dio;
-      final resp = await dio.get(AppApi.url('/api/v1/settings/watchlist'));
+      final resp = await dio.get(
+        AppApi.url('/api/v1/settings/watchlist'),
+        cancelToken: _requestCancelToken,
+      );
       if (resp.statusCode == 200 && resp.data != null) {
         final List<dynamic> list = resp.data['watchlist'] ?? [];
         if (!mounted) return;
@@ -221,8 +264,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         for (var item in list) {
           final raw = item as Map;
           final sym = raw['symbol']?.toString().trim().toUpperCase() ?? '';
-          final mType = raw['market_type']?.toString().toLowerCase() ?? 'crypto';
-          final ex = raw['exchange']?.toString().toLowerCase() ?? (sym.contains('THB') ? 'innovestx' : 'binance');
+          final mType =
+              raw['market_type']?.toString().toLowerCase() ?? 'crypto';
+          final ex = raw['exchange']?.toString().toLowerCase() ??
+              (sym.contains('THB') ? 'innovestx' : 'binance');
           if (sym.isEmpty) continue;
 
           newMap[sym] = {
@@ -260,6 +305,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             }
           }
           _resolveExchangeForCurrentSymbol();
+          final configuredTf = _watchlistMap[_selectedSymbol]?['timeframe']
+              ?.toString()
+              .toLowerCase();
+          if (configuredTf != null && _timeframes.contains(configuredTf)) {
+            _selectedTimeframe = configuredTf;
+          }
         });
       }
     } catch (_) {}
@@ -271,6 +322,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       final dio = AppApi.dio;
       final resp = await dio.get(
         AppApi.url('/api/v1/chart/ticker'),
+        cancelToken: _requestCancelToken,
         queryParameters: {
           'symbol': _selectedSymbol,
           'market_type': _selectedMarket,
@@ -280,7 +332,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         final d = resp.data;
         if (!mounted) return;
         final newPrice = (d['price'] as num?)?.toDouble() ?? 0.0;
-        if (newPrice <= 0.0) return; // Strict guard against 0.0 or corrupted price
+        if (newPrice <= 0.0) {
+          return; // Strict guard against 0.0 or corrupted price
+        }
 
         setState(() {
           _lastPrice = newPrice;
@@ -308,8 +362,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     } catch (_) {}
   }
 
-  static String _normalizeSym(String s) =>
-      s.replaceAll('/', '').replaceAll('-', '').replaceAll('_', '').toUpperCase();
+  static String _normalizeSym(String s) => s
+      .replaceAll('/', '')
+      .replaceAll('-', '')
+      .replaceAll('_', '')
+      .toUpperCase();
 
   bool _isMultiPriceFetching = false;
 
@@ -318,7 +375,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     _isMultiPriceFetching = true;
     try {
       final dio = AppApi.dio;
-      final resp = await dio.get(AppApi.url('/api/v1/signals/live-prices'));
+      final resp = await dio.get(
+        AppApi.url('/api/v1/signals/live-prices'),
+        cancelToken: _requestCancelToken,
+      );
       final prices = resp.data['prices'] as Map<String, dynamic>? ?? {};
       if (prices.isNotEmpty && mounted) {
         bool hasChanges = false;
@@ -336,7 +396,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               _symbolLivePrices[norm] = p;
               hasChanges = true;
             }
-            if (sym == _selectedSymbol || norm == _normalizeSym(_selectedSymbol)) {
+            if (sym == _selectedSymbol ||
+                norm == _normalizeSym(_selectedSymbol)) {
               if (_lastPrice != p) {
                 _lastPrice = p;
                 hasChanges = true;
@@ -356,44 +417,55 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   void _startLiveTicker() {
     _liveTickerTimer?.cancel();
-    _liveTickerTimer = Timer.periodic(const Duration(milliseconds: 1500), (t) {
+    _liveTickerTimer = Timer.periodic(const Duration(seconds: 5), (t) {
       if (!mounted) return;
-      _fetchLiveTicker();
-      _fetchMultiAssetLivePrices();
-      if (t.tick % 3 == 0) {
+      if (_wsState != WsConnectionState.connected || t.tick % 6 == 0) {
+        _fetchLiveTicker();
+        _fetchMultiAssetLivePrices();
+      }
+      if (t.tick % 6 == 0) {
         _fetchOpenPositions();
       }
-      if (t.tick % 5 == 0) {
+      if (t.tick % 12 == 0) {
         _fetchWatchlist();
       }
     });
   }
 
-  double _getMarkPriceForSymbol(String symbol, double entry) {
+  double? _getMarkPriceForSymbol(String symbol) {
     if (symbol == _selectedSymbol && _lastPrice > 0) {
       _symbolLivePrices[symbol] = _lastPrice;
       _symbolLivePrices[_normalizeSym(symbol)] = _lastPrice;
       return _lastPrice;
     }
-    if (_symbolLivePrices.containsKey(symbol) && _symbolLivePrices[symbol]! > 0) {
+    if (_symbolLivePrices.containsKey(symbol) &&
+        _symbolLivePrices[symbol]! > 0) {
       return _symbolLivePrices[symbol]!;
     }
     final norm = _normalizeSym(symbol);
     if (_symbolLivePrices.containsKey(norm) && _symbolLivePrices[norm]! > 0) {
       return _symbolLivePrices[norm]!;
     }
-    return entry > 0 ? entry : 100.0;
+    return null;
   }
 
-  void _switchToSymbol(String symbol, {String? targetMarket, String? targetExchange}) {
-    if (symbol == _selectedSymbol && targetMarket == null && targetExchange == null) return;
+  void _switchToSymbol(String symbol,
+      {String? targetMarket, String? targetExchange}) {
+    if (symbol == _selectedSymbol &&
+        targetMarket == null &&
+        targetExchange == null) {
+      return;
+    }
 
     // 1. Preserve chat messages and blueprint for the previous symbol
     if (_chatMessages.isNotEmpty) {
-      _symbolChatMessages[_selectedSymbol] = List<Map<String, String>>.from(_chatMessages);
+      _symbolChatMessages[_selectedSymbol] =
+          List<Map<String, String>>.from(_chatMessages);
     }
-    if (_activeAiBlueprint != null && _activeAiBlueprint!['symbol'] == _selectedSymbol) {
-      _symbolBlueprints[_selectedSymbol] = Map<String, dynamic>.from(_activeAiBlueprint!);
+    if (_activeAiBlueprint != null &&
+        _activeAiBlueprint!['symbol'] == _selectedSymbol) {
+      _symbolBlueprints[_selectedSymbol] =
+          Map<String, dynamic>.from(_activeAiBlueprint!);
     }
 
     String m = targetMarket ?? 'crypto';
@@ -415,22 +487,30 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       } else {
         _resolveExchangeForCurrentSymbol();
       }
+      final configuredTf =
+          _watchlistMap[symbol]?['timeframe']?.toString().toLowerCase();
+      if (configuredTf != null && _timeframes.contains(configuredTf)) {
+        _selectedTimeframe = configuredTf;
+      }
 
       // 2. Restore or initialize chat messages for newly selected symbol
       if (_symbolChatMessages.containsKey(symbol)) {
-        _chatMessages = List<Map<String, String>>.from(_symbolChatMessages[symbol]!);
+        _chatMessages =
+            List<Map<String, String>>.from(_symbolChatMessages[symbol]!);
       } else {
         _chatMessages = [
           {
             'role': 'assistant',
-            'content': 'สวัสดีครับ ผม Apex AI ที่ปรึกษาการเทรดสถาบันของคุณ กำลังมอนิเตอร์โครงสร้างตลาดสดของ $symbol มีข้อสงสัยหรืออยากให้ช่วยวิเคราะห์จุดไหนของกราฟนี้ไหมครับ?',
+            'content':
+                'สวัสดีครับ ผม Apex AI ที่ปรึกษาการเทรดสถาบันของคุณ กำลังมอนิเตอร์โครงสร้างตลาดสดของ $symbol มีข้อสงสัยหรืออยากให้ช่วยวิเคราะห์จุดไหนของกราฟนี้ไหมครับ?',
           },
         ];
       }
 
       // 3. Restore or clear active blueprint for new symbol
       if (_symbolBlueprints.containsKey(symbol)) {
-        _activeAiBlueprint = Map<String, dynamic>.from(_symbolBlueprints[symbol]!);
+        _activeAiBlueprint =
+            Map<String, dynamic>.from(_symbolBlueprints[symbol]!);
       } else {
         _activeAiBlueprint = null;
       }
@@ -455,34 +535,23 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     try {
       final dio = AppApi.dio;
 
-      // 1. Fetch OHLCV candles and SMC Overlay concurrently
-      final ohlcvFuture = dio.get(
-        AppApi.url('/api/v1/chart/ohlcv'),
+      // Candles and Strategy Gate must come from the exact same immutable
+      // closed-candle snapshot. A second OHLCV request could cross a candle
+      // boundary and make the chart disagree with its own overlay.
+      final overlayResp = await dio.get(
+        AppApi.url('/api/v1/chart/overlay'),
+        cancelToken: _requestCancelToken,
         queryParameters: {
           'symbol': _selectedSymbol,
           'timeframe': _selectedTimeframe,
+          'htf_timeframe': _selectedHtfTimeframe,
           'market_type': _selectedMarket,
           'exchange': _selectedExchange,
-          'limit': 200,
         },
       );
 
-      final overlayFuture = dio.get(
-        AppApi.url('/api/v1/chart/overlay'),
-        queryParameters: {
-          'symbol': _selectedSymbol,
-          'timeframe': _selectedTimeframe,
-          'market_type': _selectedMarket,
-          'exchange': _selectedExchange,
-        },
-      ).catchError((_) => Response(requestOptions: RequestOptions(path: ''), data: <String, dynamic>{}));
-
       final requestedSymbol = _selectedSymbol;
-      final results = await Future.wait([ohlcvFuture, overlayFuture]);
-      final ohlcvResp = results[0];
-      final overlayResp = results[1];
-
-      final List<dynamic> rawCandles = ohlcvResp.data['candles'] ?? [];
+      final List<dynamic> rawCandles = overlayResp.data['candles'] ?? [];
       final List<Candle> parsedCandles = [];
 
       for (final c in rawCandles) {
@@ -494,7 +563,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           final lNum = (c['l'] as num?)?.toDouble();
           final cNum = (c['c'] as num?)?.toDouble();
           final vNum = (c['v'] as num?)?.toDouble() ?? 0.0;
-          if (tStr == null || oNum == null || hNum == null || lNum == null || cNum == null) continue;
+          if (tStr == null ||
+              oNum == null ||
+              hNum == null ||
+              lNum == null ||
+              cNum == null) {
+            continue;
+          }
           parsedCandles.add(
             Candle(
               date: DateTime.parse(tStr),
@@ -519,35 +594,77 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       _fetchLiveTicker();
 
       if (!mounted || _selectedSymbol != requestedSymbol) return;
+      final embeddedMtf = overlayResp.data['mtf'] is Map
+          ? Map<String, dynamic>.from(overlayResp.data['mtf'] as Map)
+          : null;
       setState(() {
         _candles = parsedCandles;
-        _smcOverlayData = (overlayResp.data is Map<String, dynamic>) ? overlayResp.data as Map<String, dynamic> : null;
+        _smcOverlayData = (overlayResp.data is Map<String, dynamic>)
+            ? overlayResp.data as Map<String, dynamic>
+            : null;
+        _mtfMatrixData = embeddedMtf;
         _isLoading = false;
 
-        // Auto-refresh text controllers and blueprint for current symbol
-        final currentBp = (_activeAiBlueprint != null && _activeAiBlueprint!['symbol'] == _selectedSymbol)
-            ? _activeAiBlueprint
-            : _symbolBlueprints[_selectedSymbol];
+        final gate = StrategyGateView.fromPayload(_smcOverlayData);
+        if (!gate.approved) {
+          _symbolBlueprints.remove(_selectedSymbol);
+          if (_activeAiBlueprint?['symbol'] == _selectedSymbol) {
+            _activeAiBlueprint = null;
+          }
+        }
 
-        final dir = (currentBp?['direction'] ?? _smcOverlayData?['direction'] ?? _smcOverlayData?['bias'] ?? 'LONG').toString().toUpperCase();
-        final isBull = dir.contains('BUY') || dir.contains('LONG') || dir.contains('BULL');
-        final live = _lastPrice > 0 ? _lastPrice : 100.0;
-        final aiEntry = (currentBp?['entry'] as num?)?.toDouble() ?? (_smcOverlayData?['entry'] as num?)?.toDouble() ?? live;
-        final aiSl = (currentBp?['stop_loss'] as num?)?.toDouble() ?? (_smcOverlayData?['stop_loss'] as num?)?.toDouble() ?? (isBull ? aiEntry * 0.992 : aiEntry * 1.008);
-        final aiTp = (currentBp?['take_profit'] as num?)?.toDouble() ?? (_smcOverlayData?['take_profit'] as num?)?.toDouble() ?? (isBull ? aiEntry * 1.025 : aiEntry * 0.975);
-        final aiTp2 = (currentBp?['take_profit_2'] as num?)?.toDouble() ?? (isBull ? aiEntry * 1.045 : aiEntry * 0.955);
+        // Auto-refresh text controllers and blueprint for current symbol
+        final currentBp = gate.approved &&
+                (_activeAiBlueprint != null &&
+                    _activeAiBlueprint!['symbol'] == _selectedSymbol &&
+                    _blueprintMatchesGate(_activeAiBlueprint, gate))
+            ? _activeAiBlueprint
+            : (gate.approved &&
+                    _blueprintMatchesGate(
+                        _symbolBlueprints[_selectedSymbol], gate)
+                ? _symbolBlueprints[_selectedSymbol]
+                : null);
+
+        final dir = (currentBp?['direction'] ??
+                (gate.approved ? gate.action : gate.setupDirection))
+            .toString()
+            .toUpperCase();
+        final isBull =
+            dir.contains('BUY') || dir.contains('LONG') || dir.contains('BULL');
+        final live = _lastPrice > 0 ? _lastPrice : null;
+        final aiEntry = (currentBp?['entry'] as num?)?.toDouble() ??
+            (_smcOverlayData?['entry'] as num?)?.toDouble();
+        final aiSl = (currentBp?['stop_loss'] as num?)?.toDouble() ??
+            (_smcOverlayData?['stop_loss'] as num?)?.toDouble();
+        final aiTp = (currentBp?['take_profit'] as num?)?.toDouble() ??
+            (_smcOverlayData?['take_profit'] as num?)?.toDouble();
+        final aiTp2 = (currentBp?['take_profit_2'] as num?)?.toDouble();
 
         final curTextVal = double.tryParse(_bpEntryCtrl.text);
-        final isMismatched = curTextVal == null || (curTextVal > 0 && live > 0 && (curTextVal / live > 3.0 || curTextVal / live < 0.33));
+        final isMismatched = curTextVal == null ||
+            (curTextVal > 0 &&
+                live != null &&
+                (curTextVal / live > 3.0 || curTextVal / live < 0.33));
+        final hasValidSetup = aiEntry != null &&
+            aiSl != null &&
+            aiTp != null &&
+            aiEntry > 0 &&
+            ((isBull && aiSl < aiEntry && aiTp > aiEntry) ||
+                (!isBull && aiSl > aiEntry && aiTp < aiEntry));
 
-        if (_bpEntryCtrl.text.isEmpty || isMismatched || _bpEntryMode == 'ai') {
+        if (hasValidSetup &&
+            (_bpEntryCtrl.text.isEmpty ||
+                isMismatched ||
+                _bpEntryMode == 'ai')) {
           _bpEntryCtrl.text = _fmtPrice(aiEntry);
           _bpSlCtrl.text = _fmtPrice(aiSl);
           _bpTpCtrl.text = _fmtPrice(aiTp);
-          _bpTp2Ctrl.text = _fmtPrice(aiTp2);
+          _bpTp2Ctrl.text = aiTp2 != null && aiTp2 > 0 ? _fmtPrice(aiTp2) : '';
         }
       });
-      _fetchMtfMatrix(_selectedSymbol);
+      if (embeddedMtf == null) {
+        _fetchMtfMatrix(_selectedSymbol);
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -564,7 +681,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     try {
       final resp = await AppApi.dio.get(
         AppApi.url('/api/v1/signals/mtf-matrix'),
-        queryParameters: {'symbol': targetSym, 'market_type': _selectedMarket},
+        cancelToken: _requestCancelToken,
+        queryParameters: {
+          'symbol': targetSym,
+          'market_type': _selectedMarket,
+          'exchange': _selectedExchange,
+        },
       );
       if (resp.data != null && resp.data['data'] != null) {
         if (!mounted) return;
@@ -580,18 +702,26 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   Future<void> _fetchOpenPositions() async {
     try {
-      final resp = await AppApi.dio.get(AppApi.url('/api/v1/trades/'), queryParameters: {'status': 'open'});
+      final resp = await AppApi.dio.get(
+        AppApi.url('/api/v1/paper/orders'),
+        cancelToken: _requestCancelToken,
+        queryParameters: {'status': 'open'},
+      );
       final List<dynamic> list = resp.data['trades'] ?? [];
-      double cap = 100000.0;
+      double cap = _accountCapital;
       try {
-        final portResp = await AppApi.dio.get(AppApi.url('/api/v1/trades/portfolio'));
-        if (portResp.data != null && portResp.data['capital'] != null) {
-          cap = (portResp.data['capital'] as num).toDouble();
+        final portResp = await AppApi.dio.get(
+          AppApi.url('/api/v1/paper/account'),
+          cancelToken: _requestCancelToken,
+        );
+        if (portResp.data != null && portResp.data['equity'] != null) {
+          cap = (portResp.data['equity'] as num).toDouble();
         }
       } catch (_) {}
       if (!mounted) return;
       setState(() {
-        _openPositions = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+        _openPositions =
+            list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
         _accountCapital = cap;
       });
     } catch (e) {
@@ -599,7 +729,24 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     }
   }
 
-  void _syncBlueprintFromAI(String rawResponse, [Map<String, dynamic>? fallbackData]) {
+  bool _blueprintMatchesGate(
+      Map<String, dynamic>? blueprint, StrategyGateView gate) {
+    if (blueprint == null || !gate.approved) return false;
+    final direction = blueprint['direction']?.toString().toLowerCase();
+    return (gate.allowsLong && direction == 'long') ||
+        (gate.allowsShort && direction == 'short');
+  }
+
+  void _syncBlueprintFromAI(String rawResponse) {
+    final gate = StrategyGateView.fromPayload(_smcOverlayData);
+    if (!gate.approved) {
+      _symbolBlueprints.remove(_selectedSymbol);
+      if (_activeAiBlueprint?['symbol'] == _selectedSymbol) {
+        _activeAiBlueprint = null;
+      }
+      return;
+    }
+
     Map<String, dynamic>? parsed;
     try {
       final match = RegExp(r'\{[\s\S]*\}').firstMatch(rawResponse);
@@ -608,8 +755,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       }
     } catch (_) {}
 
+    if (parsed == null) return;
+
     String direction = 'WAIT';
-    int confidence = 80;
+    int confidence = 0;
     double? entry;
     double? sl;
     double? tp;
@@ -618,121 +767,155 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     String zoneName = 'DISCOUNT';
     String htfTrend = 'BULLISH';
 
-    if (parsed != null) {
-      final rec = (parsed['recommendation'] ?? parsed['direction'] ?? '').toString().toUpperCase();
-      if (rec.contains('BUY') || rec.contains('LONG')) {
-        direction = 'LONG';
-      } else if (rec.contains('SELL') || rec.contains('SHORT')) {
-        direction = 'SHORT';
-      }
-      
-      confidence = (parsed['confidence'] as num?)?.toInt() ?? 80;
-      entry = (parsed['entry'] as num?)?.toDouble();
-      sl = (parsed['stop_loss'] as num?)?.toDouble() ?? (parsed['sl'] as num?)?.toDouble();
-      tp = (parsed['take_profit'] as num?)?.toDouble() ?? (parsed['tp'] as num?)?.toDouble();
-      tp2 = (parsed['take_profit_2'] as num?)?.toDouble() ?? (parsed['tp2'] as num?)?.toDouble();
-      reasoning = parsed['reasoning']?.toString() ?? parsed['risk_notes']?.toString() ?? '';
+    final rec = (parsed['recommendation'] ?? parsed['direction'] ?? '')
+        .toString()
+        .toUpperCase();
+    if (rec.contains('BUY') || rec.contains('LONG')) {
+      direction = 'LONG';
+    } else if (rec.contains('SELL') || rec.contains('SHORT')) {
+      direction = 'SHORT';
     }
-
     if (direction == 'WAIT') {
-      final upper = rawResponse.toUpperCase();
-      if (upper.contains('BUY') || upper.contains('LONG') || upper.contains('ซื้อ')) {
-        direction = 'LONG';
-      } else if (upper.contains('SELL') || upper.contains('SHORT') || upper.contains('ขาย')) {
-        direction = 'SHORT';
+      _symbolBlueprints.remove(_selectedSymbol);
+      if (_activeAiBlueprint?['symbol'] == _selectedSymbol) {
+        _activeAiBlueprint = null;
       }
+      return;
     }
+    if ((gate.allowsLong && direction != 'LONG') ||
+        (gate.allowsShort && direction != 'SHORT')) {
+      _symbolBlueprints.remove(_selectedSymbol);
+      if (_activeAiBlueprint?['symbol'] == _selectedSymbol) {
+        _activeAiBlueprint = null;
+      }
+      return;
+    }
+    confidence = ((parsed['confidence'] as num?)?.toInt() ?? 0).clamp(0, 100);
+    entry = (parsed['entry'] as num?)?.toDouble();
+    sl = (parsed['stop_loss'] as num?)?.toDouble() ??
+        (parsed['sl'] as num?)?.toDouble();
+    tp = (parsed['take_profit'] as num?)?.toDouble() ??
+        (parsed['tp'] as num?)?.toDouble();
+    tp2 = (parsed['take_profit_2'] as num?)?.toDouble() ??
+        (parsed['tp2'] as num?)?.toDouble();
+    reasoning = parsed['reasoning']?.toString() ??
+        parsed['risk_notes']?.toString() ??
+        '';
 
-    // Regex extractors for price levels if not parsed from JSON
-    if (entry == null) {
-      final entryM = RegExp(r'Entry[:\s]+[^\d]*(\d+(?:\.\d+)?)', caseSensitive: false).firstMatch(rawResponse);
-      if (entryM != null) entry = double.tryParse(entryM.group(1)!);
-    }
-    if (sl == null) {
-      final slM = RegExp(r'(?:Stop[- ]?Loss|SL)[:\s]+[^\d]*(\d+(?:\.\d+)?)', caseSensitive: false).firstMatch(rawResponse);
-      if (slM != null) sl = double.tryParse(slM.group(1)!);
-    }
-    if (tp == null) {
-      final tpM = RegExp(r'(?:Take[- ]?Profit|TP|TP1)[:\s]+[^\d]*(\d+(?:\.\d+)?)', caseSensitive: false).firstMatch(rawResponse);
-      if (tpM != null) tp = double.tryParse(tpM.group(1)!);
-    }
-    if (tp2 == null) {
-      final tp2M = RegExp(r'(?:TP2|Target 2)[:\s]+[^\d]*(\d+(?:\.\d+)?)', caseSensitive: false).firstMatch(rawResponse);
-      if (tp2M != null) tp2 = double.tryParse(tp2M.group(1)!);
-    }
+    final hasValidGeometry = entry != null &&
+        sl != null &&
+        tp != null &&
+        entry.isFinite &&
+        sl.isFinite &&
+        tp.isFinite &&
+        entry > 0 &&
+        (direction == 'LONG'
+            ? (sl < entry && tp > entry)
+            : (sl > entry && tp < entry));
+    if (!hasValidGeometry) return;
 
-    final live = _lastPrice > 0 ? _lastPrice : 100.0;
     final isLong = direction == 'LONG';
-    final fallbackEntry = entry ?? live;
-    final fallbackSl = sl ?? (isLong ? fallbackEntry * 0.992 : fallbackEntry * 1.008);
-    final fallbackTp = tp ?? (isLong ? fallbackEntry * 1.025 : fallbackEntry * 0.975);
-    final fallbackTp2 = tp2 ?? (isLong ? fallbackEntry * 1.045 : fallbackEntry * 0.955);
 
     final inDiscount = _smcOverlayData?['in_discount'] == true;
     final inPremium = _smcOverlayData?['in_premium'] == true;
-    zoneName = inDiscount ? 'DISCOUNT ZONE' : (inPremium ? 'PREMIUM ZONE' : 'EQUILIBRIUM');
+    zoneName = inDiscount
+        ? 'DISCOUNT ZONE'
+        : (inPremium ? 'PREMIUM ZONE' : 'EQUILIBRIUM');
     htfTrend = isLong ? 'Bullish' : 'Bearish';
 
     _activeAiBlueprint = {
       'symbol': _selectedSymbol,
       'direction': direction,
       'confidence': confidence,
-      'entry': fallbackEntry,
-      'stop_loss': fallbackSl,
-      'take_profit': fallbackTp,
-      'take_profit_2': fallbackTp2,
+      'entry': entry,
+      'stop_loss': sl,
+      'take_profit': tp,
+      if (tp2 != null && tp2.isFinite && tp2 > 0) 'take_profit_2': tp2,
       'reasoning': reasoning.isNotEmpty ? reasoning : rawResponse,
       'zone_name': zoneName,
       'htf_trend': htfTrend,
       'timestamp': DateTime.now(),
     };
-    _symbolBlueprints[_selectedSymbol] = Map<String, dynamic>.from(_activeAiBlueprint!);
+    _symbolBlueprints[_selectedSymbol] =
+        Map<String, dynamic>.from(_activeAiBlueprint!);
 
     if (_bpEntryMode == 'ai' || _bpEntryCtrl.text.isEmpty) {
-      _bpEntryCtrl.text = _fmtPrice(fallbackEntry);
-      _bpSlCtrl.text = _fmtPrice(fallbackSl);
-      _bpTpCtrl.text = _fmtPrice(fallbackTp);
-      _bpTp2Ctrl.text = _fmtPrice(fallbackTp2);
+      _bpEntryCtrl.text = _fmtPrice(entry);
+      _bpSlCtrl.text = _fmtPrice(sl);
+      _bpTpCtrl.text = _fmtPrice(tp);
+      _bpTp2Ctrl.text =
+          tp2 != null && tp2.isFinite && tp2 > 0 ? _fmtPrice(tp2) : '';
     }
   }
 
-  Future<void> _executeOrder(String direction, {double? customEntry, double? customSl, double? customTp}) async {
-    final live = _lastPrice > 0 ? _lastPrice : 100.0;
-    final entry = customEntry ?? (_lastPrice > 0 ? _lastPrice : 64000.0);
-    
-    // Dynamic SL/TP from SMC overlay or safe default 1.0% distance
-    double slDist = entry * 0.01;
-    final overlaySl = (_smcOverlayData?['stop_loss'] as num?)?.toDouble();
-    if (overlaySl != null && overlaySl > 0) {
-      final diff = (entry - overlaySl).abs();
-      if (diff / entry >= 0.004) {
-        slDist = diff;
-      }
+  Future<void> _executeOrder(String direction,
+      {double? customEntry, double? customSl, double? customTp}) async {
+    if (!ref.read(settingsProvider).isPaperMode) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          backgroundColor: AppColors.bearish,
+          content: Text(
+              'Chart Live execution ยังปิดแบบ fail-safe จนกว่า protective-order OMS จะพร้อม กรุณากลับ Paper เพื่อทดสอบคำสั่ง'),
+        ),
+      );
+      return;
     }
-    
-    final sl = customSl ?? (direction == 'long' ? (entry - slDist) : (entry + slDist));
-    final tp = customTp ?? (direction == 'long' ? (entry + slDist * 2.2) : (entry - slDist * 2.2));
-        
-    final size = double.tryParse(_qtyCtrl.text.trim()) ?? 0.10;
-    final isThb = _selectedSymbol.toUpperCase().contains('THB') || _selectedExchange == 'innovestx';
-    final targetMode = isThb ? 'live' : 'paper';
+    final live = _lastPrice > 0 ? _lastPrice : null;
+    final isMarketOrder = _bpEntryMode == 'market';
+    final entry = isMarketOrder ? live : customEntry;
+    final sl = customSl;
+    final tp = customTp;
+    final size = double.tryParse(_qtyCtrl.text.trim());
+    final validGeometry = entry != null &&
+        sl != null &&
+        tp != null &&
+        entry.isFinite &&
+        sl.isFinite &&
+        tp.isFinite &&
+        entry > 0 &&
+        (direction == 'long'
+            ? (sl < entry && tp > entry)
+            : (sl > entry && tp < entry));
+    if (!validGeometry ||
+        size == null ||
+        !size.isFinite ||
+        size <= 0 ||
+        live == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          backgroundColor: AppColors.bearish,
+          content: Text(
+              'ไม่สามารถส่งคำสั่งได้: ต้องมีราคาสดและ Entry / SL / TP / Size ที่ถูกต้อง'),
+        ),
+      );
+      return;
+    }
+
+    final isThb = _selectedSymbol.toUpperCase().contains('THB') ||
+        _selectedExchange == 'innovestx';
+    const targetMode = 'paper';
     final targetExchange = isThb ? 'innovestx' : _selectedExchange;
     final curr = isThb ? '฿' : '\$';
-    final isPending = (direction == 'long' && entry < live * 0.9995) || (direction == 'short' && entry > live * 1.0005);
+    final isPending = !isMarketOrder;
     final orderTypeTag = isPending ? 'LIM' : 'MKT';
     final cleanSym = _selectedSymbol.replaceAll('/', '');
-    final tag = '#$cleanSym-${direction.toUpperCase()}-$orderTypeTag-${DateTime.now().millisecondsSinceEpoch % 1000}';
+    final tag =
+        '#$cleanSym-${direction.toUpperCase()}-$orderTypeTag-${DateTime.now().millisecondsSinceEpoch % 1000}';
 
     try {
       final dio = AppApi.dio;
       final resp = await dio.post(
-        AppApi.url('/api/v1/trades/place'),
+        AppApi.url('/api/v1/paper/orders'),
+        cancelToken: _requestCancelToken,
         data: {
           'symbol': _selectedSymbol,
           'direction': direction,
           'entry': entry,
           'stop_loss': sl,
           'take_profit': tp,
+          'order_type': isMarketOrder ? 'market' : 'limit',
           'position_size': size,
           'size': size,
           'risk_pct': _selectedRiskPct,
@@ -741,7 +924,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           'exchange': targetExchange,
           'mode': targetMode,
           'tag': tag,
-          'notes': 'Executed from Apex AI Blueprint Suite [Risk: ${_selectedRiskPct}% | BE: ${_autoBeEnabled} | Trail: ${_trailingStopEnabled}]',
+          'idempotency_key': '${DateTime.now().microsecondsSinceEpoch}-$tag',
+          'notes':
+              'Executed from Apex AI Blueprint Suite [Risk: $_selectedRiskPct% | BE: $_autoBeEnabled | Trail: $_trailingStopEnabled]',
         },
       );
 
@@ -749,12 +934,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       final isSuccessPending = resp.data['status'] == 'pending' || isPending;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          backgroundColor: isSuccessPending ? const Color(0xFFFFB300) : (direction == 'long' ? AppColors.bullish : AppColors.bearish),
+          backgroundColor: isSuccessPending
+              ? const Color(0xFFFFB300)
+              : (direction == 'long' ? AppColors.bullish : AppColors.bearish),
           content: Text(
             isSuccessPending
                 ? '⏳ ตั้งคำสั่งรอดักราคาสำเร็จ: $tag\nรอราคา Match ที่ $curr${_fmtPrice(entry)} | SL: $curr${_fmtPrice(sl)} | TP: $curr${_fmtPrice(tp)}\n🛡️ Auto-BE: ${_autoBeEnabled ? "ON" : "OFF"} | 🚀 Trailing: ${_trailingStopEnabled ? "ON" : "OFF"}'
                 : '⚡ Position Opened: ${direction.toUpperCase()} $size $_selectedSymbol @ $curr${_fmtPrice(entry)}\nSL: $curr${_fmtPrice(sl)} | TP: $curr${_fmtPrice(tp)}\n🛡️ Auto-BE: ${_autoBeEnabled ? "ON" : "OFF"} | 🚀 Trailing: ${_trailingStopEnabled ? "ON" : "OFF"}',
-            style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+            style: const TextStyle(
+                color: Colors.black, fontWeight: FontWeight.bold),
           ),
           duration: const Duration(seconds: 4),
         ),
@@ -773,7 +961,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           backgroundColor: AppColors.bearish,
-          content: Text('❌ ส่งคำสั่งล้มเหลว: $errDetail', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          content: Text('❌ ส่งคำสั่งล้มเหลว: $errDetail',
+              style: const TextStyle(
+                  color: Colors.white, fontWeight: FontWeight.bold)),
           duration: const Duration(seconds: 5),
         ),
       );
@@ -782,20 +972,18 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   Future<void> _closePosition(String tradeId) async {
     try {
-      final pos = _openPositions.firstWhere((p) => p['id']?.toString() == tradeId, orElse: () => {});
+      final pos = _openPositions
+          .firstWhere((p) => p['id']?.toString() == tradeId, orElse: () => {});
       final sym = pos['symbol']?.toString() ?? _selectedSymbol;
-      final entry = (pos['entry'] as num?)?.toDouble() ?? 100.0;
-      final closePrice = _getMarkPriceForSymbol(sym, entry);
 
       final resp = await AppApi.dio.post(
-        AppApi.url('/api/v1/trades/$tradeId/close'),
-        data: {
-          'close_price': closePrice,
-          'reason': 'Manual Close',
-        },
+        AppApi.url('/api/v1/paper/orders/$tradeId/close'),
+        cancelToken: _requestCancelToken,
+        data: {'reason': 'Manual Close'},
       );
 
       final pnl = (resp.data['pnl'] as num?)?.toDouble() ?? 0.0;
+      final closePrice = (resp.data['close_price'] as num?)?.toDouble();
       final isProfit = pnl >= 0;
 
       if (!mounted) return;
@@ -803,8 +991,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         SnackBar(
           backgroundColor: isProfit ? AppColors.bullish : AppColors.bearish,
           content: Text(
-            '✅ Closed $sym @ \$$closePrice | Realized PnL: ${isProfit ? '+' : ''}\$$pnl',
-            style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+            '✅ Closed $sym${closePrice != null ? ' @ \$${_fmtPrice(closePrice)}' : ''} | Realized PnL: ${isProfit ? '+' : ''}\$$pnl',
+            style: const TextStyle(
+                color: Colors.black, fontWeight: FontWeight.bold),
           ),
           duration: const Duration(seconds: 4),
         ),
@@ -814,7 +1003,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(backgroundColor: AppColors.bearish, content: Text('Error closing position: $e')),
+        SnackBar(
+            backgroundColor: AppColors.bearish,
+            content: Text('Error closing position: $e')),
       );
     }
   }
@@ -839,7 +1030,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                           flex: 70,
                           child: Column(
                             children: [
-                              if (_showSMCOverlay && _smcOverlayData != null) _buildSMCLayerIndicator(),
+                              if (_showSMCOverlay && _smcOverlayData != null)
+                                _buildSMCLayerIndicator(),
+                              if (_marketRegimeData != null)
+                                _buildMarketRegimeBar(),
+                              if (_indicatorDecisionData != null)
+                                _buildIndicatorDecisionBar(),
                               if (_mtfMatrixData != null) _buildMtfMatrixBar(),
                               Expanded(flex: 62, child: _buildChartArea()),
                               const Divider(),
@@ -847,14 +1043,19 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                             ],
                           ),
                         ),
-                        const VerticalDivider(width: 1, color: AppColors.border),
+                        const VerticalDivider(
+                            width: 1, color: AppColors.border),
                         Expanded(flex: 30, child: _buildApexAIPanel()),
                       ],
                     );
                   } else {
                     return Column(
                       children: [
-                        if (_showSMCOverlay && _smcOverlayData != null) _buildSMCLayerIndicator(),
+                        if (_showSMCOverlay && _smcOverlayData != null)
+                          _buildSMCLayerIndicator(),
+                        if (_marketRegimeData != null) _buildMarketRegimeBar(),
+                        if (_indicatorDecisionData != null)
+                          _buildIndicatorDecisionBar(),
                         if (_mtfMatrixData != null) _buildMtfMatrixBar(),
                         Expanded(flex: 50, child: _buildChartArea()),
                         const Divider(),
@@ -903,11 +1104,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               onTap: _showSymbolPickerModal,
               behavior: HitTestBehavior.opaque,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1E2533),
                   borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: const Color(0xFF2E82FE).withOpacity(0.6)),
+                  border: Border.all(
+                      color: const Color(0xFF2E82FE).withValues(alpha: 0.6)),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -915,22 +1118,31 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     if (_selectedSymbol.toUpperCase().contains('THB'))
                       Container(
                         margin: const EdgeInsets.only(right: 6),
-                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 5, vertical: 1),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF9B59B6).withOpacity(0.25),
+                          color:
+                              const Color(0xFF9B59B6).withValues(alpha: 0.25),
                           borderRadius: BorderRadius.circular(3),
                         ),
                         child: const Text(
                           'THB',
-                          style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Color(0xFFC39BD3)),
+                          style: TextStyle(
+                              fontSize: 9,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFFC39BD3)),
                         ),
                       ),
                     Text(
                       _selectedSymbol,
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                          color: Colors.white),
                     ),
                     const SizedBox(width: 4),
-                    const Icon(Icons.arrow_drop_down, color: Colors.white70, size: 18),
+                    const Icon(Icons.arrow_drop_down,
+                        color: Colors.white70, size: 18),
                   ],
                 ),
               ),
@@ -941,7 +1153,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             // Live Price Display
             Text(
               _lastPrice > 0
-                  ? (_lastPrice < 10 ? _lastPrice.toStringAsFixed(4) : _lastPrice.toStringAsFixed(2))
+                  ? (_lastPrice < 10
+                      ? _lastPrice.toStringAsFixed(4)
+                      : _lastPrice.toStringAsFixed(2))
                   : '---',
               style: TextStyle(
                 fontSize: 14,
@@ -956,12 +1170,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
-                color: changeColor.withOpacity(0.15),
+                color: changeColor.withValues(alpha: 0.15),
                 borderRadius: BorderRadius.circular(4),
               ),
               child: Text(
                 '${isPos ? '+' : ''}${_change24h.toStringAsFixed(2)}%',
-                style: TextStyle(color: changeColor, fontSize: 11, fontWeight: FontWeight.bold),
+                style: TextStyle(
+                    color: changeColor,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold),
               ),
             ),
 
@@ -1002,19 +1219,22 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       Text(
                         tf.toUpperCase(),
                         style: TextStyle(
-                          fontWeight: isSel ? FontWeight.bold : FontWeight.normal,
+                          fontWeight:
+                              isSel ? FontWeight.bold : FontWeight.normal,
                           color: isSel ? AppColors.bullish : Colors.white,
                           fontSize: 13,
                         ),
                       ),
                       if (isSel)
-                        const Icon(Icons.check, size: 16, color: AppColors.bullish),
+                        const Icon(Icons.check,
+                            size: 16, color: AppColors.bullish),
                     ],
                   ),
                 );
               }).toList(),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1E2533),
                   borderRadius: BorderRadius.circular(6),
@@ -1027,10 +1247,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     const SizedBox(width: 4),
                     Text(
                       _selectedTimeframe.toUpperCase(),
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.white),
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                          color: Colors.white),
                     ),
                     const SizedBox(width: 2),
-                    const Icon(Icons.arrow_drop_down, color: Colors.white70, size: 16),
+                    const Icon(Icons.arrow_drop_down,
+                        color: Colors.white70, size: 16),
                   ],
                 ),
               ),
@@ -1045,9 +1269,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
                 decoration: BoxDecoration(
-                  color: _showSMCOverlay ? const Color(0xFF2E82FE).withOpacity(0.15) : const Color(0xFF1E2533),
+                  color: _showSMCOverlay
+                      ? const Color(0xFF2E82FE).withValues(alpha: 0.15)
+                      : const Color(0xFF1E2533),
                   borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: _showSMCOverlay ? const Color(0xFF2E82FE) : AppColors.border),
+                  border: Border.all(
+                      color: _showSMCOverlay
+                          ? const Color(0xFF2E82FE)
+                          : AppColors.border),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -1055,7 +1284,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     Icon(
                       _showSMCOverlay ? Icons.visibility : Icons.visibility_off,
                       size: 14,
-                      color: _showSMCOverlay ? const Color(0xFF2E82FE) : AppColors.textMuted,
+                      color: _showSMCOverlay
+                          ? const Color(0xFF2E82FE)
+                          : AppColors.textMuted,
                     ),
                     const SizedBox(width: 4),
                     Text(
@@ -1063,7 +1294,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       style: TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.bold,
-                        color: _showSMCOverlay ? Colors.white : AppColors.textMuted,
+                        color: _showSMCOverlay
+                            ? Colors.white
+                            : AppColors.textMuted,
                       ),
                     ),
                   ],
@@ -1102,17 +1335,23 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       width: 6,
                       height: 6,
                       decoration: BoxDecoration(
-                        color: _wsState == WsConnectionState.connected ? AppColors.bullish : const Color(0xFFFFD700),
+                        color: _wsState == WsConnectionState.connected
+                            ? AppColors.bullish
+                            : const Color(0xFFFFD700),
                         shape: BoxShape.circle,
                       ),
                     ),
                     const SizedBox(width: 4),
                     Text(
-                      _wsState == WsConnectionState.connected ? '⚡ WS (15ms)' : '🟡 Fallback',
+                      _wsState == WsConnectionState.connected
+                          ? '⚡ WS (15ms)'
+                          : '🟡 Fallback',
                       style: TextStyle(
                         fontSize: 9.5,
                         fontWeight: FontWeight.bold,
-                        color: _wsState == WsConnectionState.connected ? AppColors.bullish : const Color(0xFFFFD700),
+                        color: _wsState == WsConnectionState.connected
+                            ? AppColors.bullish
+                            : const Color(0xFFFFD700),
                       ),
                     ),
                   ],
@@ -1131,14 +1370,20 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 decoration: BoxDecoration(
                   color: const Color(0xFF9B59B6).withValues(alpha: 0.2),
                   borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: const Color(0xFF9B59B6).withValues(alpha: 0.7), width: 0.8),
+                  border: Border.all(
+                      color: const Color(0xFF9B59B6).withValues(alpha: 0.7),
+                      width: 0.8),
                 ),
                 child: const Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(Icons.mic, size: 12, color: Color(0xFFD7BDE2)),
                     SizedBox(width: 3),
-                    Text('🎙️ Briefing', style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.bold, color: Color(0xFFD7BDE2))),
+                    Text('🎙️ Briefing',
+                        style: TextStyle(
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFFD7BDE2))),
                   ],
                 ),
               ),
@@ -1172,12 +1417,20 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       ),
       builder: (ctx) {
         return FutureBuilder<Response>(
-          future: AppApi.dio.get(AppApi.url('/api/v1/briefing/morning')),
+          future: AppApi.dio.get(
+            AppApi.url('/api/v1/briefing/morning'),
+            cancelToken: _requestCancelToken,
+          ),
           builder: (ctx, snapshot) {
             final data = snapshot.data?.data as Map<String, dynamic>? ?? {};
-            final script = data['script']?.toString() ?? 'กำลังประมวลผลบทสรุปตลาดเช้าจาก Apex AI...';
-            final regime = data['regime']?.toString() ?? 'Accumulation / Re-accumulation Structure';
-            final setups = (data['key_focus_setups'] as List<dynamic>?)?.map((e) => e as Map<String, dynamic>).toList() ?? [];
+            final script = data['script']?.toString() ??
+                'กำลังประมวลผลบทสรุปตลาดเช้าจาก Apex AI...';
+            final regime = data['regime']?.toString() ??
+                'Accumulation / Re-accumulation Structure';
+            final setups = (data['key_focus_setups'] as List<dynamic>?)
+                    ?.map((e) => e as Map<String, dynamic>)
+                    .toList() ??
+                [];
 
             return Padding(
               padding: EdgeInsets.only(
@@ -1206,16 +1459,21 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     children: [
                       const Row(
                         children: [
-                          Icon(Icons.record_voice_over, size: 20, color: Color(0xFF00E5FF)),
+                          Icon(Icons.record_voice_over,
+                              size: 20, color: Color(0xFF00E5FF)),
                           SizedBox(width: 8),
                           Text(
                             'Apex AI Daily Voice Briefing',
-                            style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold),
                           ),
                         ],
                       ),
                       IconButton(
-                        icon: const Icon(Icons.close, size: 18, color: Colors.white54),
+                        icon: const Icon(Icons.close,
+                            size: 18, color: Colors.white54),
                         onPressed: () => Navigator.pop(ctx),
                       ),
                     ],
@@ -1229,16 +1487,22 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     decoration: BoxDecoration(
                       color: const Color(0xFF141926),
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: const Color(0xFF00E5FF).withValues(alpha: 0.4)),
+                      border: Border.all(
+                          color:
+                              const Color(0xFF00E5FF).withValues(alpha: 0.4)),
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.hub, size: 16, color: Color(0xFF00E5FF)),
+                        const Icon(Icons.hub,
+                            size: 16, color: Color(0xFF00E5FF)),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
                             regime,
-                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF)),
+                            style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF00E5FF)),
                           ),
                         ),
                       ],
@@ -1248,7 +1512,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
                   // Audio Player Bar Simulation
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     decoration: BoxDecoration(
                       color: const Color(0xFF1B2333),
                       borderRadius: BorderRadius.circular(8),
@@ -1256,25 +1521,38 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.play_circle_filled, size: 28, color: AppColors.bullish),
+                        const Icon(Icons.play_circle_filled,
+                            size: 28, color: AppColors.bullish),
                         const SizedBox(width: 10),
                         const Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text('🔊 AI Audio Speech (Thai Voice)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+                              Text('🔊 AI Audio Speech (Thai Voice)',
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white)),
                               SizedBox(height: 2),
-                              Text('Apex Proactive Market Intelligence • 1:45 min', style: TextStyle(fontSize: 9.5, color: Colors.white54)),
+                              Text(
+                                  'Apex Proactive Market Intelligence • 1:45 min',
+                                  style: TextStyle(
+                                      fontSize: 9.5, color: Colors.white54)),
                             ],
                           ),
                         ),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
                           decoration: BoxDecoration(
                             color: AppColors.bullish.withValues(alpha: 0.2),
                             borderRadius: BorderRadius.circular(4),
                           ),
-                          child: const Text('AUTO TTS', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: AppColors.bullish)),
+                          child: const Text('AUTO TTS',
+                              style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.bold,
+                                  color: AppColors.bullish)),
                         ),
                       ],
                     ),
@@ -1282,7 +1560,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   const SizedBox(height: 12),
 
                   // Script Body
-                  const Text('สรุปเนื้อหาบรรยาย:', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white70)),
+                  const Text('สรุปเนื้อหาบรรยาย:',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white70)),
                   const SizedBox(height: 6),
                   Container(
                     constraints: const BoxConstraints(maxHeight: 180),
@@ -1294,7 +1576,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     child: SingleChildScrollView(
                       child: Text(
                         script,
-                        style: const TextStyle(fontSize: 11.5, color: Colors.white70, height: 1.45),
+                        style: const TextStyle(
+                            fontSize: 11.5,
+                            color: Colors.white70,
+                            height: 1.45),
                       ),
                     ),
                   ),
@@ -1302,7 +1587,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
                   // Key Setups
                   if (setups.isNotEmpty) ...[
-                    const Text('คู่ที่น่าจับตาประจำวัน (Top SMC Focus):', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white70)),
+                    const Text('คู่ที่น่าจับตาประจำวัน (Top SMC Focus):',
+                        style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white70)),
                     const SizedBox(height: 6),
                     Row(
                       children: setups.map((s) {
@@ -1313,16 +1602,29 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                             decoration: BoxDecoration(
                               color: const Color(0xFF161C2A),
                               borderRadius: BorderRadius.circular(6),
-                              border: Border.all(color: const Color(0xFF2E384D)),
+                              border:
+                                  Border.all(color: const Color(0xFF2E384D)),
                             ),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(s['symbol']?.toString() ?? '', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+                                Text(s['symbol']?.toString() ?? '',
+                                    style: const TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white)),
                                 const SizedBox(height: 2),
-                                Text(s['grade']?.toString() ?? '', style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.bold, color: Color(0xFFFFD700))),
+                                Text(s['grade']?.toString() ?? '',
+                                    style: const TextStyle(
+                                        fontSize: 9.5,
+                                        fontWeight: FontWeight.bold,
+                                        color: Color(0xFFFFD700))),
                                 const SizedBox(height: 2),
-                                Text(s['strategy']?.toString() ?? '', style: const TextStyle(fontSize: 8.5, color: Colors.white54), maxLines: 1, overflow: TextOverflow.ellipsis),
+                                Text(s['strategy']?.toString() ?? '',
+                                    style: const TextStyle(
+                                        fontSize: 8.5, color: Colors.white54),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis),
                               ],
                             ),
                           ),
@@ -1344,17 +1646,22 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: () {
-        final targetList = market == 'forex' ? _forexSymbols : (market == 'stock' ? _stockSymbols : _cryptoSymbols);
+        final targetList = market == 'forex'
+            ? _forexSymbols
+            : (market == 'stock' ? _stockSymbols : _cryptoSymbols);
         final targetSym = targetList.isNotEmpty ? targetList.first : 'BTC/USDT';
         _switchToSymbol(targetSym, targetMarket: market);
       },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFF2E82FE).withOpacity(0.2) : const Color(0xFF1E2533),
+          color: isSelected
+              ? const Color(0xFF2E82FE).withValues(alpha: 0.2)
+              : const Color(0xFF1E2533),
           borderRadius: BorderRadius.circular(4),
           border: Border.all(
-            color: isSelected ? const Color(0xFF2E82FE) : const Color(0xFF232A38),
+            color:
+                isSelected ? const Color(0xFF2E82FE) : const Color(0xFF232A38),
           ),
         ),
         child: Text(
@@ -1374,9 +1681,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(label, style: const TextStyle(fontSize: 10, color: AppColors.textMuted)),
+        Text(label,
+            style: const TextStyle(fontSize: 10, color: AppColors.textMuted)),
         const SizedBox(height: 2),
-        Text(value, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.white)),
+        Text(value,
+            style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Colors.white)),
       ],
     );
   }
@@ -1402,7 +1714,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       builder: (ctx) => StatefulBuilder(
         builder: (context, setModalState) {
           final query = _symbolSearchCtrl.text.trim().toUpperCase();
-          final list = _symbols.where((s) => query.isEmpty || s.contains(query)).toList();
+          final list = _symbols
+              .where((s) => query.isEmpty || s.contains(query))
+              .toList();
 
           return Container(
             height: MediaQuery.of(context).size.height * 0.75,
@@ -1414,7 +1728,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   child: Container(
                     width: 40,
                     height: 4,
-                    decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
+                    decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2)),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -1423,17 +1739,24 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   children: [
                     Text(
                       'เลือกสินทรัพย์ (${_selectedMarket.toUpperCase()})',
-                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                      style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white),
                     ),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
                       decoration: BoxDecoration(
                         color: AppColors.bullish.withValues(alpha: 0.2),
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
                         '${_symbols.length} รายการใน Watchlist',
-                        style: const TextStyle(fontSize: 11, color: AppColors.bullish, fontWeight: FontWeight.bold),
+                        style: const TextStyle(
+                            fontSize: 11,
+                            color: AppColors.bullish,
+                            fontWeight: FontWeight.bold),
                       ),
                     ),
                   ],
@@ -1447,13 +1770,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   decoration: InputDecoration(
                     prefixIcon: const Icon(Icons.search, color: Colors.white54),
                     hintText: 'ค้นหาเหรียญใน Watchlist (เช่น THB, BTC, XRP)...',
-                    hintStyle: const TextStyle(color: Colors.white30, fontSize: 13),
+                    hintStyle:
+                        const TextStyle(color: Colors.white30, fontSize: 13),
                     filled: true,
                     fillColor: const Color(0xFF1E2533),
                     contentPadding: const EdgeInsets.symmetric(vertical: 0),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: Color(0xFF2E82FE), width: 0.8),
+                      borderSide: const BorderSide(
+                          color: Color(0xFF2E82FE), width: 0.8),
                     ),
                   ),
                 ),
@@ -1463,7 +1788,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       ? const Center(
                           child: Text(
                             'ไม่พบสินทรัพย์ที่ค้นหา',
-                            style: TextStyle(color: Colors.white38, fontSize: 13),
+                            style:
+                                TextStyle(color: Colors.white38, fontSize: 13),
                           ),
                         )
                       : ListView.builder(
@@ -1474,26 +1800,31 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                             final isTHB = s.toUpperCase().contains('THB');
                             final isUSDT = s.toUpperCase().contains('USDT');
 
-                            Color tagBg = const Color(0xFF2E82FE).withValues(alpha: 0.2);
+                            Color tagBg =
+                                const Color(0xFF2E82FE).withValues(alpha: 0.2);
                             Color tagFg = const Color(0xFF2E82FE);
                             String tagLabel = _selectedMarket.toUpperCase();
 
                             if (_selectedMarket == 'crypto') {
                               if (isTHB) {
-                                tagBg = const Color(0xFF9B59B6).withValues(alpha: 0.25);
+                                tagBg = const Color(0xFF9B59B6)
+                                    .withValues(alpha: 0.25);
                                 tagFg = const Color(0xFFC39BD3);
                                 tagLabel = '🟣 INNOVESTX (THB)';
                               } else if (isUSDT) {
-                                tagBg = const Color(0xFF2E82FE).withValues(alpha: 0.25);
+                                tagBg = const Color(0xFF2E82FE)
+                                    .withValues(alpha: 0.25);
                                 tagFg = const Color(0xFF5DADE2);
                                 tagLabel = '🌐 BINANCE (USDT)';
                               }
                             } else if (_selectedMarket == 'forex') {
-                              tagBg = const Color(0xFFF39C12).withValues(alpha: 0.25);
+                              tagBg = const Color(0xFFF39C12)
+                                  .withValues(alpha: 0.25);
                               tagFg = const Color(0xFFF8C471);
                               tagLabel = '💱 FOREX/GOLD (MT5)';
                             } else if (_selectedMarket == 'stock') {
-                              tagBg = const Color(0xFF00C087).withValues(alpha: 0.25);
+                              tagBg = const Color(0xFF00C087)
+                                  .withValues(alpha: 0.25);
                               tagFg = const Color(0xFF00C087);
                               tagLabel = '📈 STOCK (ALPACA)';
                             }
@@ -1501,10 +1832,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                             return Container(
                               margin: const EdgeInsets.only(bottom: 6),
                               decoration: BoxDecoration(
-                                color: isSel ? const Color(0xFF2E82FE).withValues(alpha: 0.15) : const Color(0xFF1B2333),
+                                color: isSel
+                                    ? const Color(0xFF2E82FE)
+                                        .withValues(alpha: 0.15)
+                                    : const Color(0xFF1B2333),
                                 borderRadius: BorderRadius.circular(8),
                                 border: Border.all(
-                                  color: isSel ? const Color(0xFF2E82FE) : const Color(0xFF232A38),
+                                  color: isSel
+                                      ? const Color(0xFF2E82FE)
+                                      : const Color(0xFF232A38),
                                   width: isSel ? 1.2 : 0.8,
                                 ),
                               ),
@@ -1520,12 +1856,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                                       style: TextStyle(
                                         fontWeight: FontWeight.bold,
                                         fontSize: 14,
-                                        color: isSel ? AppColors.bullish : Colors.white,
+                                        color: isSel
+                                            ? AppColors.bullish
+                                            : Colors.white,
                                       ),
                                     ),
                                     const SizedBox(width: 8),
                                     Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 8, vertical: 3),
                                       decoration: BoxDecoration(
                                         color: tagBg,
                                         borderRadius: BorderRadius.circular(6),
@@ -1542,7 +1881,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                                     const Spacer(),
                                   ],
                                 ),
-                                trailing: isSel ? const Icon(Icons.check_circle, color: AppColors.bullish, size: 20) : null,
+                                trailing: isSel
+                                    ? const Icon(Icons.check_circle,
+                                        color: AppColors.bullish, size: 20)
+                                    : null,
                               ),
                             );
                           },
@@ -1557,12 +1899,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       _showAddAssetCatalogDialog();
                     },
                     icon: const Icon(Icons.add_circle, size: 18),
-                    label: const Text('➕ เพิ่มสินทรัพย์ใหม่เข้า Watchlist', style: TextStyle(fontWeight: FontWeight.bold)),
+                    label: const Text('➕ เพิ่มสินทรัพย์ใหม่เข้า Watchlist',
+                        style: TextStyle(fontWeight: FontWeight.bold)),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF2E82FE),
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 12),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
                     ),
                   ),
                 ),
@@ -1599,14 +1943,23 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         builder: (context, setModalState) {
           if (isLoadingCatalog && !hasInitiatedFetch) {
             hasInitiatedFetch = true;
-            AppApi.dio.get(AppApi.url('/api/v1/settings/assets/catalog')).then((resp) {
+            AppApi.dio
+                .get(
+              AppApi.url('/api/v1/settings/assets/catalog'),
+              cancelToken: _requestCancelToken,
+            )
+                .then((resp) {
               final data = resp.data as Map<String, dynamic>;
               setModalState(() {
                 catalog = {
-                  'innovestx_thb': List<Map<String, dynamic>>.from(data['innovestx_thb'] ?? []),
-                  'crypto_global': List<Map<String, dynamic>>.from(data['crypto_global'] ?? []),
-                  'forex_metals': List<Map<String, dynamic>>.from(data['forex_metals'] ?? []),
-                  'stocks': List<Map<String, dynamic>>.from(data['stocks'] ?? []),
+                  'innovestx_thb': List<Map<String, dynamic>>.from(
+                      data['innovestx_thb'] ?? []),
+                  'crypto_global': List<Map<String, dynamic>>.from(
+                      data['crypto_global'] ?? []),
+                  'forex_metals': List<Map<String, dynamic>>.from(
+                      data['forex_metals'] ?? []),
+                  'stocks':
+                      List<Map<String, dynamic>>.from(data['stocks'] ?? []),
                 };
                 isLoadingCatalog = false;
               });
@@ -1617,9 +1970,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             });
           }
 
-          final existingNormSymbols = _watchlistMap.keys.map((e) => e.replaceAll('/', '').replaceAll('-', '').toUpperCase()).toSet();
+          final existingNormSymbols = _watchlistMap.keys
+              .map((e) =>
+                  e.replaceAll('/', '').replaceAll('-', '').toUpperCase())
+              .toSet();
 
-          List<Map<String, dynamic>> currentList = catalog[activeCategory] ?? [];
+          List<Map<String, dynamic>> currentList =
+              catalog[activeCategory] ?? [];
           final q = searchCtrl.text.trim().toUpperCase();
           if (q.isNotEmpty) {
             currentList = currentList.where((it) {
@@ -1639,7 +1996,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   child: Container(
                     width: 40,
                     height: 4,
-                    decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
+                    decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2)),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -1648,11 +2007,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   children: [
                     const Row(
                       children: [
-                        Icon(Icons.playlist_add, color: AppColors.bullish, size: 22),
+                        Icon(Icons.playlist_add,
+                            color: AppColors.bullish, size: 22),
                         SizedBox(width: 8),
                         Text(
                           'เลือกสินทรัพย์เข้า Watchlist & Chart',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                          style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white),
                         ),
                       ],
                     ),
@@ -1669,15 +2032,32 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   scrollDirection: Axis.horizontal,
                   child: Row(
                     children: [
-                      _chartCatChip('🟣 InnovestX (THB)', 'innovestx_thb', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      _chartCatChip(
+                          '🟣 InnovestX (THB)',
+                          'innovestx_thb',
+                          activeCategory,
+                          (cat) => setModalState(() => activeCategory = cat)),
                       const SizedBox(width: 6),
-                      _chartCatChip('🌐 Crypto (USDT)', 'crypto_global', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      _chartCatChip(
+                          '🌐 Crypto (USDT)',
+                          'crypto_global',
+                          activeCategory,
+                          (cat) => setModalState(() => activeCategory = cat)),
                       const SizedBox(width: 6),
-                      _chartCatChip('💱 Forex & Gold', 'forex_metals', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      _chartCatChip(
+                          '💱 Forex & Gold',
+                          'forex_metals',
+                          activeCategory,
+                          (cat) => setModalState(() => activeCategory = cat)),
                       const SizedBox(width: 6),
-                      _chartCatChip('📈 US Stocks', 'stocks', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      _chartCatChip('📈 US Stocks', 'stocks', activeCategory,
+                          (cat) => setModalState(() => activeCategory = cat)),
                       const SizedBox(width: 6),
-                      _chartCatChip('✍️ กำหนดเอง (Custom)', 'custom', activeCategory, (cat) => setModalState(() => activeCategory = cat)),
+                      _chartCatChip(
+                          '✍️ กำหนดเอง (Custom)',
+                          'custom',
+                          activeCategory,
+                          (cat) => setModalState(() => activeCategory = cat)),
                     ],
                   ),
                 ),
@@ -1691,17 +2071,22 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                         child: TextField(
                           controller: searchCtrl,
                           onChanged: (_) => setModalState(() {}),
-                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 13),
                           decoration: InputDecoration(
-                            prefixIcon: const Icon(Icons.search, color: Colors.white54, size: 18),
+                            prefixIcon: const Icon(Icons.search,
+                                color: Colors.white54, size: 18),
                             hintText: 'ค้นหาชื่อเหรียญหรือสัญลักษณ์...',
-                            hintStyle: const TextStyle(color: Colors.white30, fontSize: 12),
+                            hintStyle: const TextStyle(
+                                color: Colors.white30, fontSize: 12),
                             filled: true,
                             fillColor: const Color(0xFF1E2533),
-                            contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 10),
+                            contentPadding: const EdgeInsets.symmetric(
+                                vertical: 0, horizontal: 10),
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(8),
-                              borderSide: const BorderSide(color: Color(0xFF2E82FE), width: 0.8),
+                              borderSide: const BorderSide(
+                                  color: Color(0xFF2E82FE), width: 0.8),
                             ),
                           ),
                         ),
@@ -1712,20 +2097,30 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                         decoration: BoxDecoration(
                           color: const Color(0xFF1E2533),
                           borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: const Color(0xFF2E82FE).withValues(alpha: 0.4)),
+                          border: Border.all(
+                              color: const Color(0xFF2E82FE)
+                                  .withValues(alpha: 0.4)),
                         ),
                         child: DropdownButtonHideUnderline(
                           child: DropdownButton<String>(
                             value: selectedTf,
                             dropdownColor: const Color(0xFF1B2333),
-                            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold),
                             items: const [
-                              DropdownMenuItem(value: '15m', child: Text('TF 15M')),
-                              DropdownMenuItem(value: '1h', child: Text('TF 1H')),
-                              DropdownMenuItem(value: '4h', child: Text('TF 4H')),
-                              DropdownMenuItem(value: '1d', child: Text('TF 1D')),
+                              DropdownMenuItem(
+                                  value: '15m', child: Text('TF 15M')),
+                              DropdownMenuItem(
+                                  value: '1h', child: Text('TF 1H')),
+                              DropdownMenuItem(
+                                  value: '4h', child: Text('TF 4H')),
+                              DropdownMenuItem(
+                                  value: '1d', child: Text('TF 1D')),
                             ],
-                            onChanged: (v) => setModalState(() => selectedTf = v ?? '1h'),
+                            onChanged: (v) =>
+                                setModalState(() => selectedTf = v ?? '1h'),
                           ),
                         ),
                       ),
@@ -1736,41 +2131,61 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   // Asset list
                   Expanded(
                     child: isLoadingCatalog
-                        ? const Center(child: CircularProgressIndicator(color: AppColors.bullish))
+                        ? const Center(
+                            child: CircularProgressIndicator(
+                                color: AppColors.bullish))
                         : currentList.isEmpty
-                            ? const Center(child: Text('ไม่พบสินทรัพย์ในหมวดนี้', style: TextStyle(color: Colors.white38, fontSize: 13)))
+                            ? const Center(
+                                child: Text('ไม่พบสินทรัพย์ในหมวดนี้',
+                                    style: TextStyle(
+                                        color: Colors.white38, fontSize: 13)))
                             : ListView.builder(
                                 itemCount: currentList.length,
                                 itemBuilder: (context, idx) {
                                   final item = currentList[idx];
                                   final sym = item['symbol']?.toString() ?? '';
                                   final name = item['name']?.toString() ?? '';
-                                  final ex = item['exchange']?.toString() ?? 'binance';
-                                  final mType = item['market_type']?.toString() ?? 'crypto';
+                                  final ex =
+                                      item['exchange']?.toString() ?? 'binance';
+                                  final mType =
+                                      item['market_type']?.toString() ??
+                                          'crypto';
 
-                                  final normSym = sym.replaceAll('/', '').replaceAll('-', '').toUpperCase();
-                                  final isAlreadyInWatchlist = existingNormSymbols.contains(normSym);
+                                  final normSym = sym
+                                      .replaceAll('/', '')
+                                      .replaceAll('-', '')
+                                      .toUpperCase();
+                                  final isAlreadyInWatchlist =
+                                      existingNormSymbols.contains(normSym);
 
-                                  final isChecked = selectedItems.any((it) => it['symbol'] == sym);
+                                  final isChecked = selectedItems
+                                      .any((it) => it['symbol'] == sym);
 
-                                  Color tagBg = const Color(0xFF2E82FE).withValues(alpha: 0.2);
+                                  Color tagBg = const Color(0xFF2E82FE)
+                                      .withValues(alpha: 0.2);
                                   Color tagFg = const Color(0xFF2E82FE);
                                   String tagLabel = mType.toUpperCase();
 
-                                  if (activeCategory == 'innovestx_thb' || sym.endsWith('/THB')) {
-                                    tagBg = const Color(0xFF9B59B6).withValues(alpha: 0.25);
+                                  if (activeCategory == 'innovestx_thb' ||
+                                      sym.endsWith('/THB')) {
+                                    tagBg = const Color(0xFF9B59B6)
+                                        .withValues(alpha: 0.25);
                                     tagFg = const Color(0xFFC39BD3);
                                     tagLabel = 'THB';
-                                  } else if (activeCategory == 'crypto_global') {
-                                    tagBg = const Color(0xFF2E82FE).withValues(alpha: 0.25);
+                                  } else if (activeCategory ==
+                                      'crypto_global') {
+                                    tagBg = const Color(0xFF2E82FE)
+                                        .withValues(alpha: 0.25);
                                     tagFg = const Color(0xFF5DADE2);
                                     tagLabel = 'USDT';
                                   } else if (activeCategory == 'forex_metals') {
-                                    tagBg = const Color(0xFFF39C12).withValues(alpha: 0.25);
+                                    tagBg = const Color(0xFFF39C12)
+                                        .withValues(alpha: 0.25);
                                     tagFg = const Color(0xFFF8C471);
                                     tagLabel = 'MT5';
                                   } else if (activeCategory == 'stocks') {
-                                    tagBg = const Color(0xFF00C087).withValues(alpha: 0.25);
+                                    tagBg = const Color(0xFF00C087)
+                                        .withValues(alpha: 0.25);
                                     tagFg = const Color(0xFF00C087);
                                     tagLabel = 'ALPACA';
                                   }
@@ -1780,12 +2195,17 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                                     decoration: BoxDecoration(
                                       color: isAlreadyInWatchlist
                                           ? const Color(0xFF141923)
-                                          : (isChecked ? const Color(0xFF2E82FE).withValues(alpha: 0.15) : const Color(0xFF1B2333)),
+                                          : (isChecked
+                                              ? const Color(0xFF2E82FE)
+                                                  .withValues(alpha: 0.15)
+                                              : const Color(0xFF1B2333)),
                                       borderRadius: BorderRadius.circular(8),
                                       border: Border.all(
                                         color: isChecked
                                             ? const Color(0xFF2E82FE)
-                                            : (isAlreadyInWatchlist ? Colors.white10 : const Color(0xFF232A38)),
+                                            : (isAlreadyInWatchlist
+                                                ? Colors.white10
+                                                : const Color(0xFF232A38)),
                                         width: isChecked ? 1.2 : 0.8,
                                       ),
                                     ),
@@ -1797,48 +2217,80 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                                           : () {
                                               setModalState(() {
                                                 if (isChecked) {
-                                                  selectedItems.removeWhere((it) => it['symbol'] == sym);
+                                                  selectedItems.removeWhere(
+                                                      (it) =>
+                                                          it['symbol'] == sym);
                                                 } else {
                                                   selectedItems.add({
                                                     'symbol': sym,
                                                     'market_type': mType,
                                                     'timeframe': selectedTf,
-                                                    'htf_timeframe': selectedTf == '1d' ? '1w' : '4h',
+                                                    'htf_timeframe':
+                                                        selectedTf == '1d'
+                                                            ? '1w'
+                                                            : '4h',
                                                     'exchange': ex,
                                                   });
                                                 }
                                               });
                                             },
                                       leading: Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                                        decoration: BoxDecoration(color: tagBg, borderRadius: BorderRadius.circular(4)),
-                                        child: Text(tagLabel, style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: tagFg)),
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 6, vertical: 3),
+                                        decoration: BoxDecoration(
+                                            color: tagBg,
+                                            borderRadius:
+                                                BorderRadius.circular(4)),
+                                        child: Text(tagLabel,
+                                            style: TextStyle(
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.bold,
+                                                color: tagFg)),
                                       ),
                                       title: Text(
                                         sym,
                                         style: TextStyle(
                                           fontWeight: FontWeight.bold,
                                           fontSize: 14,
-                                          color: isAlreadyInWatchlist ? Colors.white38 : (isChecked ? AppColors.bullish : Colors.white),
+                                          color: isAlreadyInWatchlist
+                                              ? Colors.white38
+                                              : (isChecked
+                                                  ? AppColors.bullish
+                                                  : Colors.white),
                                         ),
                                       ),
                                       subtitle: Text(
                                         name,
-                                        style: TextStyle(fontSize: 11, color: isAlreadyInWatchlist ? Colors.white24 : Colors.white54),
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            color: isAlreadyInWatchlist
+                                                ? Colors.white24
+                                                : Colors.white54),
                                       ),
                                       trailing: isAlreadyInWatchlist
                                           ? Container(
-                                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 6,
+                                                      vertical: 2),
                                               decoration: BoxDecoration(
-                                                color: Colors.white.withValues(alpha: 0.05),
-                                                borderRadius: BorderRadius.circular(4),
+                                                color: Colors.white
+                                                    .withValues(alpha: 0.05),
+                                                borderRadius:
+                                                    BorderRadius.circular(4),
                                               ),
                                               child: const Row(
                                                 mainAxisSize: MainAxisSize.min,
                                                 children: [
-                                                  Icon(Icons.check, size: 14, color: AppColors.bullish),
+                                                  Icon(Icons.check,
+                                                      size: 14,
+                                                      color: AppColors.bullish),
                                                   SizedBox(width: 4),
-                                                  Text('อยู่ใน Watchlist แล้ว', style: TextStyle(fontSize: 10, color: Colors.white54)),
+                                                  Text('อยู่ใน Watchlist แล้ว',
+                                                      style: TextStyle(
+                                                          fontSize: 10,
+                                                          color:
+                                                              Colors.white54)),
                                                 ],
                                               ),
                                             )
@@ -1853,11 +2305,17 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                                                       'symbol': sym,
                                                       'market_type': mType,
                                                       'timeframe': selectedTf,
-                                                      'htf_timeframe': selectedTf == '1d' ? '1w' : '4h',
+                                                      'htf_timeframe':
+                                                          selectedTf == '1d'
+                                                              ? '1w'
+                                                              : '4h',
                                                       'exchange': ex,
                                                     });
                                                   } else {
-                                                    selectedItems.removeWhere((it) => it['symbol'] == sym);
+                                                    selectedItems.removeWhere(
+                                                        (it) =>
+                                                            it['symbol'] ==
+                                                            sym);
                                                   }
                                                 });
                                               },
@@ -1874,43 +2332,76 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text('เพิ่มสินทรัพย์ระบุเอง (Custom Symbol):', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white)),
+                          const Text('เพิ่มสินทรัพย์ระบุเอง (Custom Symbol):',
+                              style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white)),
                           const SizedBox(height: 10),
                           TextField(
                             controller: customSymCtrl,
                             textCapitalization: TextCapitalization.characters,
-                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold),
                             decoration: const InputDecoration(
                               hintText: 'เช่น DOGE/THB, BTC/USD, GBPJPY, AMZN',
-                              hintStyle: TextStyle(color: Colors.white30, fontSize: 13),
-                              prefixIcon: Icon(Icons.edit, color: Colors.white60),
+                              hintStyle: TextStyle(
+                                  color: Colors.white30, fontSize: 13),
+                              prefixIcon:
+                                  Icon(Icons.edit, color: Colors.white60),
                             ),
                           ),
                           const SizedBox(height: 14),
-                          const Text('ประเภทตลาด (Market Type):', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
+                          const Text('ประเภทตลาด (Market Type):',
+                              style: TextStyle(
+                                  fontSize: 12, color: AppColors.textMuted)),
                           const SizedBox(height: 6),
                           Row(
                             children: [
-                              _chartDlgMarketChip('Crypto', 'crypto', customMarketType, (m) => setModalState(() => customMarketType = m)),
+                              _chartDlgMarketChip(
+                                  'Crypto',
+                                  'crypto',
+                                  customMarketType,
+                                  (m) => setModalState(
+                                      () => customMarketType = m)),
                               const SizedBox(width: 6),
-                              _chartDlgMarketChip('Forex/Gold', 'forex', customMarketType, (m) => setModalState(() => customMarketType = m)),
+                              _chartDlgMarketChip(
+                                  'Forex/Gold',
+                                  'forex',
+                                  customMarketType,
+                                  (m) => setModalState(
+                                      () => customMarketType = m)),
                               const SizedBox(width: 6),
-                              _chartDlgMarketChip('Stocks', 'stock', customMarketType, (m) => setModalState(() => customMarketType = m)),
+                              _chartDlgMarketChip(
+                                  'Stocks',
+                                  'stock',
+                                  customMarketType,
+                                  (m) => setModalState(
+                                      () => customMarketType = m)),
                             ],
                           ),
                           const SizedBox(height: 14),
-                          const Text('Timeframe สแกนหลัก:', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
+                          const Text('Timeframe สแกนหลัก:',
+                              style: TextStyle(
+                                  fontSize: 12, color: AppColors.textMuted)),
                           const SizedBox(height: 6),
                           Wrap(
                             spacing: 8,
                             children: ['15m', '1h', '4h', '1d'].map((tf) {
                               final isSel = selectedTf == tf;
                               return ChoiceChip(
-                                label: Text(tf.toUpperCase(), style: TextStyle(fontSize: 11, color: isSel ? Colors.black : Colors.white)),
+                                label: Text(tf.toUpperCase(),
+                                    style: TextStyle(
+                                        fontSize: 11,
+                                        color: isSel
+                                            ? Colors.black
+                                            : Colors.white)),
                                 selected: isSel,
                                 selectedColor: AppColors.bullish,
                                 backgroundColor: const Color(0xFF252540),
-                                onSelected: (_) => setModalState(() => selectedTf = tf),
+                                onSelected: (_) =>
+                                    setModalState(() => selectedTf = tf),
                               );
                             }).toList(),
                           ),
@@ -1940,6 +2431,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                           final dio = AppApi.dio;
                           await dio.post(
                             AppApi.url('/api/v1/settings/watchlist/batch'),
+                            cancelToken: _requestCancelToken,
                             data: {'items': itemsList},
                           );
                         } catch (_) {}
@@ -1957,13 +2449,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       backgroundColor: AppColors.bullish,
                       foregroundColor: Colors.black,
                       padding: const EdgeInsets.symmetric(vertical: 12),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
                     ),
                     child: Text(
                       activeCategory == 'custom'
                           ? '➕ เพิ่มสินทรัพย์ & ดูกราฟทันที'
                           : '➕ เพิ่มที่เลือก (${selectedItems.length}) เข้า Watchlist & ดูกราฟ',
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 13),
                     ),
                   ),
                 ),
@@ -1978,16 +2472,20 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     });
   }
 
-  Widget _chartCatChip(String label, String catId, String activeCat, Function(String) onSelect) {
+  Widget _chartCatChip(
+      String label, String catId, String activeCat, Function(String) onSelect) {
     final isSel = activeCat == catId;
     return GestureDetector(
       onTap: () => onSelect(catId),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: isSel ? AppColors.bullish.withValues(alpha: 0.2) : const Color(0xFF1E2533),
+          color: isSel
+              ? AppColors.bullish.withValues(alpha: 0.2)
+              : const Color(0xFF1E2533),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: isSel ? AppColors.bullish : const Color(0xFF232A38)),
+          border: Border.all(
+              color: isSel ? AppColors.bullish : const Color(0xFF232A38)),
         ),
         child: Text(
           label,
@@ -2001,7 +2499,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     );
   }
 
-  Widget _chartDlgMarketChip(String label, String market, String selectedMarket, Function(String) onSelect) {
+  Widget _chartDlgMarketChip(String label, String market, String selectedMarket,
+      Function(String) onSelect) {
     final isSel = selectedMarket == market;
     return Expanded(
       child: GestureDetector(
@@ -2010,9 +2509,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           padding: const EdgeInsets.symmetric(vertical: 8),
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: isSel ? const Color(0xFF2E82FE).withOpacity(0.25) : const Color(0xFF1E2533),
+            color: isSel
+                ? const Color(0xFF2E82FE).withValues(alpha: 0.25)
+                : const Color(0xFF1E2533),
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: isSel ? const Color(0xFF2E82FE) : AppColors.border),
+            border: Border.all(
+                color: isSel ? const Color(0xFF2E82FE) : AppColors.border),
           ),
           child: Text(
             label,
@@ -2029,7 +2531,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   Future<void> _addAndSelectSymbol(String sym, String market) async {
     final isTHB = sym.toUpperCase().contains('THB');
-    final ex = isTHB ? 'innovestx' : (market == 'crypto' ? 'binance' : (market == 'forex' ? 'mt5' : 'alpaca'));
+    final ex = isTHB
+        ? 'innovestx'
+        : (market == 'crypto'
+            ? 'binance'
+            : (market == 'forex' ? 'mt5' : 'alpaca'));
 
     if (market == 'stock') {
       if (!_stockSymbols.contains(sym)) _stockSymbols.add(sym);
@@ -2046,6 +2552,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       final dio = AppApi.dio;
       await dio.post(
         AppApi.url('/api/v1/settings/watchlist'),
+        cancelToken: _requestCancelToken,
         data: {
           'symbol': sym,
           'market_type': market,
@@ -2073,7 +2580,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
-            const Text('SMC ZONES:', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: AppColors.textMuted)),
+            const Text('SMC ZONES:',
+                style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.textMuted)),
             const SizedBox(width: 10),
             if (ob != null) ...[
               _smcZonePill(
@@ -2093,8 +2604,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               _smcZonePill('EQ: ${eq.toStringAsFixed(1)}', AppColors.eqLine),
             ],
             const SizedBox(width: 14),
-            const Text('HTF: ', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
-            Text(_selectedHtfTimeframe.toUpperCase(), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+            const Text('HTF: ',
+                style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+            Text(_selectedHtfTimeframe.toUpperCase(),
+                style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white)),
           ],
         ),
       ),
@@ -2105,16 +2621,687 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.15),
+        color: color.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: color.withOpacity(0.4)),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(width: 6, height: 6, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+          Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
           const SizedBox(width: 5),
-          Text(text, style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.bold)),
+          Text(text,
+              style: TextStyle(
+                  fontSize: 11, color: color, fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+
+  Map<String, dynamic>? get _indicatorDecisionData {
+    final raw = _smcOverlayData?['indicator_decision'];
+    if (raw is! Map || raw.isEmpty) return null;
+    return Map<String, dynamic>.from(raw);
+  }
+
+  Map<String, dynamic>? get _marketRegimeData {
+    final raw = _smcOverlayData?['market_regime'];
+    if (raw is! Map || raw.isEmpty) return null;
+    return Map<String, dynamic>.from(raw);
+  }
+
+  Color _marketRegimeColor(Map<String, dynamic> regime) {
+    switch (regime['regime']?.toString()) {
+      case 'trending':
+        return regime['direction'] == 'bearish'
+            ? AppColors.bearish
+            : AppColors.bullish;
+      case 'ranging':
+        return const Color(0xFFFFC857);
+      case 'volatile':
+        return const Color(0xFFFF7A45);
+      case 'compression':
+        return const Color(0xFFB388FF);
+      default:
+        return const Color(0xFF687386);
+    }
+  }
+
+  IconData _marketRegimeIcon(String regime) {
+    switch (regime) {
+      case 'trending':
+        return Icons.trending_up;
+      case 'ranging':
+        return Icons.swap_horiz;
+      case 'volatile':
+        return Icons.bolt;
+      case 'compression':
+        return Icons.compress;
+      default:
+        return Icons.help_outline;
+    }
+  }
+
+  Widget _buildMarketRegimeBar() {
+    final regime = _marketRegimeData!;
+    final policyRaw = regime['effective_policy'] ?? regime['policy'];
+    final policy = policyRaw is Map
+        ? Map<String, dynamic>.from(policyRaw)
+        : <String, dynamic>{};
+    final regimeId = regime['regime']?.toString() ?? 'unknown';
+    final label = regime['label']?.toString() ?? regimeId.toUpperCase();
+    final direction = regime['direction']?.toString() ?? 'neutral';
+    final confidence = (regime['confidence'] as num? ?? 0).round();
+    final entryAllowed = policy['entry_allowed'] == true;
+    final riskMultiplier = (policy['risk_multiplier'] as num? ?? 0).toDouble();
+    final minConfluence = (policy['min_confluence'] as num? ?? 100).round();
+    final minRr = (policy['min_rr'] as num? ?? 0).toDouble();
+    final color = _marketRegimeColor(regime);
+
+    return Material(
+      color: const Color(0xFF10151F),
+      child: InkWell(
+        onTap: _showMarketRegimeDetails,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                Icon(_marketRegimeIcon(regimeId), size: 14, color: color),
+                const SizedBox(width: 5),
+                const Text(
+                  'MARKET REGIME',
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    color: Colors.white70,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(width: 7),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.13),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                        color: color.withValues(alpha: 0.55), width: 0.8),
+                  ),
+                  child: Text(
+                    '${label.toUpperCase()} · $confidence%',
+                    style: TextStyle(
+                        fontSize: 9.5,
+                        color: color,
+                        fontWeight: FontWeight.bold),
+                  ),
+                ),
+                const SizedBox(width: 7),
+                Text(
+                  direction == 'neutral' ? 'NEUTRAL' : direction.toUpperCase(),
+                  style: const TextStyle(
+                      fontSize: 9,
+                      color: Colors.white54,
+                      fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'C$minConfluence · RR ${minRr.toStringAsFixed(1)} · RISK ×${riskMultiplier.toStringAsFixed(2)}',
+                  style: const TextStyle(
+                      fontSize: 9,
+                      color: AppColors.textMuted,
+                      fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  entryAllowed ? 'SELECTIVE ENTRY' : 'NO NEW ENTRY',
+                  style: TextStyle(
+                      fontSize: 9,
+                      color:
+                          entryAllowed ? AppColors.bullish : AppColors.bearish,
+                      fontWeight: FontWeight.bold),
+                ),
+                const Icon(Icons.chevron_right,
+                    size: 14, color: Colors.white38),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showMarketRegimeDetails() {
+    final regime = _marketRegimeData;
+    if (regime == null) return;
+    final policyRaw = regime['effective_policy'] ?? regime['policy'];
+    final policy = policyRaw is Map
+        ? Map<String, dynamic>.from(policyRaw)
+        : <String, dynamic>{};
+    final metrics = regime['metrics'] is Map
+        ? Map<String, dynamic>.from(regime['metrics'] as Map)
+        : <String, dynamic>{};
+    final evidence = (regime['evidence'] as List? ?? const [])
+        .map((item) => item.toString())
+        .toList(growable: false);
+    final regimeId = regime['regime']?.toString() ?? 'unknown';
+    final color = _marketRegimeColor(regime);
+    final entryAllowed = policy['entry_allowed'] == true;
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF131722),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => FractionallySizedBox(
+        heightFactor: 0.76,
+        child: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Icon(_marketRegimeIcon(regimeId), color: color, size: 21),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Market Regime · ${regime['label'] ?? regimeId}',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    icon: const Icon(Icons.close,
+                        size: 19, color: Colors.white54),
+                  ),
+                ],
+              ),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: color.withValues(alpha: 0.45)),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _indicatorSummaryMetric(
+                        'CONFIDENCE',
+                        '${(regime['confidence'] as num? ?? 0).round()}%',
+                        color,
+                      ),
+                    ),
+                    Expanded(
+                      child: _indicatorSummaryMetric(
+                        'DIRECTION',
+                        (regime['direction'] ?? 'neutral')
+                            .toString()
+                            .toUpperCase(),
+                        color,
+                      ),
+                    ),
+                    Expanded(
+                      child: _indicatorSummaryMetric(
+                        'ENTRY GATE',
+                        entryAllowed ? 'SELECTIVE' : 'BLOCKED',
+                        entryAllowed ? AppColors.bullish : AppColors.bearish,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text('ADAPTIVE POLICY',
+                  style: TextStyle(
+                      fontSize: 10,
+                      color: AppColors.textMuted,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  _regimeChip('Min confluence',
+                      '${(policy['min_confluence'] as num? ?? 100).round()}'),
+                  _regimeChip('Min R:R',
+                      (policy['min_rr'] as num? ?? 0).toStringAsFixed(1)),
+                  _regimeChip('Risk multiplier',
+                      '×${(policy['risk_multiplier'] as num? ?? 0).toStringAsFixed(2)}'),
+                  if (policy['require_direction_alignment'] == true)
+                    _regimeChip('Required', 'Direction alignment'),
+                  if (policy['require_liquidity_sweep'] == true)
+                    _regimeChip('Required', 'Liquidity sweep'),
+                  if (policy['require_volume_confirmation'] == true)
+                    _regimeChip('Required', 'Volume Delta'),
+                  if (policy['require_squeeze_fire'] == true)
+                    _regimeChip('Required', 'Squeeze release'),
+                ],
+              ),
+              if (metrics.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                const Text('MARKET-STATE STATISTICS (NOT EXTRA INDICATORS)',
+                    style: TextStyle(
+                        fontSize: 10,
+                        color: AppColors.textMuted,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: metrics.entries
+                      .map((entry) => _regimeChip(
+                          entry.key.replaceAll('_', ' '),
+                          entry.value is num
+                              ? (entry.value as num).toStringAsFixed(2)
+                              : entry.value.toString()))
+                      .toList(growable: false),
+                ),
+              ],
+              if (evidence.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                const Text('WHY THIS REGIME',
+                    style: TextStyle(
+                        fontSize: 10,
+                        color: AppColors.textMuted,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                ...evidence.map((item) => Padding(
+                      padding: const EdgeInsets.only(bottom: 5),
+                      child: Text('• $item',
+                          style: const TextStyle(
+                              fontSize: 11,
+                              color: Colors.white70,
+                              height: 1.3)),
+                    )),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _regimeChip(String label, String value) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0xFF19202E),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: const Color(0xFF303A4D)),
+      ),
+      child: Text('$label · $value',
+          style: const TextStyle(fontSize: 9.5, color: Colors.white70)),
+    );
+  }
+
+  List<Map<String, dynamic>> _indicatorLayers(Map<String, dynamic> decision) {
+    final raw = decision['layers'];
+    if (raw is! List) return const [];
+    return raw
+        .whereType<Map>()
+        .map((layer) => Map<String, dynamic>.from(layer))
+        .toList(growable: false);
+  }
+
+  Color _indicatorLayerColor(Map<String, dynamic> layer) {
+    if (layer['enabled'] != true || layer['available'] != true) {
+      return const Color(0xFF687386);
+    }
+    switch (layer['status']?.toString()) {
+      case 'strong':
+        return AppColors.bullish;
+      case 'supporting':
+        return const Color(0xFFFFC857);
+      case 'weak':
+        return AppColors.bearish;
+      default:
+        return const Color(0xFF687386);
+    }
+  }
+
+  Widget _buildIndicatorDecisionBar() {
+    final decision = _indicatorDecisionData!;
+    final layers = _indicatorLayers(decision);
+    final score = (decision['score'] as num? ?? 0).round();
+    final coverage = (decision['coverage'] as num? ?? 0).toDouble();
+    final ready = decision['ready'] == true;
+    final stateColor = ready ? AppColors.bullish : AppColors.bearish;
+
+    return Material(
+      color: const Color(0xFF0B1118),
+      child: InkWell(
+        onTap: _showIndicatorDecisionDetails,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                const Icon(Icons.account_tree_outlined,
+                    size: 13, color: Color(0xFF00E5FF)),
+                const SizedBox(width: 5),
+                const Text(
+                  '3-INDICATOR CORE',
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white70,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: stateColor.withValues(alpha: 0.13),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                        color: stateColor.withValues(alpha: 0.55), width: 0.8),
+                  ),
+                  child: Text(
+                    '$score/100 · ${ready ? 'DATA OK' : 'DATA BLOCK'}',
+                    style: TextStyle(
+                      fontSize: 9.5,
+                      color: stateColor,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'DATA ${coverage.toStringAsFixed(0)}%',
+                  style: const TextStyle(
+                    fontSize: 9,
+                    color: AppColors.textMuted,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ...layers.map(_buildIndicatorLayerPill),
+                const Icon(Icons.chevron_right,
+                    size: 14, color: Colors.white38),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIndicatorLayerPill(Map<String, dynamic> layer) {
+    final color = _indicatorLayerColor(layer);
+    final enabled = layer['enabled'] == true;
+    final available = layer['available'] == true;
+    final value = !enabled
+        ? 'OFF'
+        : (!available ? 'N/A' : '${(layer['score'] as num? ?? 0).round()}');
+    final label = layer['short_label']?.toString() ?? 'IND';
+
+    return Container(
+      margin: const EdgeInsets.only(right: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.11),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withValues(alpha: 0.35), width: 0.7),
+      ),
+      child: Text(
+        '$label $value',
+        style: TextStyle(
+          fontSize: 9,
+          color: color,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+
+  void _showIndicatorDecisionDetails() {
+    final decision = _indicatorDecisionData;
+    if (decision == null) return;
+    final layers = _indicatorLayers(decision);
+    final score = (decision['score'] as num? ?? 0).round();
+    final coverage = (decision['coverage'] as num? ?? 0).toDouble();
+    final minimum = (decision['minimum_coverage'] as num? ?? 0).toDouble();
+    final ready = decision['ready'] == true;
+    final blockingReasons = (decision['blocking_reasons'] as List? ?? const [])
+        .map((reason) => reason.toString())
+        .toList(growable: false);
+    final stateColor = ready ? AppColors.bullish : AppColors.bearish;
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF131722),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => FractionallySizedBox(
+        heightFactor: 0.78,
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    const Icon(Icons.account_tree_outlined,
+                        color: Color(0xFF00E5FF), size: 20),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        'Indicator Decision Core',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      icon: const Icon(Icons.close,
+                          size: 19, color: Colors.white54),
+                    ),
+                  ],
+                ),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF19202E),
+                    borderRadius: BorderRadius.circular(8),
+                    border:
+                        Border.all(color: stateColor.withValues(alpha: 0.45)),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _indicatorSummaryMetric(
+                            'SCORE', '$score/100', stateColor),
+                      ),
+                      Expanded(
+                        child: _indicatorSummaryMetric(
+                          'DATA COVERAGE',
+                          '${coverage.toStringAsFixed(0)}% / ${minimum.toStringAsFixed(0)}%',
+                          coverage >= minimum
+                              ? AppColors.bullish
+                              : AppColors.bearish,
+                        ),
+                      ),
+                      Expanded(
+                        child: _indicatorSummaryMetric(
+                          'DATA GATE',
+                          ready ? 'READY' : 'BLOCKED',
+                          stateColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (blockingReasons.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(9),
+                    decoration: BoxDecoration(
+                      color: AppColors.bearish.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      blockingReasons.join('\n'),
+                      style: const TextStyle(
+                          fontSize: 11, color: AppColors.bearish, height: 1.35),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                const Text(
+                  '3 REGISTERED INDICATOR LAYERS',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: AppColors.textMuted,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Expanded(
+                  child: ListView.separated(
+                    itemCount: layers.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 7),
+                    itemBuilder: (_, index) =>
+                        _buildIndicatorLayerCard(layers[index]),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _indicatorSummaryMetric(String label, String value, Color color) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label,
+            style: const TextStyle(fontSize: 8.5, color: AppColors.textMuted)),
+        const SizedBox(height: 2),
+        Text(value,
+            style: TextStyle(
+                fontSize: 12, color: color, fontWeight: FontWeight.bold)),
+      ],
+    );
+  }
+
+  Widget _buildIndicatorLayerCard(Map<String, dynamic> layer) {
+    final color = _indicatorLayerColor(layer);
+    final enabled = layer['enabled'] == true;
+    final available = layer['available'] == true;
+    final score = (layer['score'] as num? ?? 0).round();
+    final weight = (layer['weight'] as num? ?? 0).toDouble();
+    final points = (layer['weighted_points'] as num? ?? 0).toDouble();
+    final evidence = (layer['evidence'] as List? ?? const [])
+        .map((item) => item.toString())
+        .toList(growable: false);
+    final state = !enabled
+        ? 'DISABLED'
+        : (!available ? 'DATA UNAVAILABLE' : '${layer['status']} · $score/100');
+
+    return Container(
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: const Color(0xFF19202E),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  layer['label']?.toString() ?? 'Indicator',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              Text(
+                state.toUpperCase(),
+                style: TextStyle(
+                    fontSize: 9.5, color: color, fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+          const SizedBox(height: 5),
+          Text(
+            layer['description']?.toString() ?? '',
+            style: const TextStyle(
+                fontSize: 10.5, color: Colors.white54, height: 1.3),
+          ),
+          if (enabled) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Weight ${weight.toStringAsFixed(0)} · Contribution ${points.toStringAsFixed(1)}',
+              style: const TextStyle(fontSize: 9.5, color: AppColors.textMuted),
+            ),
+          ],
+          if (evidence.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            ...evidence.map(
+              (item) => Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: Text(
+                  '• $item',
+                  style: const TextStyle(
+                      fontSize: 10.5, color: Colors.white70, height: 1.3),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -2122,9 +3309,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   Widget _buildMtfMatrixBar() {
     final matrix = _mtfMatrixData?['matrix'] as Map<String, dynamic>? ?? {};
-    final gradeBadge = _mtfMatrixData?['grade_badge']?.toString() ?? '⚖️ MTF MATRIX';
+    final gradeBadge =
+        _mtfMatrixData?['grade_badge']?.toString() ?? '⚖️ MTF MATRIX';
     final hasAbsorption = _mtfMatrixData?['absorption_found'] == true;
-    final isGradeA = gradeBadge.contains('GRADE A') || gradeBadge.contains('SUPREME');
+    final isGradeA =
+        gradeBadge.contains('GRADE A') || gradeBadge.contains('SUPREME');
 
     return InkWell(
       onTap: _showMtfModal,
@@ -2137,9 +3326,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
-                color: isGradeA ? AppColors.bullish.withOpacity(0.18) : const Color(0xFF222938),
+                color: isGradeA
+                    ? AppColors.bullish.withValues(alpha: 0.18)
+                    : const Color(0xFF222938),
                 borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: isGradeA ? AppColors.bullish : const Color(0xFF38455E), width: 0.8),
+                border: Border.all(
+                    color:
+                        isGradeA ? AppColors.bullish : const Color(0xFF38455E),
+                    width: 0.8),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -2160,26 +3354,33 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF9B59B6).withOpacity(0.2),
+                  color: const Color(0xFF9B59B6).withValues(alpha: 0.2),
                   borderRadius: BorderRadius.circular(4),
-                  border: Border.all(color: const Color(0xFF9B59B6), width: 0.8),
+                  border:
+                      Border.all(color: const Color(0xFF9B59B6), width: 0.8),
                 ),
                 child: const Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text('🐳 CVD Absorption', style: TextStyle(fontSize: 9, color: Color(0xFFD29BFF), fontWeight: FontWeight.bold)),
+                    Text('🐳 CVD Absorption',
+                        style: TextStyle(
+                            fontSize: 9,
+                            color: Color(0xFFD29BFF),
+                            fontWeight: FontWeight.bold)),
                   ],
                 ),
               ),
             ],
             const Spacer(),
-            // 4 Timeframe Pills
-            ...['1d', '4h', '1h', '15m'].map((tfKey) {
+            // Ordered Phase 5 role profiles: Bias -> Setup -> Trigger.
+            ...['4h', '1h', '15m'].map((tfKey) {
               final tfData = matrix[tfKey] as Map<String, dynamic>?;
               final bias = tfData?['bias']?.toString() ?? 'neutral';
               final isBull = bias == 'bullish';
               final isBear = bias == 'bearish';
-              final color = isBull ? AppColors.bullish : (isBear ? AppColors.bearish : const Color(0xFFFFD54F));
+              final color = isBull
+                  ? AppColors.bullish
+                  : (isBear ? AppColors.bearish : const Color(0xFFFFD54F));
               return Padding(
                 padding: const EdgeInsets.only(left: 6),
                 child: Row(
@@ -2188,7 +3389,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     Container(
                       width: 6.5,
                       height: 6.5,
-                      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                      decoration:
+                          BoxDecoration(color: color, shape: BoxShape.circle),
                     ),
                     const SizedBox(width: 3),
                     Text(
@@ -2196,7 +3398,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       style: TextStyle(
                         fontSize: 9.5,
                         fontWeight: FontWeight.w600,
-                        color: tfKey == _selectedTimeframe.toLowerCase() ? Colors.white : Colors.white54,
+                        color: tfKey == _selectedTimeframe.toLowerCase()
+                            ? Colors.white
+                            : Colors.white54,
                       ),
                     ),
                   ],
@@ -2218,15 +3422,21 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     final alignCount = data?['alignment_count'] ?? 2;
     final totalTf = data?['total_timeframes'] ?? 4;
     final alignedBias = data?['aligned_bias']?.toString() ?? 'BULLISH';
-    final summaryTh = data?['summary_th']?.toString() ?? 'วิเคราะห์ความสอดคล้อง 4 Timeframes';
+    final summaryTh =
+        data?['summary_th']?.toString() ?? 'วิเคราะห์ความสอดคล้อง 4 Timeframes';
     final isBull = alignedBias == 'BULLISH';
-    final biasColor = isBull ? AppColors.bullish : (alignedBias == 'BEARISH' ? AppColors.bearish : const Color(0xFFFFD54F));
+    final biasColor = isBull
+        ? AppColors.bullish
+        : (alignedBias == 'BEARISH'
+            ? AppColors.bearish
+            : const Color(0xFFFFD54F));
 
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF131722),
       isScrollControlled: true,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (ctx) => Container(
         height: MediaQuery.of(context).size.height * 0.72,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -2234,7 +3444,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Center(
-              child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
+              child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(2))),
             ),
             const SizedBox(height: 12),
             Row(
@@ -2242,13 +3457,20 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.hub_outlined, color: Color(0xFF00E5FF), size: 20),
+                    const Icon(Icons.hub_outlined,
+                        color: Color(0xFF00E5FF), size: 20),
                     const SizedBox(width: 8),
                     Text('Multi-Timeframe Matrix ($_selectedSymbol)',
-                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white)),
+                        style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white)),
                   ],
                 ),
-                IconButton(icon: const Icon(Icons.close, color: Colors.white54, size: 18), onPressed: () => Navigator.pop(ctx)),
+                IconButton(
+                    icon: const Icon(Icons.close,
+                        color: Colors.white54, size: 18),
+                    onPressed: () => Navigator.pop(ctx)),
               ],
             ),
             const SizedBox(height: 6),
@@ -2258,7 +3480,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               decoration: BoxDecoration(
                 color: const Color(0xFF19202E),
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: biasColor.withOpacity(0.4)),
+                border: Border.all(color: biasColor.withValues(alpha: 0.4)),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -2266,44 +3488,80 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(gradeBadge, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white)),
+                      Text(gradeBadge,
+                          style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white)),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 2),
                         decoration: BoxDecoration(
-                          color: biasColor.withOpacity(0.2),
+                          color: biasColor.withValues(alpha: 0.2),
                           borderRadius: BorderRadius.circular(4),
                           border: Border.all(color: biasColor, width: 0.8),
                         ),
                         child: Text(
                           '$alignedBias ($alignCount/$totalTf TF)',
-                          style: TextStyle(color: biasColor, fontSize: 11, fontWeight: FontWeight.bold),
+                          style: TextStyle(
+                              color: biasColor,
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold),
                         ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 8),
-                  Text(summaryTh, style: const TextStyle(fontSize: 12, color: Colors.white70, height: 1.4)),
+                  Text(summaryTh,
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.white70, height: 1.4)),
                 ],
               ),
             ),
             const SizedBox(height: 12),
-            const Text('TIME FRAME BREAKDOWN', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.textMuted)),
+            const Text('TIME FRAME BREAKDOWN',
+                style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.textMuted)),
             const SizedBox(height: 8),
-            // 4 Timeframe Breakdown List
+            // Ordered timeframe-role breakdown.
             Expanded(
               child: ListView(
-                children: ['1d', '4h', '1h', '15m'].map((tfKey) {
+                children: ['4h', '1h', '15m'].map((tfKey) {
                   final tfData = matrix[tfKey] as Map<String, dynamic>? ?? {};
-                  final tfName = tfKey == '1d' ? '1D (Macro Trend)' : (tfKey == '4h' ? '4H (Swing Bias)' : (tfKey == '1h' ? '1H (Structure)' : '15M (Trigger & Entry)'));
+                  final tfName = tfKey == '4h'
+                      ? '4H (Market Bias)'
+                      : (tfKey == '1h'
+                          ? '1H (SMC Setup)'
+                          : '15M (Entry Trigger)');
                   final bias = tfData['bias']?.toString() ?? 'neutral';
                   final isTfBull = bias == 'bullish';
                   final isTfBear = bias == 'bearish';
-                  final tfColor = isTfBull ? AppColors.bullish : (isTfBear ? AppColors.bearish : const Color(0xFFFFD54F));
-                  final statusLabel = tfData['status_label']?.toString() ?? 'Structure';
-                  final zone = tfData['zone']?.toString() ?? 'EQUILIBRIUM';
-                  final score = tfData['score'] ?? 50;
-                  final deltaStatus = tfData['delta_status']?.toString() ?? 'Neutral';
-                  final hasAbs = tfData['absorption'] == true;
+                  final tfColor = isTfBull
+                      ? AppColors.bullish
+                      : (isTfBear
+                          ? AppColors.bearish
+                          : const Color(0xFFFFD54F));
+                  final stageStatus =
+                      tfData['status']?.toString().toUpperCase() ?? 'BLOCKED';
+                  final reasons = (tfData['reasons'] as List? ?? const [])
+                      .map((item) => item.toString())
+                      .toList(growable: false);
+                  final triggerEvidence =
+                      (tfData['trigger_evidence'] as List? ?? const [])
+                          .map((item) => item.toString())
+                          .toList(growable: false);
+                  final statusLabel = triggerEvidence.isNotEmpty
+                      ? triggerEvidence.join(', ').toUpperCase()
+                      : (reasons.isEmpty ? stageStatus : reasons.first);
+                  final zone = tfData['order_block'] != null
+                      ? 'ORDER BLOCK'
+                      : (tfData['fvg'] != null ? 'FVG' : 'EQUILIBRIUM');
+                  final score = tfData['confluence'] ?? 0;
+                  final deltaStatus =
+                      tfData['delta_status']?.toString() ?? 'Neutral';
+                  final hasAbs = tfData['delta_absorption'] == true;
 
                   return Container(
                     margin: const EdgeInsets.only(bottom: 8),
@@ -2319,42 +3577,75 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                         Row(
                           children: [
                             Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
                               decoration: BoxDecoration(
-                                color: tfColor.withOpacity(0.15),
+                                color: tfColor.withValues(alpha: 0.15),
                                 borderRadius: BorderRadius.circular(4),
                                 border: Border.all(color: tfColor, width: 0.8),
                               ),
-                              child: Text(bias.toUpperCase(), style: TextStyle(color: tfColor, fontSize: 10, fontWeight: FontWeight.bold)),
+                              child: Text(bias.toUpperCase(),
+                                  style: TextStyle(
+                                      color: tfColor,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold)),
                             ),
                             const SizedBox(width: 8),
-                            Text(tfName, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+                            Text(tfName,
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 12)),
                             const Spacer(),
-                            Text('Confluence: $score/100', style: TextStyle(color: tfColor, fontSize: 11, fontWeight: FontWeight.bold)),
+                            Text('Confluence: $score/100',
+                                style: TextStyle(
+                                    color: tfColor,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold)),
                           ],
                         ),
                         const SizedBox(height: 6),
                         Row(
                           children: [
-                            const Text('Zone: ', style: TextStyle(fontSize: 10.5, color: Colors.white38)),
-                            Text(zone, style: const TextStyle(fontSize: 10.5, color: Colors.white70, fontWeight: FontWeight.w600)),
+                            const Text('Zone: ',
+                                style: TextStyle(
+                                    fontSize: 10.5, color: Colors.white38)),
+                            Text(zone,
+                                style: const TextStyle(
+                                    fontSize: 10.5,
+                                    color: Colors.white70,
+                                    fontWeight: FontWeight.w600)),
                             const SizedBox(width: 12),
-                            const Text('Signals: ', style: TextStyle(fontSize: 10.5, color: Colors.white38)),
-                            Expanded(child: Text(statusLabel, style: const TextStyle(fontSize: 10.5, color: Color(0xFF93C5FD), fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis)),
+                            const Text('Signals: ',
+                                style: TextStyle(
+                                    fontSize: 10.5, color: Colors.white38)),
+                            Expanded(
+                                child: Text(statusLabel,
+                                    style: const TextStyle(
+                                        fontSize: 10.5,
+                                        color: Color(0xFF93C5FD),
+                                        fontWeight: FontWeight.w600),
+                                    overflow: TextOverflow.ellipsis)),
                           ],
                         ),
                         if (hasAbs || deltaStatus != 'Neutral') ...[
                           const SizedBox(height: 4),
                           Row(
                             children: [
-                              const Text('Volume Delta: ', style: TextStyle(fontSize: 10.5, color: Colors.white38)),
+                              const Text('Volume Delta: ',
+                                  style: TextStyle(
+                                      fontSize: 10.5, color: Colors.white38)),
                               Expanded(
                                 child: Text(
                                   deltaStatus,
                                   style: TextStyle(
                                     fontSize: 10.5,
-                                    color: hasAbs ? const Color(0xFFD29BFF) : Colors.white60,
-                                    fontWeight: hasAbs ? FontWeight.bold : FontWeight.normal,
+                                    color: hasAbs
+                                        ? const Color(0xFFD29BFF)
+                                        : Colors.white60,
+                                    fontWeight: hasAbs
+                                        ? FontWeight.bold
+                                        : FontWeight.normal,
                                   ),
                                   overflow: TextOverflow.ellipsis,
                                 ),
@@ -2385,9 +3676,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              CircularProgressIndicator(color: AppColors.bullish, strokeWidth: 2),
+              CircularProgressIndicator(
+                  color: AppColors.bullish, strokeWidth: 2),
               SizedBox(height: 16),
-              Text('Connecting to market data feed...', style: TextStyle(color: AppColors.textMuted, fontSize: 13)),
+              Text('Connecting to market data feed...',
+                  style: TextStyle(color: AppColors.textMuted, fontSize: 13)),
             ],
           ),
         ),
@@ -2401,15 +3694,18 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.signal_cellular_connected_no_internet_4_bar, size: 48, color: AppColors.bearish),
+              const Icon(Icons.signal_cellular_connected_no_internet_4_bar,
+                  size: 48, color: AppColors.bearish),
               const SizedBox(height: 12),
-              Text(_errorMessage ?? 'No candle data available.', style: const TextStyle(color: Colors.white70)),
+              Text(_errorMessage ?? 'No candle data available.',
+                  style: const TextStyle(color: Colors.white70)),
               const SizedBox(height: 16),
               ElevatedButton.icon(
                 onPressed: _fetchChartData,
                 icon: const Icon(Icons.refresh),
                 label: const Text('Retry Connection'),
-                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1E2533)),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF1E2533)),
               ),
             ],
           ),
@@ -2467,7 +3763,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
     setState(() {
       _chatMessages.add({'role': 'user', 'content': text});
-      _chatMessages.add({'role': 'assistant', 'content': 'Apex กำลังวิเคราะห์โครงสร้าง SMC ของ $_selectedSymbol...'});
+      _chatMessages.add({
+        'role': 'assistant',
+        'content': 'Apex กำลังวิเคราะห์โครงสร้าง SMC ของ $_selectedSymbol...'
+      });
       _isChatLoading = true;
     });
     modalState?.call(() {});
@@ -2478,9 +3777,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           .where((m) => !m['content']!.startsWith('Apex กำลังวิเคราะห์'))
           .map((m) => {'role': m['role'], 'content': m['content']})
           .toList();
+      final gate = StrategyGateView.fromPayload(_smcOverlayData);
 
       final resp = await AppApi.dio.post(
         AppApi.url('/api/v1/settings/llm/chat'),
+        cancelToken: _requestCancelToken,
         options: Options(
           receiveTimeout: const Duration(seconds: 120),
           sendTimeout: const Duration(seconds: 120),
@@ -2497,11 +3798,16 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             'bias': _smcOverlayData?['bias'] ?? 'neutral',
             'confluence': _smcOverlayData?['confluence'] ?? 0,
             'open_positions': _openPositions.length,
+            'strategy_approved': gate.approved,
+            'strategy_direction': gate.action,
+            'setup_direction': gate.setupDirection,
+            'rejection_reasons': gate.rejectionReasons,
           }
         },
       );
 
-      final reply = resp.data['response'] as String? ?? 'ขออภัยครับ เกิดข้อผิดพลาดในการประมวลผล';
+      final reply = resp.data['response'] as String? ??
+          'ขออภัยครับ เกิดข้อผิดพลาดในการประมวลผล';
 
       setState(() {
         _chatMessages.removeLast();
@@ -2516,7 +3822,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         _chatMessages.removeLast();
         _chatMessages.add({
           'role': 'assistant',
-          'content': '⚠️ ไม่สามารถเชื่อมต่อกับ AI Advisor ได้: $e\nกรุณาตรวจสอบการตั้งค่า Provider ในหน้า Settings',
+          'content':
+              '⚠️ ไม่สามารถเชื่อมต่อกับ AI Advisor ได้: $e\nกรุณาตรวจสอบการตั้งค่า Provider ในหน้า Settings',
         });
         _isChatLoading = false;
       });
@@ -2535,166 +3842,221 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     try {
       await showDialog(
         context: context,
-        barrierColor: Colors.black.withOpacity(0.7),
+        barrierColor: Colors.black.withValues(alpha: 0.7),
         builder: (ctx) {
-        return StatefulBuilder(
-          builder: (dialogCtx, setModalState) {
-            return Dialog(
-              backgroundColor: const Color(0xFF141923),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-                side: BorderSide(color: AppColors.border, width: 1),
-              ),
-              insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 800, maxHeight: 720),
-                child: Column(
-                  children: [
-                    // Header
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                      decoration: const BoxDecoration(
-                        color: Color(0xFF1B2333),
-                        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-                      ),
-                      child: Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(6),
-                            decoration: BoxDecoration(
-                              color: AppColors.bullish.withOpacity(0.15),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: const Icon(Icons.smart_toy, color: AppColors.bullish, size: 20),
-                          ),
-                          const SizedBox(width: 12),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'Apex AI Co-Pilot Advisor',
-                                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
-                              ),
-                              Text(
-                                'Live Context: $_selectedSymbol • \$${_lastPrice.toStringAsFixed(2)} • ${_selectedTimeframe.toUpperCase()}',
-                                style: const TextStyle(color: AppColors.bullish, fontSize: 11),
-                              ),
-                            ],
-                          ),
-                          const Spacer(),
-                          IconButton(
-                            icon: const Icon(Icons.close, color: Colors.white54),
-                            onPressed: () => Navigator.pop(ctx),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    // Prompt quick chips
-                    Container(
-                      color: const Color(0xFF10141D),
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
+          return StatefulBuilder(
+            builder: (dialogCtx, setModalState) {
+              return Dialog(
+                backgroundColor: const Color(0xFF141923),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  side: const BorderSide(color: AppColors.border, width: 1),
+                ),
+                insetPadding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+                child: ConstrainedBox(
+                  constraints:
+                      const BoxConstraints(maxWidth: 800, maxHeight: 720),
+                  child: Column(
+                    children: [
+                      // Header
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 20, vertical: 14),
+                        decoration: const BoxDecoration(
+                          color: Color(0xFF1B2333),
+                          borderRadius:
+                              BorderRadius.vertical(top: Radius.circular(16)),
+                        ),
                         child: Row(
                           children: [
-                            _modalQuickChip('📊 สรุปโครงสร้าง SMC', () {
-                              _sendChatMessage('ช่วยสรุปโครงสร้าง SMC และ Invalidation ของ $_selectedSymbol ให้หน่อย', modalTextCtrl, modalScrollCtrl, setModalState);
-                            }),
-                            const SizedBox(width: 8),
-                            _modalQuickChip('🎯 แนวต้าน & Take Profit', () {
-                              _sendChatMessage('$_selectedSymbol มีแนวต้านสำคัญหรือเป้า TP ตรงไหนบ้าง', modalTextCtrl, modalScrollCtrl, setModalState);
-                            }),
-                            const SizedBox(width: 8),
-                            _modalQuickChip('🛑 จุด Stop Loss ที่ปลอดภัย', () {
-                              _sendChatMessage('ถ้าจะเปิดไม้ $_selectedSymbol ตอนนี้ ควรวาง Stop Loss ที่จุดไหนตามโครงสร้าง', modalTextCtrl, modalScrollCtrl, setModalState);
-                            }),
-                            const SizedBox(width: 8),
-                            _modalQuickChip('⚖️ ประเมิน R:R & Risk', () {
-                              _sendChatMessage('ช่วยประเมินความคุ้มค่า Risk/Reward และความเสี่ยงของ $_selectedSymbol ในจังหวะนี้', modalTextCtrl, modalScrollCtrl, setModalState);
-                            }),
+                            Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: BoxDecoration(
+                                color:
+                                    AppColors.bullish.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: const Icon(Icons.smart_toy,
+                                  color: AppColors.bullish, size: 20),
+                            ),
+                            const SizedBox(width: 12),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Apex AI Co-Pilot Advisor',
+                                  style: TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 16),
+                                ),
+                                Text(
+                                  'Live Context: $_selectedSymbol • \$${_lastPrice.toStringAsFixed(2)} • ${_selectedTimeframe.toUpperCase()}',
+                                  style: const TextStyle(
+                                      color: AppColors.bullish, fontSize: 11),
+                                ),
+                              ],
+                            ),
+                            const Spacer(),
+                            IconButton(
+                              icon: const Icon(Icons.close,
+                                  color: Colors.white54),
+                              onPressed: () => Navigator.pop(ctx),
+                            ),
                           ],
                         ),
                       ),
-                    ),
 
-                    // Message List
-                    Expanded(
-                      child: ListView.builder(
-                        controller: modalScrollCtrl,
-                        padding: const EdgeInsets.all(16),
-                        itemCount: _chatMessages.length,
-                        itemBuilder: (ctx, i) {
-                          final msg = _chatMessages[i];
-                          final isUser = msg['role'] == 'user';
-                          return Align(
-                            alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-                            child: Container(
-                              margin: const EdgeInsets.only(bottom: 12),
-                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                              constraints: const BoxConstraints(maxWidth: 650),
-                              decoration: BoxDecoration(
-                                color: isUser ? const Color(0xFF2E82FE).withOpacity(0.2) : const Color(0xFF1E2533),
-                                borderRadius: BorderRadius.circular(10),
-                                border: isUser ? Border.all(color: const Color(0xFF2E82FE).withOpacity(0.5)) : Border.all(color: AppColors.border),
-                              ),
-                              child: Text(
-                                msg['content'] ?? '',
-                                style: TextStyle(
-                                  color: isUser ? Colors.white : const Color(0xFFE2E8F0),
-                                  fontSize: 13,
-                                  height: 1.5,
+                      // Prompt quick chips
+                      Container(
+                        color: const Color(0xFF10141D),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 8),
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [
+                              _modalQuickChip('📊 สรุปโครงสร้าง SMC', () {
+                                _sendChatMessage(
+                                    'ช่วยสรุปโครงสร้าง SMC และ Invalidation ของ $_selectedSymbol ให้หน่อย',
+                                    modalTextCtrl,
+                                    modalScrollCtrl,
+                                    setModalState);
+                              }),
+                              const SizedBox(width: 8),
+                              _modalQuickChip('🎯 แนวต้าน & Take Profit', () {
+                                _sendChatMessage(
+                                    '$_selectedSymbol มีแนวต้านสำคัญหรือเป้า TP ตรงไหนบ้าง',
+                                    modalTextCtrl,
+                                    modalScrollCtrl,
+                                    setModalState);
+                              }),
+                              const SizedBox(width: 8),
+                              _modalQuickChip('🛑 จุด Stop Loss ที่ปลอดภัย',
+                                  () {
+                                _sendChatMessage(
+                                    'ถ้าจะเปิดไม้ $_selectedSymbol ตอนนี้ ควรวาง Stop Loss ที่จุดไหนตามโครงสร้าง',
+                                    modalTextCtrl,
+                                    modalScrollCtrl,
+                                    setModalState);
+                              }),
+                              const SizedBox(width: 8),
+                              _modalQuickChip('⚖️ ประเมิน R:R & Risk', () {
+                                _sendChatMessage(
+                                    'ช่วยประเมินความคุ้มค่า Risk/Reward และความเสี่ยงของ $_selectedSymbol ในจังหวะนี้',
+                                    modalTextCtrl,
+                                    modalScrollCtrl,
+                                    setModalState);
+                              }),
+                            ],
+                          ),
+                        ),
+                      ),
+
+                      // Message List
+                      Expanded(
+                        child: ListView.builder(
+                          controller: modalScrollCtrl,
+                          padding: const EdgeInsets.all(16),
+                          itemCount: _chatMessages.length,
+                          itemBuilder: (ctx, i) {
+                            final msg = _chatMessages[i];
+                            final isUser = msg['role'] == 'user';
+                            return Align(
+                              alignment: isUser
+                                  ? Alignment.centerRight
+                                  : Alignment.centerLeft,
+                              child: Container(
+                                margin: const EdgeInsets.only(bottom: 12),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 14, vertical: 10),
+                                constraints:
+                                    const BoxConstraints(maxWidth: 650),
+                                decoration: BoxDecoration(
+                                  color: isUser
+                                      ? const Color(0xFF2E82FE)
+                                          .withValues(alpha: 0.2)
+                                      : const Color(0xFF1E2533),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: isUser
+                                      ? Border.all(
+                                          color: const Color(0xFF2E82FE)
+                                              .withValues(alpha: 0.5))
+                                      : Border.all(color: AppColors.border),
+                                ),
+                                child: Text(
+                                  msg['content'] ?? '',
+                                  style: TextStyle(
+                                    color: isUser
+                                        ? Colors.white
+                                        : const Color(0xFFE2E8F0),
+                                    fontSize: 13,
+                                    height: 1.5,
+                                  ),
                                 ),
                               ),
-                            ),
-                          );
-                        },
+                            );
+                          },
+                        ),
                       ),
-                    ),
 
-                    // Modal Input Row
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: const BoxDecoration(
-                        color: Color(0xFF1B2333),
-                        borderRadius: BorderRadius.vertical(bottom: Radius.circular(16)),
-                      ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: modalTextCtrl,
-                              style: const TextStyle(color: Colors.white, fontSize: 14),
-                              decoration: InputDecoration(
-                                hintText: 'ถาม Apex เกี่ยวกับ $_selectedSymbol ณ ราคา $_currSym${_fmtPrice(_lastPrice)}...',
-                                hintStyle: const TextStyle(color: Colors.white38),
-                                border: InputBorder.none,
-                                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      // Modal Input Row
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: const BoxDecoration(
+                          color: Color(0xFF1B2333),
+                          borderRadius: BorderRadius.vertical(
+                              bottom: Radius.circular(16)),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: modalTextCtrl,
+                                style: const TextStyle(
+                                    color: Colors.white, fontSize: 14),
+                                decoration: InputDecoration(
+                                  hintText:
+                                      'ถาม Apex เกี่ยวกับ $_selectedSymbol ณ ราคา $_currSym${_fmtPrice(_lastPrice)}...',
+                                  hintStyle:
+                                      const TextStyle(color: Colors.white38),
+                                  border: InputBorder.none,
+                                  contentPadding: const EdgeInsets.symmetric(
+                                      horizontal: 14, vertical: 10),
+                                ),
+                                onSubmitted: (_) {
+                                  _sendChatMessage(null, modalTextCtrl,
+                                      modalScrollCtrl, setModalState);
+                                },
                               ),
-                              onSubmitted: (_) {
-                                _sendChatMessage(null, modalTextCtrl, modalScrollCtrl, setModalState);
+                            ),
+                            IconButton(
+                              icon: _isChatLoading
+                                  ? const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: AppColors.bullish))
+                                  : const Icon(Icons.send,
+                                      color: AppColors.bullish),
+                              onPressed: () {
+                                _sendChatMessage(null, modalTextCtrl,
+                                    modalScrollCtrl, setModalState);
                               },
                             ),
-                          ),
-                          IconButton(
-                            icon: _isChatLoading
-                                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.bullish))
-                                : const Icon(Icons.send, color: AppColors.bullish),
-                            onPressed: () {
-                              _sendChatMessage(null, modalTextCtrl, modalScrollCtrl, setModalState);
-                            },
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-            );
-          },
-        );
-      },
-    );
+              );
+            },
+          );
+        },
+      );
     } finally {
       modalTextCtrl.dispose();
       modalScrollCtrl.dispose();
@@ -2709,9 +4071,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         decoration: BoxDecoration(
           color: const Color(0xFF1E2533),
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: const Color(0xFF2E82FE).withOpacity(0.4)),
+          border:
+              Border.all(color: const Color(0xFF2E82FE).withValues(alpha: 0.4)),
         ),
-        child: Text(title, style: const TextStyle(fontSize: 11, color: Color(0xFF93C5FD), fontWeight: FontWeight.w500)),
+        child: Text(title,
+            style: const TextStyle(
+                fontSize: 11,
+                color: Color(0xFF93C5FD),
+                fontWeight: FontWeight.w500)),
       ),
     );
   }
@@ -2720,7 +4087,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   // Unified Bottom Dock: Apex AI Chat + Analysis Blueprint + Open Positions
   // --------------------------------------------------------------------------
   Widget _buildBottomDock() {
-    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    final isLandscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
 
     return Container(
       color: AppColors.surface,
@@ -2758,7 +4126,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 Expanded(
                   child: _dockTabButton(
                     icon: Icons.push_pin_outlined,
-                    title: isLandscape ? '📌 POSITIONS (${_openPositions.length})' : 'Positions (${_openPositions.length})',
+                    title: isLandscape
+                        ? '📌 POSITIONS (${_openPositions.length})'
+                        : 'Positions (${_openPositions.length})',
                     isSelected: _bottomDockTab == 2,
                     badgeColor: const Color(0xFF00E5FF),
                     onTap: () => setState(() => _bottomDockTab = 2),
@@ -2770,13 +4140,17 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   onTap: _openApexChatDialog,
                   borderRadius: BorderRadius.circular(6),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
                     decoration: BoxDecoration(
                       color: const Color(0xFF2E82FE).withValues(alpha: 0.18),
                       borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: const Color(0xFF2E82FE).withValues(alpha: 0.4), width: 0.8),
+                      border: Border.all(
+                          color: const Color(0xFF2E82FE).withValues(alpha: 0.4),
+                          width: 0.8),
                     ),
-                    child: const Icon(Icons.open_in_full, size: 13, color: Color(0xFF64B5F6)),
+                    child: const Icon(Icons.open_in_full,
+                        size: 13, color: Color(0xFF64B5F6)),
                   ),
                 ),
                 const SizedBox(width: 4),
@@ -2788,13 +4162,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   },
                   borderRadius: BorderRadius.circular(6),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
                     decoration: BoxDecoration(
                       color: const Color(0xFF252540),
                       borderRadius: BorderRadius.circular(6),
                       border: Border.all(color: Colors.white12, width: 0.8),
                     ),
-                    child: const Icon(Icons.refresh, size: 13, color: Colors.white70),
+                    child: const Icon(Icons.refresh,
+                        size: 13, color: Colors.white70),
                   ),
                 ),
               ],
@@ -2827,9 +4203,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
         decoration: BoxDecoration(
-          color: isSelected ? badgeColor.withValues(alpha: 0.18) : const Color(0xFF181D29),
+          color: isSelected
+              ? badgeColor.withValues(alpha: 0.18)
+              : const Color(0xFF181D29),
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: isSelected ? badgeColor : const Color(0xFF2E384D), width: 1),
+          border: Border.all(
+              color: isSelected ? badgeColor : const Color(0xFF2E384D),
+              width: 1),
         ),
         child: Center(
           child: FittedBox(
@@ -2838,7 +4218,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               mainAxisSize: MainAxisSize.min,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(icon, size: 13, color: isSelected ? badgeColor : Colors.white60),
+                Icon(icon,
+                    size: 13, color: isSelected ? badgeColor : Colors.white60),
                 const SizedBox(width: 4),
                 Text(
                   title,
@@ -2870,13 +4251,17 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             scrollDirection: Axis.horizontal,
             child: Row(
               children: [
-                _dockQuickPrompt('📊 สรุป SMC $_selectedSymbol', 'ช่วยสรุปโครงสร้าง SMC และ Invalidation ของ $_selectedSymbol ให้หน่อย'),
+                _dockQuickPrompt('📊 สรุป SMC $_selectedSymbol',
+                    'ช่วยสรุปโครงสร้าง SMC และ Invalidation ของ $_selectedSymbol ให้หน่อย'),
                 const SizedBox(width: 6),
-                _dockQuickPrompt('🎯 เป้า Take Profit', '$_selectedSymbol มีเป้าทำกำไร TP ตามโครงสร้างตรงไหนบ้าง'),
+                _dockQuickPrompt('🎯 เป้า Take Profit',
+                    '$_selectedSymbol มีเป้าทำกำไร TP ตามโครงสร้างตรงไหนบ้าง'),
                 const SizedBox(width: 6),
-                _dockQuickPrompt('🛑 วาง Stop Loss', 'จุด Stop Loss ที่ปลอดภัยตามโครงสร้าง SMC ของ $_selectedSymbol อยู่ตรงไหน'),
+                _dockQuickPrompt('🛑 วาง Stop Loss',
+                    'จุด Stop Loss ที่ปลอดภัยตามโครงสร้าง SMC ของ $_selectedSymbol อยู่ตรงไหน'),
                 const SizedBox(width: 6),
-                _dockQuickPrompt('⚖️ ประเมิน R:R', 'ช่วยประเมินความคุ้มค่า Risk/Reward ของ $_selectedSymbol'),
+                _dockQuickPrompt('⚖️ ประเมิน R:R',
+                    'ช่วยประเมินความคุ้มค่า Risk/Reward ของ $_selectedSymbol'),
               ],
             ),
           ),
@@ -2892,15 +4277,24 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               final msg = _chatMessages[i];
               final isUser = msg['role'] == 'user';
               return Align(
-                alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                alignment:
+                    isUser ? Alignment.centerRight : Alignment.centerLeft,
                 child: Container(
                   margin: const EdgeInsets.only(bottom: 8),
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.85),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  constraints: BoxConstraints(
+                      maxWidth: MediaQuery.of(context).size.width * 0.85),
                   decoration: BoxDecoration(
-                    color: isUser ? const Color(0xFF2E82FE).withOpacity(0.25) : const Color(0xFF1E2533),
+                    color: isUser
+                        ? const Color(0xFF2E82FE).withValues(alpha: 0.25)
+                        : const Color(0xFF1E2533),
                     borderRadius: BorderRadius.circular(10),
-                    border: isUser ? Border.all(color: const Color(0xFF2E82FE).withOpacity(0.5)) : Border.all(color: AppColors.border),
+                    border: isUser
+                        ? Border.all(
+                            color:
+                                const Color(0xFF2E82FE).withValues(alpha: 0.5))
+                        : Border.all(color: AppColors.border),
                   ),
                   child: Text(
                     msg['content'] ?? '',
@@ -2927,19 +4321,27 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   controller: _chatInputCtrl,
                   style: const TextStyle(color: Colors.white, fontSize: 13),
                   decoration: InputDecoration(
-                    hintText: 'ถาม Apex AI เกี่ยวกับ $_selectedSymbol ($_currSym${_fmtPrice(_lastPrice)})...',
-                    hintStyle: const TextStyle(color: Colors.white38, fontSize: 13),
+                    hintText:
+                        'ถาม Apex AI เกี่ยวกับ $_selectedSymbol ($_currSym${_fmtPrice(_lastPrice)})...',
+                    hintStyle:
+                        const TextStyle(color: Colors.white38, fontSize: 13),
                     border: InputBorder.none,
                     isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   ),
                   onSubmitted: (_) => _sendChatMessage(),
                 ),
               ),
               IconButton(
                 icon: _isChatLoading
-                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.bullish))
-                    : const Icon(Icons.send, size: 18, color: AppColors.bullish),
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: AppColors.bullish))
+                    : const Icon(Icons.send,
+                        size: 18, color: AppColors.bullish),
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
                 onPressed: () => _sendChatMessage(),
@@ -2959,9 +4361,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         decoration: BoxDecoration(
           color: const Color(0xFF1E2533),
           borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: const Color(0xFF2E82FE).withOpacity(0.3)),
+          border:
+              Border.all(color: const Color(0xFF2E82FE).withValues(alpha: 0.3)),
         ),
-        child: Text(label, style: const TextStyle(fontSize: 10, color: Color(0xFF93C5FD))),
+        child: Text(label,
+            style: const TextStyle(fontSize: 10, color: Color(0xFF93C5FD))),
       ),
     );
   }
@@ -2977,9 +4381,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           children: [
             Icon(Icons.hourglass_empty, size: 24, color: AppColors.textMuted),
             SizedBox(height: 6),
-            Text('No open positions.', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
+            Text('No open positions.',
+                style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
             SizedBox(height: 2),
-            Text('Click [BUY / LONG] or [SELL / SHORT] on the right to open a paper trade.', style: TextStyle(fontSize: 11, color: Colors.white38)),
+            Text(
+                'Click [BUY / LONG] or [SELL / SHORT] on the right to open a paper trade.',
+                style: TextStyle(fontSize: 11, color: Colors.white38)),
           ],
         ),
       );
@@ -2996,37 +4403,60 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         final dir = (pos['direction']?.toString() ?? 'long').toLowerCase();
         final isLong = dir == 'long';
         final color = isLong ? AppColors.bullish : AppColors.bearish;
+        final protectionStage =
+            (pos['protection_stage']?.toString() ?? 'initial').toLowerCase();
+        final trailStage = protectionStage.startsWith('trailing');
+        final protectionLabel = switch (protectionStage) {
+          'breakeven' => '🛡️ BE',
+          'trailing_1_5r' => '🚀 +0.6R',
+          'trailing_2_0r' => '🚀 +1.2R',
+          'trailing_dynamic' => '💎 Dynamic',
+          _ => '🚀 Trail Armed',
+        };
 
-        final entry = (pos['entry'] as num?)?.toDouble() ?? 100.0;
-        final size = (pos['size'] as num?)?.toDouble() ?? (pos['position_size'] as num?)?.toDouble() ?? 1.0;
+        final entry = (pos['entry'] as num?)?.toDouble() ?? 0.0;
+        final size = (pos['size'] as num?)?.toDouble() ??
+            (pos['position_size'] as num?)?.toDouble() ??
+            0.0;
         final isThb = sym.toUpperCase().contains('THB');
         final curr = isThb ? '฿' : '\$';
 
         // Correct symbol-specific live Mark Price (not the currently viewed chart symbol)
-        final markPrice = _getMarkPriceForSymbol(sym, entry);
-        final pnlPct = entry > 0
-            ? (isLong ? ((markPrice - entry) / entry) * 100 : ((entry - markPrice) / entry) * 100)
-            : 0.0;
-        final pnlVal = isLong ? (markPrice - entry) * size : (entry - markPrice) * size;
-        final isProfit = pnlVal >= 0;
+        final markPrice = _getMarkPriceForSymbol(sym);
+        final hasLivePnl = markPrice != null && entry > 0 && size > 0;
+        final pnlPct = hasLivePnl
+            ? (isLong
+                ? ((markPrice - entry) / entry) * 100
+                : ((entry - markPrice) / entry) * 100)
+            : null;
+        final pnlVal = hasLivePnl
+            ? (isLong ? (markPrice - entry) * size : (entry - markPrice) * size)
+            : null;
+        final isProfit = pnlVal != null && pnlVal >= 0;
 
         return SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: ConstrainedBox(
-            constraints: BoxConstraints(minWidth: math.max(340.0, MediaQuery.of(context).size.width - 32)),
+            constraints: BoxConstraints(
+                minWidth:
+                    math.max(340.0, MediaQuery.of(context).size.width - 32)),
             child: Row(
               children: [
                 // Side Badge
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
-                    color: color.withOpacity(0.15),
+                    color: color.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(4),
                     border: Border.all(color: color),
                   ),
                   child: Text(
                     dir.toUpperCase(),
-                    style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold),
+                    style: TextStyle(
+                        color: color,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -3040,35 +4470,59 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       children: [
                         Text(
                           sym,
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF93C5FD), decoration: TextDecoration.underline),
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                              color: Color(0xFF93C5FD),
+                              decoration: TextDecoration.underline),
                         ),
                         const SizedBox(width: 3),
-                        const Icon(Icons.arrow_outward, size: 11, color: Color(0xFF93C5FD)),
+                        const Icon(Icons.arrow_outward,
+                            size: 11, color: Color(0xFF93C5FD)),
                       ],
                     ),
                   ),
                 ),
-                if (pos['be_triggered'] == true) ...[
+                if (protectionStage != 'initial') ...[
                   const SizedBox(width: 6),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF00E5FF).withOpacity(0.15),
+                      color: (trailStage
+                              ? AppColors.bullish
+                              : const Color(0xFF00E5FF))
+                          .withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: const Color(0xFF00E5FF), width: 0.6),
+                      border: Border.all(
+                          color: trailStage
+                              ? AppColors.bullish
+                              : const Color(0xFF00E5FF),
+                          width: 0.6),
                     ),
-                    child: const Text('🛡️ BE', style: TextStyle(color: Color(0xFF00E5FF), fontSize: 8.5, fontWeight: FontWeight.bold)),
+                    child: Text(protectionLabel,
+                        style: TextStyle(
+                            color: trailStage
+                                ? AppColors.bullish
+                                : const Color(0xFF00E5FF),
+                            fontSize: 8.5,
+                            fontWeight: FontWeight.bold)),
                   ),
                 ] else if (pos['trailing_stop'] != false) ...[
                   const SizedBox(width: 6),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
                     decoration: BoxDecoration(
-                      color: AppColors.bullish.withOpacity(0.15),
+                      color: AppColors.bullish.withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(4),
                       border: Border.all(color: AppColors.bullish, width: 0.6),
                     ),
-                    child: const Text('🚀 Trail', style: TextStyle(color: AppColors.bullish, fontSize: 8.5, fontWeight: FontWeight.bold)),
+                    child: const Text('🚀 Trail Armed',
+                        style: TextStyle(
+                            color: AppColors.bullish,
+                            fontSize: 8.5,
+                            fontWeight: FontWeight.bold)),
                   ),
                 ],
                 const SizedBox(width: 14),
@@ -3076,8 +4530,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Size', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
-                    Text('$size', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                    const Text('Size',
+                        style:
+                            TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                    Text('$size',
+                        style: const TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600)),
                   ],
                 ),
                 const SizedBox(width: 16),
@@ -3085,8 +4543,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Entry Price', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
-                    Text('$curr${_fmtPrice(entry)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
+                    const Text('Entry Price',
+                        style:
+                            TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                    Text('$curr${_fmtPrice(entry)}',
+                        style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            fontFamily: 'monospace')),
                   ],
                 ),
                 const SizedBox(width: 16),
@@ -3094,8 +4558,17 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Mark Price', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
-                    Text('$curr${_fmtPrice(markPrice)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
+                    const Text('Mark Price',
+                        style:
+                            TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                    Text(
+                        markPrice != null
+                            ? '$curr${_fmtPrice(markPrice)}'
+                            : 'Unavailable',
+                        style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            fontFamily: 'monospace')),
                   ],
                 ),
                 const SizedBox(width: 24),
@@ -3104,7 +4577,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     Text(
-                      '${isProfit ? '+' : '-'}$curr${pnlVal.abs().toStringAsFixed(2)}',
+                      pnlVal != null
+                          ? '${isProfit ? '+' : '-'}$curr${pnlVal.abs().toStringAsFixed(2)}'
+                          : 'Unavailable',
                       style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.bold,
@@ -3113,7 +4588,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       ),
                     ),
                     Text(
-                      '(${isProfit ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)',
+                      pnlPct != null
+                          ? '(${isProfit ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)'
+                          : '--',
                       style: TextStyle(
                         fontSize: 11,
                         color: isProfit ? AppColors.bullish : AppColors.bearish,
@@ -3128,12 +4605,16 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF232A38),
                     foregroundColor: Colors.white70,
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                     minimumSize: Size.zero,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(4)),
                   ),
-                  child: const Text('Close ✕', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                  child: const Text('Close ✕',
+                      style:
+                          TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
                 ),
               ],
             ),
@@ -3147,73 +4628,109 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   // Right Panel: Apex AI Institutional Advisor & Quick Execution
   // --------------------------------------------------------------------------
   Widget _buildApexAIPanel() {
-    final live = _lastPrice > 0 ? _lastPrice : 100.0;
-    final bp = (_activeAiBlueprint != null && _activeAiBlueprint!['symbol'] == _selectedSymbol)
+    final live = _lastPrice > 0 ? _lastPrice : 0.0;
+    final gate = StrategyGateView.fromPayload(_smcOverlayData);
+    final bp = gate.approved &&
+            (_activeAiBlueprint != null &&
+                _activeAiBlueprint!['symbol'] == _selectedSymbol &&
+                _blueprintMatchesGate(_activeAiBlueprint, gate))
         ? _activeAiBlueprint
-        : _symbolBlueprints[_selectedSymbol];
+        : (gate.approved &&
+                _blueprintMatchesGate(_symbolBlueprints[_selectedSymbol], gate)
+            ? _symbolBlueprints[_selectedSymbol]
+            : null);
 
-    // 1. Resolve Direction & Confidence
-    final bpDir = (bp?['direction'] as String? ?? '').toUpperCase();
-    final rawDirection = (_smcOverlayData?['direction'] as String? ?? '').toUpperCase();
-    final bias = (_smcOverlayData?['bias'] as String? ?? 'BULLISH').toUpperCase();
-    final effectiveDirection = bpDir.isNotEmpty && bpDir != 'WAIT'
-        ? bpDir
-        : (rawDirection.isNotEmpty ? rawDirection : (bias.contains('BEAR') ? 'SHORT' : 'LONG'));
-    final isBull = effectiveDirection == 'LONG' || effectiveDirection == 'BULLISH' || effectiveDirection == 'BUY';
-    final isBear = effectiveDirection == 'SHORT' || effectiveDirection == 'BEARISH' || effectiveDirection == 'SELL';
-    final signalColor = isBull ? AppColors.bullish : (isBear ? AppColors.bearish : AppColors.neutral);
+    // Strategy Gate is the only execution authority. AI blueprints and raw
+    // market bias may explain a setup, but can never grant an order.
+    final isBull = gate.allowsLong;
+    final isBear = gate.allowsShort;
+    final setupIsBull = gate.setupDirection == 'long';
+    final setupIsBear = gate.setupDirection == 'short';
+    final signalColor = isBull
+        ? AppColors.bullish
+        : (isBear
+            ? AppColors.bearish
+            : (setupIsBull
+                ? const Color(0xFFFFC857)
+                : (setupIsBear ? const Color(0xFFFF9F43) : AppColors.neutral)));
 
-    int confluence = (bp?['confidence'] as num?)?.toInt() ?? (_smcOverlayData?['confluence'] as num? ?? 80).toInt();
-    if (confluence <= 10 && confluence > 0) {
-      confluence = confluence * 10;
-    }
+    final confluence = gate.confluence;
 
     final zoneName = bp?['zone_name'] as String? ??
         (_smcOverlayData?['in_discount'] == true
             ? 'DISCOUNT ZONE'
-            : (_smcOverlayData?['in_premium'] == true ? 'PREMIUM ZONE' : 'EQUILIBRIUM'));
-    final htfTrend = bp?['htf_trend'] as String? ?? (isBull ? 'Bullish' : 'Bearish');
+            : (_smcOverlayData?['in_premium'] == true
+                ? 'PREMIUM ZONE'
+                : 'EQUILIBRIUM'));
+    final htfTrend = bp?['htf_trend'] as String? ??
+        (setupIsBull ? 'Bullish' : (setupIsBear ? 'Bearish' : 'Neutral'));
 
     // 2. Resolve Price Levels from Active Mode
-    final aiEntry = (bp?['entry'] as num?)?.toDouble() ?? (_smcOverlayData?['entry'] as num?)?.toDouble() ?? live;
-    final aiSl = (bp?['stop_loss'] as num?)?.toDouble() ?? (_smcOverlayData?['stop_loss'] as num?)?.toDouble() ?? (isBull ? aiEntry * 0.992 : aiEntry * 1.008);
-    final aiTp = (bp?['take_profit'] as num?)?.toDouble() ?? (_smcOverlayData?['take_profit'] as num?)?.toDouble() ?? (isBull ? aiEntry * 1.025 : aiEntry * 0.975);
-    final aiTp2 = (bp?['take_profit_2'] as num?)?.toDouble() ?? (isBull ? aiEntry * 1.045 : aiEntry * 0.955);
+    final aiEntry = (bp?['entry'] as num?)?.toDouble() ??
+        (_smcOverlayData?['entry'] as num?)?.toDouble() ??
+        0.0;
+    final aiSl = (bp?['stop_loss'] as num?)?.toDouble() ??
+        (_smcOverlayData?['stop_loss'] as num?)?.toDouble() ??
+        0.0;
+    final aiTp = (bp?['take_profit'] as num?)?.toDouble() ??
+        (_smcOverlayData?['take_profit'] as num?)?.toDouble() ??
+        0.0;
+    final aiTp2 = (bp?['take_profit_2'] as num?)?.toDouble() ?? 0.0;
+    final hasAiSetup = aiEntry > 0 &&
+        ((isBull && aiSl < aiEntry && aiTp > aiEntry) ||
+            (isBear && aiSl > aiEntry && aiTp < aiEntry));
 
     // Safeguard: re-populate controllers if empty or holding stale price from another symbol
     final curParsed = double.tryParse(_bpEntryCtrl.text);
-    final isStale = curParsed == null || (curParsed > 0 && live > 0 && (curParsed / live > 3.0 || curParsed / live < 0.33));
-    if (_bpEntryCtrl.text.isEmpty || isStale || _bpEntryMode == 'ai') {
+    final isStale = curParsed == null ||
+        (curParsed > 0 &&
+            live > 0 &&
+            (curParsed / live > 3.0 || curParsed / live < 0.33));
+    if (hasAiSetup &&
+        (_bpEntryCtrl.text.isEmpty || isStale || _bpEntryMode == 'ai')) {
       _bpEntryCtrl.text = _fmtPrice(aiEntry);
       _bpSlCtrl.text = _fmtPrice(aiSl);
       _bpTpCtrl.text = _fmtPrice(aiTp);
-      _bpTp2Ctrl.text = _fmtPrice(aiTp2);
+      _bpTp2Ctrl.text = aiTp2 > 0 ? _fmtPrice(aiTp2) : '';
     }
 
-    double currentEntry = double.tryParse(_bpEntryCtrl.text) ?? aiEntry;
-    double currentSl = double.tryParse(_bpSlCtrl.text) ?? aiSl;
-    double currentTp = double.tryParse(_bpTpCtrl.text) ?? aiTp;
+    double currentEntry = double.tryParse(_bpEntryCtrl.text) ?? 0.0;
+    double currentSl = double.tryParse(_bpSlCtrl.text) ?? 0.0;
+    double currentTp = double.tryParse(_bpTpCtrl.text) ?? 0.0;
 
     final isCustom = _bpEntryMode == 'custom';
     final isMarketMode = _bpEntryMode == 'market';
+    final isPending = !isMarketMode;
+    final diffFromLivePct =
+        live > 0 ? ((currentEntry - live) / live * 100) : 0.0;
 
-    final isPending = (isBull && currentEntry < live * 0.9995) || (isBear && currentEntry > live * 1.0005);
-    final diffFromLivePct = live > 0 ? ((currentEntry - live) / live * 100) : 0.0;
-
-    final qty = double.tryParse(_qtyCtrl.text.trim()) ?? 0.10;
+    final qty = double.tryParse(_qtyCtrl.text.trim()) ?? 0.0;
     final posValue = currentEntry * qty;
     final riskDist = (currentEntry - currentSl).abs();
     final rewardDist = (currentTp - currentEntry).abs();
     final riskAmount = riskDist * qty;
     final rewardAmount = rewardDist * qty;
-    final riskPct = currentEntry > 0 ? (riskDist / currentEntry) * 100 : 1.0;
-    final gainPct = currentEntry > 0 ? (rewardDist / currentEntry) * 100 : 2.5;
-    final calculatedRR = riskDist > 0 ? (rewardDist / riskDist) : 2.5;
+    final riskPct = currentEntry > 0 ? (riskDist / currentEntry) * 100 : 0.0;
+    final gainPct = currentEntry > 0 ? (rewardDist / currentEntry) * 100 : 0.0;
+    final calculatedRR = riskDist > 0 ? (rewardDist / riskDist) : 0.0;
+    final hasBaseOrderInput = live > 0 &&
+        currentEntry > 0 &&
+        currentSl > 0 &&
+        currentTp > 0 &&
+        qty > 0;
+    final canExecuteLong = gate.allowsLong &&
+        hasBaseOrderInput &&
+        currentSl < currentEntry &&
+        currentTp > currentEntry;
+    final canExecuteShort = gate.allowsShort &&
+        hasBaseOrderInput &&
+        currentSl > currentEntry &&
+        currentTp < currentEntry;
 
-    final aiReasoning = bp?['reasoning']?.toString() ??
-        (isBull
-            ? 'โครงสร้าง SMC ของ $_selectedSymbol: กราฟเกิด Bullish Demand Reaction ในโซน Discount ($zoneName) มีสัญญาณ Confluence $confluence/100 แนะนำวางแผน Entry/SL ตามกรอบราคา'
-            : 'โครงสร้าง SMC ของ $_selectedSymbol: กำลังทดสอบโซน Supply ใน Premium ($zoneName) มีแรงขายสถาบันกดดัน วาง Invalidation SL เคร่งครัด');
+    final aiReasoning = gate.approved
+        ? (bp?['reasoning']?.toString() ??
+            'ผ่าน Strategy Gate สำหรับ $_selectedSymbol')
+        : 'คำตัดสิน: WAIT — ${gate.waitReasonThai}';
 
     return Container(
       color: AppColors.panel,
@@ -3233,7 +4750,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     color: const Color(0xFF2E82FE).withValues(alpha: 0.2),
                     borderRadius: BorderRadius.circular(6),
                   ),
-                  child: const Icon(Icons.psychology, size: 18, color: Color(0xFF2E82FE)),
+                  child: const Icon(Icons.psychology,
+                      size: 18, color: Color(0xFF2E82FE)),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
@@ -3242,7 +4760,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     children: [
                       const Text(
                         'APEX AI ADVISOR',
-                        style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, letterSpacing: 1.1),
+                        style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1.1),
                       ),
                       Row(
                         children: [
@@ -3250,16 +4771,22 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                             width: 5,
                             height: 5,
                             decoration: BoxDecoration(
-                              color: bp != null ? AppColors.bullish : const Color(0xFF00E5FF),
+                              color: gate.approved
+                                  ? AppColors.bullish
+                                  : const Color(0xFFFFC857),
                               shape: BoxShape.circle,
                             ),
                           ),
                           const SizedBox(width: 4),
                           Text(
-                            bp != null ? '● ซิงค์กับ AI ล่าสุด ($_selectedSymbol)' : '● คำนวณจากโครงสร้าง SMC สด ($_selectedSymbol)',
+                            gate.approved
+                                ? '● Strategy Gate อนุมัติ ($_selectedSymbol)'
+                                : '● Strategy Gate: WAIT ($_selectedSymbol)',
                             style: TextStyle(
                               fontSize: 9,
-                              color: bp != null ? AppColors.bullish : const Color(0xFF00E5FF),
+                              color: gate.approved
+                                  ? AppColors.bullish
+                                  : const Color(0xFFFFC857),
                               fontWeight: FontWeight.bold,
                             ),
                           ),
@@ -3269,15 +4796,23 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   ),
                 ),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
                   decoration: BoxDecoration(
                     color: signalColor.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(6),
                     border: Border.all(color: signalColor, width: 1.2),
                   ),
                   child: Text(
-                    isBear ? '🔴 SHORT SETUP' : (isBull ? '🟢 LONG SETUP' : '⚪ NEUTRAL'),
-                    style: TextStyle(color: signalColor, fontWeight: FontWeight.bold, fontSize: 11),
+                    isBear
+                        ? '🔴 SHORT READY'
+                        : (isBull
+                            ? '🟢 LONG READY'
+                            : '⏳ WAIT · ${gate.setupLabel}'),
+                    style: TextStyle(
+                        color: signalColor,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 11),
                   ),
                 ),
               ],
@@ -3298,10 +4833,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text('Institutional Confluence', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
+                      const Text('Institutional Confluence',
+                          style: TextStyle(
+                              fontSize: 12, color: AppColors.textMuted)),
                       Text(
                         '$confluence / 100 ${confluence >= 80 ? '(Grade A+)' : (confluence >= 65 ? '(Grade B)' : '(Grade C)')}',
-                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: signalColor),
+                        style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            color: signalColor),
                       ),
                     ],
                   ),
@@ -3330,14 +4870,23 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       onTap: _showMtfModal,
                       child: Row(
                         children: [
-                          const Text('4-TF Matrix:', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                          const Text('4-TF Matrix:',
+                              style: TextStyle(
+                                  fontSize: 11, color: Colors.white54)),
                           const SizedBox(width: 6),
                           Text(
                             _mtfMatrixData!['grade_badge'] ?? '',
-                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF)),
+                            style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF00E5FF)),
                           ),
                           const Spacer(),
-                          const Text('ดูรายละเอียด ›', style: TextStyle(fontSize: 10.5, color: Color(0xFF93C5FD), fontWeight: FontWeight.w600)),
+                          const Text('ดูรายละเอียด ›',
+                              style: TextStyle(
+                                  fontSize: 10.5,
+                                  color: Color(0xFF93C5FD),
+                                  fontWeight: FontWeight.w600)),
                         ],
                       ),
                     ),
@@ -3353,17 +4902,22 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               decoration: BoxDecoration(
                 color: const Color(0xFF141926),
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: const Color(0xFF2E82FE).withValues(alpha: 0.35)),
+                border: Border.all(
+                    color: const Color(0xFF2E82FE).withValues(alpha: 0.35)),
               ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Icon(Icons.lightbulb_outline, size: 16, color: Color(0xFF5CA3FF)),
+                  const Icon(Icons.lightbulb_outline,
+                      size: 16, color: Color(0xFF5CA3FF)),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
                       aiReasoning,
-                      style: const TextStyle(fontSize: 11.5, color: Color(0xFFD1D5DB), height: 1.45),
+                      style: const TextStyle(
+                          fontSize: 11.5,
+                          color: Color(0xFFD1D5DB),
+                          height: 1.45),
                     ),
                   ),
                 ],
@@ -3376,19 +4930,29 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               children: [
                 const Text(
                   'EXECUTION BLUEPRINT & ORDER SUITE',
-                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.textMuted, letterSpacing: 0.8),
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.textMuted,
+                      letterSpacing: 0.8),
                 ),
                 const Spacer(),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
                   decoration: BoxDecoration(
                     color: const Color(0xFF00E5FF).withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: const Color(0xFF00E5FF), width: 0.6),
+                    border:
+                        Border.all(color: const Color(0xFF00E5FF), width: 0.6),
                   ),
                   child: Text(
                     'สด $_currSym${_fmtPrice(live)}',
-                    style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF), fontFamily: 'monospace'),
+                    style: const TextStyle(
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF00E5FF),
+                        fontFamily: 'monospace'),
                   ),
                 ),
               ],
@@ -3404,31 +4968,37 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   subtitle: _fmtPrice(aiEntry),
                   selected: _bpEntryMode == 'ai',
                   color: const Color(0xFF2E82FE),
-                  onTap: () {
-                    setState(() {
-                      _bpEntryMode = 'ai';
-                      _bpEntryCtrl.text = _fmtPrice(aiEntry);
-                      _bpSlCtrl.text = _fmtPrice(aiSl);
-                      _bpTpCtrl.text = _fmtPrice(aiTp);
-                    });
-                  },
+                  onTap: hasAiSetup
+                      ? () {
+                          setState(() {
+                            _bpEntryMode = 'ai';
+                            _bpEntryCtrl.text = _fmtPrice(aiEntry);
+                            _bpSlCtrl.text = _fmtPrice(aiSl);
+                            _bpTpCtrl.text = _fmtPrice(aiTp);
+                          });
+                        }
+                      : null,
                 ),
                 const SizedBox(width: 6),
                 _buildBpModeButton(
                   mode: 'market',
                   title: '⚡ ตลาดสด (Market)',
-                  subtitle: _fmtPrice(live),
+                  subtitle: live > 0 ? _fmtPrice(live) : 'Unavailable',
                   selected: _bpEntryMode == 'market',
                   color: const Color(0xFF00E5FF),
-                  onTap: () {
-                    setState(() {
-                      _bpEntryMode = 'market';
-                      _bpEntryCtrl.text = _fmtPrice(live);
-                      final dist = live * 0.008;
-                      _bpSlCtrl.text = _fmtPrice(isBull ? live - dist : live + dist);
-                      _bpTpCtrl.text = _fmtPrice(isBull ? live + dist * 2.5 : live - dist * 2.5);
-                    });
-                  },
+                  onTap: live > 0
+                      ? () {
+                          setState(() {
+                            _bpEntryMode = 'market';
+                            _bpEntryCtrl.text = _fmtPrice(live);
+                            final dist = live * 0.008;
+                            _bpSlCtrl.text =
+                                _fmtPrice(isBull ? live - dist : live + dist);
+                            _bpTpCtrl.text = _fmtPrice(
+                                isBull ? live + dist * 2.5 : live - dist * 2.5);
+                          });
+                        }
+                      : null,
                 ),
                 const SizedBox(width: 6),
                 _buildBpModeButton(
@@ -3452,10 +5022,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
-                color: isPending ? const Color(0xFF2A200B) : const Color(0xFF131A26),
+                color: isPending
+                    ? const Color(0xFF2A200B)
+                    : const Color(0xFF131A26),
                 borderRadius: BorderRadius.circular(6),
                 border: Border.all(
-                  color: isPending ? const Color(0xFFFFB300).withValues(alpha: 0.5) : const Color(0xFF2E82FE).withValues(alpha: 0.4),
+                  color: isPending
+                      ? const Color(0xFFFFB300).withValues(alpha: 0.5)
+                      : const Color(0xFF2E82FE).withValues(alpha: 0.4),
                   width: 0.8,
                 ),
               ),
@@ -3464,7 +5038,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   Icon(
                     isPending ? Icons.hourglass_top : Icons.bolt,
                     size: 13,
-                    color: isPending ? const Color(0xFFFFB300) : const Color(0xFF00E5FF),
+                    color: isPending
+                        ? const Color(0xFFFFB300)
+                        : const Color(0xFF00E5FF),
                   ),
                   const SizedBox(width: 6),
                   Expanded(
@@ -3474,7 +5050,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                           : 'ส่งคำสั่งเปิด Position ทันทีที่ราคาตลาดสด $_currSym${_fmtPrice(live)}',
                       style: TextStyle(
                         fontSize: 10.5,
-                        color: isPending ? const Color(0xFFFFD54F) : const Color(0xFF80DEEA),
+                        color: isPending
+                            ? const Color(0xFFFFD54F)
+                            : const Color(0xFF80DEEA),
                         fontWeight: FontWeight.w600,
                       ),
                     ),
@@ -3498,12 +5076,16 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   _buildPriceInputField(
                     label: '💵 ราคาเข้าซื้อ (Entry Price)',
                     controller: _bpEntryCtrl,
-                    color: _bpEntryMode == 'ai' ? const Color(0xFF5CA3FF) : Colors.white,
+                    color: _bpEntryMode == 'ai'
+                        ? const Color(0xFF5CA3FF)
+                        : Colors.white,
                     isEditable: isCustom,
                     hintText: _fmtPrice(aiEntry),
                     helperText: _bpEntryMode == 'ai'
                         ? '🎯 ราคาแนะนำตามแผน AI Blueprint'
-                        : (_bpEntryMode == 'market' ? '⚡ ราคาตลาดสด ณ ปัจจุบัน' : '✏️ ราคา Limit ที่คุณต้องการดัก'),
+                        : (_bpEntryMode == 'market'
+                            ? '⚡ ราคาตลาดสด ณ ปัจจุบัน'
+                            : '✏️ ราคา Limit ที่คุณต้องการดัก'),
                     onChanged: (val) {
                       final p = double.tryParse(val);
                       if (p != null && p > 0) {
@@ -3525,7 +5107,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     color: AppColors.bearish,
                     isEditable: isCustom,
                     hintText: _fmtPrice(aiSl),
-                    helperText: 'ความเสี่ยง: -${riskPct.toStringAsFixed(2)}% (-$_currSym${riskAmount.toStringAsFixed(2)})',
+                    helperText:
+                        'ความเสี่ยง: -${riskPct.toStringAsFixed(2)}% (-$_currSym${riskAmount.toStringAsFixed(2)})',
                     onChanged: (_) => setState(() {}),
                   ),
                   const Divider(height: 16, color: Color(0xFF222B3D)),
@@ -3537,7 +5120,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     color: AppColors.bullish,
                     isEditable: isCustom,
                     hintText: _fmtPrice(aiTp),
-                    helperText: 'เป้าหมาย: +${gainPct.toStringAsFixed(2)}% (+$_currSym${rewardAmount.toStringAsFixed(2)}) • R:R 1:${calculatedRR.toStringAsFixed(2)}R',
+                    helperText:
+                        'เป้าหมาย: +${gainPct.toStringAsFixed(2)}% (+$_currSym${rewardAmount.toStringAsFixed(2)}) • R:R 1:${calculatedRR.toStringAsFixed(2)}R',
                     onChanged: (_) => setState(() {}),
                   ),
                 ],
@@ -3549,10 +5133,17 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('DYNAMIC RISK SIZER (% PORTFOLIO)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))),
+                const Text('DYNAMIC RISK SIZER (% PORTFOLIO)',
+                    style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF00E5FF))),
                 Text(
                   'พอร์ต: $_currSym${_accountCapital >= 1000 ? _accountCapital.toStringAsFixed(0) : _accountCapital.toStringAsFixed(2)}',
-                  style: const TextStyle(fontSize: 10, color: Colors.white54, fontWeight: FontWeight.bold),
+                  style: const TextStyle(
+                      fontSize: 10,
+                      color: Colors.white54,
+                      fontWeight: FontWeight.bold),
                 ),
               ],
             ),
@@ -3586,10 +5177,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                             child: Container(
                               padding: const EdgeInsets.symmetric(vertical: 6),
                               decoration: BoxDecoration(
-                                color: isSel ? const Color(0xFF00E5FF).withOpacity(0.2) : const Color(0xFF1B202E),
+                                color: isSel
+                                    ? const Color(0xFF00E5FF)
+                                        .withValues(alpha: 0.2)
+                                    : const Color(0xFF1B202E),
                                 borderRadius: BorderRadius.circular(6),
                                 border: Border.all(
-                                  color: isSel ? const Color(0xFF00E5FF) : const Color(0xFF2C3549),
+                                  color: isSel
+                                      ? const Color(0xFF00E5FF)
+                                      : const Color(0xFF2C3549),
                                   width: isSel ? 1.5 : 1,
                                 ),
                               ),
@@ -3601,14 +5197,17 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                                     style: TextStyle(
                                       fontSize: 12,
                                       fontWeight: FontWeight.bold,
-                                      color: isSel ? const Color(0xFF00E5FF) : Colors.white70,
+                                      color: isSel
+                                          ? const Color(0xFF00E5FF)
+                                          : Colors.white70,
                                     ),
                                   ),
                                   Text(
-                                    '${_currSym}${riskDollar >= 1000 ? riskDollar.toStringAsFixed(0) : riskDollar.toStringAsFixed(1)}',
+                                    '$_currSym${riskDollar >= 1000 ? riskDollar.toStringAsFixed(0) : riskDollar.toStringAsFixed(1)}',
                                     style: TextStyle(
                                       fontSize: 9,
-                                      color: isSel ? Colors.white : Colors.white38,
+                                      color:
+                                          isSel ? Colors.white : Colors.white38,
                                     ),
                                   ),
                                 ],
@@ -3635,10 +5234,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                         ),
                         onPressed: () {
                           double cur = double.tryParse(_qtyCtrl.text) ?? 0.1;
-                          double step = _selectedMarket == 'stock' ? 1.0 : (_selectedMarket == 'forex' ? 0.01 : 0.05);
+                          double step = _selectedMarket == 'stock'
+                              ? 1.0
+                              : (_selectedMarket == 'forex' ? 0.01 : 0.05);
                           double next = (cur - step).clamp(step, 1000.0);
                           setState(() {
-                            _qtyCtrl.text = _selectedMarket == 'stock' ? next.toInt().toString() : next.toStringAsFixed(2);
+                            _qtyCtrl.text = _selectedMarket == 'stock'
+                                ? next.toInt().toString()
+                                : next.toStringAsFixed(2);
                           });
                         },
                       ),
@@ -3654,14 +5257,26 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                           ),
                           child: TextField(
                             controller: _qtyCtrl,
-                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            keyboardType: const TextInputType.numberWithOptions(
+                                decimal: true),
                             textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white),
+                            style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white),
                             decoration: InputDecoration(
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                              contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 8),
                               border: InputBorder.none,
-                              suffixText: _selectedMarket == 'stock' ? 'Shares' : (_selectedMarket == 'forex' ? 'Lots' : _selectedSymbol.split('/').first),
-                              suffixStyle: const TextStyle(fontSize: 11, color: Colors.white54, fontWeight: FontWeight.bold),
+                              suffixText: _selectedMarket == 'stock'
+                                  ? 'Shares'
+                                  : (_selectedMarket == 'forex'
+                                      ? 'Lots'
+                                      : _selectedSymbol.split('/').first),
+                              suffixStyle: const TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.white54,
+                                  fontWeight: FontWeight.bold),
                             ),
                             onChanged: (_) => setState(() {}),
                           ),
@@ -3679,10 +5294,14 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                         ),
                         onPressed: () {
                           double cur = double.tryParse(_qtyCtrl.text) ?? 0.1;
-                          double step = _selectedMarket == 'stock' ? 1.0 : (_selectedMarket == 'forex' ? 0.01 : 0.05);
+                          double step = _selectedMarket == 'stock'
+                              ? 1.0
+                              : (_selectedMarket == 'forex' ? 0.01 : 0.05);
                           double next = cur + step;
                           setState(() {
-                            _qtyCtrl.text = _selectedMarket == 'stock' ? next.toInt().toString() : next.toStringAsFixed(2);
+                            _qtyCtrl.text = _selectedMarket == 'stock'
+                                ? next.toInt().toString()
+                                : next.toStringAsFixed(2);
                           });
                         },
                       ),
@@ -3696,19 +5315,42 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     runSpacing: 6,
                     children: (_selectedMarket == 'stock'
                             ? ['1', '5', '10', '25', '50', '100']
-                            : (_selectedMarket == 'forex' ? ['0.01', '0.05', '0.10', '0.25', '0.50', '1.00'] : ['0.05', '0.10', '0.25', '0.50', '1.00', '10.0', '100.0']))
+                            : (_selectedMarket == 'forex'
+                                ? [
+                                    '0.01',
+                                    '0.05',
+                                    '0.10',
+                                    '0.25',
+                                    '0.50',
+                                    '1.00'
+                                  ]
+                                : [
+                                    '0.05',
+                                    '0.10',
+                                    '0.25',
+                                    '0.50',
+                                    '1.00',
+                                    '10.0',
+                                    '100.0'
+                                  ]))
                         .map((preset) {
                       final isSelected = _qtyCtrl.text.trim() == preset;
                       return InkWell(
                         onTap: () => setState(() => _qtyCtrl.text = preset),
                         borderRadius: BorderRadius.circular(4),
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 4),
                           decoration: BoxDecoration(
-                            color: isSelected ? const Color(0xFF2E82FE).withOpacity(0.25) : const Color(0xFF1F2433),
+                            color: isSelected
+                                ? const Color(0xFF2E82FE)
+                                    .withValues(alpha: 0.25)
+                                : const Color(0xFF1F2433),
                             borderRadius: BorderRadius.circular(4),
                             border: Border.all(
-                              color: isSelected ? const Color(0xFF2E82FE) : const Color(0xFF323B4F),
+                              color: isSelected
+                                  ? const Color(0xFF2E82FE)
+                                  : const Color(0xFF323B4F),
                               width: 1,
                             ),
                           ),
@@ -3716,7 +5358,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                             preset,
                             style: TextStyle(
                               fontSize: 11,
-                              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                              fontWeight: isSelected
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
                               color: isSelected ? Colors.white : Colors.white70,
                             ),
                           ),
@@ -3728,7 +5372,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
                   // Live Estimated Value & Risk
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                     decoration: BoxDecoration(
                       color: const Color(0xFF10141D),
                       borderRadius: BorderRadius.circular(6),
@@ -3736,12 +5381,22 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text('มูลค่าไม้: $_currSym${posValue >= 1000 ? posValue.toStringAsFixed(1) : posValue.toStringAsFixed(2)}',
-                            style: const TextStyle(fontSize: 11, color: Colors.white70)),
-                        Text('เสี่ยง: -$_currSym${riskAmount.toStringAsFixed(2)}',
-                            style: const TextStyle(fontSize: 11, color: AppColors.bearish, fontWeight: FontWeight.bold)),
-                        Text('เป้า TP: +$_currSym${rewardAmount.toStringAsFixed(2)}',
-                            style: const TextStyle(fontSize: 11, color: AppColors.bullish, fontWeight: FontWeight.bold)),
+                        Text(
+                            'มูลค่าไม้: $_currSym${posValue >= 1000 ? posValue.toStringAsFixed(1) : posValue.toStringAsFixed(2)}',
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.white70)),
+                        Text(
+                            'เสี่ยง: -$_currSym${riskAmount.toStringAsFixed(2)}',
+                            style: const TextStyle(
+                                fontSize: 11,
+                                color: AppColors.bearish,
+                                fontWeight: FontWeight.bold)),
+                        Text(
+                            'เป้า TP: +$_currSym${rewardAmount.toStringAsFixed(2)}',
+                            style: const TextStyle(
+                                fontSize: 11,
+                                color: AppColors.bullish,
+                                fontWeight: FontWeight.bold)),
                       ],
                     ),
                   ),
@@ -3759,20 +5414,29 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                       children: [
                         // Auto-BE Switch
                         InkWell(
-                          onTap: () => setState(() => _autoBeEnabled = !_autoBeEnabled),
+                          onTap: () =>
+                              setState(() => _autoBeEnabled = !_autoBeEnabled),
                           child: Row(
                             children: [
-                              Icon(Icons.shield, size: 16, color: _autoBeEnabled ? const Color(0xFF00E5FF) : Colors.white30),
+                              Icon(Icons.shield,
+                                  size: 16,
+                                  color: _autoBeEnabled
+                                      ? const Color(0xFF00E5FF)
+                                      : Colors.white30),
                               const SizedBox(width: 8),
                               const Expanded(
-                                child: Text('🛡️ Auto-Breakeven Shield (เลื่อน SL บังทุนที่ +1.0R / +1.5R)',
-                                    style: TextStyle(fontSize: 11, color: Colors.white)),
+                                child: Text(
+                                    '🛡️ Auto-Breakeven Shield (เลื่อน SL บังทุนที่ +1.0R)',
+                                    style: TextStyle(
+                                        fontSize: 11, color: Colors.white)),
                               ),
                               Switch(
                                 value: _autoBeEnabled,
-                                activeColor: const Color(0xFF00E5FF),
-                                onChanged: (v) => setState(() => _autoBeEnabled = v),
-                                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                activeThumbColor: const Color(0xFF00E5FF),
+                                onChanged: (v) =>
+                                    setState(() => _autoBeEnabled = v),
+                                materialTapTargetSize:
+                                    MaterialTapTargetSize.shrinkWrap,
                               ),
                             ],
                           ),
@@ -3780,20 +5444,29 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                         const Divider(height: 8, color: Color(0xFF1E2638)),
                         // Dynamic Trailing Switch
                         InkWell(
-                          onTap: () => setState(() => _trailingStopEnabled = !_trailingStopEnabled),
+                          onTap: () => setState(() =>
+                              _trailingStopEnabled = !_trailingStopEnabled),
                           child: Row(
                             children: [
-                              Icon(Icons.auto_awesome, size: 16, color: _trailingStopEnabled ? AppColors.bullish : Colors.white30),
+                              Icon(Icons.auto_awesome,
+                                  size: 16,
+                                  color: _trailingStopEnabled
+                                      ? AppColors.bullish
+                                      : Colors.white30),
                               const SizedBox(width: 8),
                               const Expanded(
-                                child: Text('🚀 Multi-Tier Trailing Stop (ล็อกกำไรที่ +1.5R, +2.0R, +2.5R+)',
-                                    style: TextStyle(fontSize: 11, color: Colors.white)),
+                                child: Text(
+                                    '🚀 Multi-Tier Trailing Stop (ล็อกกำไรที่ +1.5R, +2.0R, +2.5R+)',
+                                    style: TextStyle(
+                                        fontSize: 11, color: Colors.white)),
                               ),
                               Switch(
                                 value: _trailingStopEnabled,
-                                activeColor: AppColors.bullish,
-                                onChanged: (v) => setState(() => _trailingStopEnabled = v),
-                                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                activeThumbColor: AppColors.bullish,
+                                onChanged: (v) =>
+                                    setState(() => _trailingStopEnabled = v),
+                                materialTapTargetSize:
+                                    MaterialTapTargetSize.shrinkWrap,
                               ),
                             ],
                           ),
@@ -3811,31 +5484,40 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               children: [
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: () {
-                      _executeOrder(
-                        'long',
-                        customEntry: currentEntry,
-                        customSl: currentSl,
-                        customTp: currentTp,
-                      );
-                    },
+                    onPressed: canExecuteLong
+                        ? () {
+                            _executeOrder(
+                              'long',
+                              customEntry: currentEntry,
+                              customSl: currentSl,
+                              customTp: currentTp,
+                            );
+                          }
+                        : null,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.bullish,
                       foregroundColor: Colors.black,
                       padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
                       elevation: 2,
                     ),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(isPending ? Icons.hourglass_top : Icons.arrow_upward, size: 16, color: Colors.black),
+                        Icon(
+                            isPending
+                                ? Icons.hourglass_top
+                                : Icons.arrow_upward,
+                            size: 16,
+                            color: Colors.black),
                         const SizedBox(width: 4),
                         Text(
                           isPending
                               ? 'BUY LIMIT ($_currSym${_fmtPrice(currentEntry)})'
                               : 'BUY / LONG (${_qtyCtrl.text.trim()})',
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13),
                         ),
                       ],
                     ),
@@ -3844,31 +5526,40 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: () {
-                      _executeOrder(
-                        'short',
-                        customEntry: currentEntry,
-                        customSl: currentSl,
-                        customTp: currentTp,
-                      );
-                    },
+                    onPressed: canExecuteShort
+                        ? () {
+                            _executeOrder(
+                              'short',
+                              customEntry: currentEntry,
+                              customSl: currentSl,
+                              customTp: currentTp,
+                            );
+                          }
+                        : null,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.bearish,
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
                       elevation: 2,
                     ),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(isPending ? Icons.hourglass_bottom : Icons.arrow_downward, size: 16, color: Colors.white),
+                        Icon(
+                            isPending
+                                ? Icons.hourglass_bottom
+                                : Icons.arrow_downward,
+                            size: 16,
+                            color: Colors.white),
                         const SizedBox(width: 4),
                         Text(
                           isPending
                               ? 'SELL LIMIT ($_currSym${_fmtPrice(currentEntry)})'
                               : 'SELL / SHORT (${_qtyCtrl.text.trim()})',
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 13),
                         ),
                       ],
                     ),
@@ -3900,37 +5591,66 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 children: [
                   const Row(
                     children: [
-                      Icon(Icons.shield_outlined, size: 14, color: Color(0xFF00E5FF)),
+                      Icon(Icons.shield_outlined,
+                          size: 14, color: Color(0xFF00E5FF)),
                       SizedBox(width: 6),
-                      Text('INSTITUTIONAL RISK CONTROL', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))),
+                      Text('INSTITUTIONAL RISK CONTROL',
+                          style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF00E5FF))),
                     ],
                   ),
                   const SizedBox(height: 8),
-                  const Row(
+                  Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text('Risk / Trade Limit:', style: TextStyle(fontSize: 11, color: Colors.white54)),
-                      Text('1.0% (\$100.00)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+                      const Text('Selected Risk / Trade:',
+                          style:
+                              TextStyle(fontSize: 11, color: Colors.white54)),
+                      Text(
+                          '${_selectedRiskPct.toStringAsFixed(1)}% ($_currSym${(_accountCapital * _selectedRiskPct / 100).toStringAsFixed(2)})',
+                          style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white)),
                     ],
                   ),
                   const SizedBox(height: 4),
                   const Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text('Max Daily Drawdown:', style: TextStyle(fontSize: 11, color: Colors.white54)),
-                      Text('3.0% (\$300.00)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.neutral)),
+                      Text('Portfolio Limits:',
+                          style:
+                              TextStyle(fontSize: 11, color: Colors.white54)),
+                      Text('Validated by backend',
+                          style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: AppColors.neutral)),
                     ],
                   ),
                   const SizedBox(height: 4),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text('Auto TP/SL Monitor:', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                      const Text('TP/SL Monitor:',
+                          style:
+                              TextStyle(fontSize: 11, color: Colors.white54)),
                       Row(
                         children: [
-                          Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.bullish, shape: BoxShape.circle)),
+                          Container(
+                              width: 6,
+                              height: 6,
+                              decoration: const BoxDecoration(
+                                  color: AppColors.bullish,
+                                  shape: BoxShape.circle)),
                           const SizedBox(width: 4),
-                          const Text('24/7 ACTIVE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: AppColors.bullish)),
+                          const Text('BACKEND MANAGED',
+                              style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                  color: AppColors.bullish)),
                         ],
                       ),
                     ],
@@ -3950,7 +5670,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     required String subtitle,
     required bool selected,
     required Color color,
-    required VoidCallback onTap,
+    required VoidCallback? onTap,
   }) {
     return Expanded(
       child: InkWell(
@@ -3960,7 +5680,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           duration: const Duration(milliseconds: 180),
           padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
           decoration: BoxDecoration(
-            color: selected ? color.withValues(alpha: 0.22) : const Color(0xFF181E2B),
+            color: selected
+                ? color.withValues(alpha: 0.22)
+                : const Color(0xFF181E2B),
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
               color: selected ? color : const Color(0xFF2E384D),
@@ -4012,7 +5734,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           children: [
             Text(
               label,
-              style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: color),
+              style: TextStyle(
+                  fontSize: 11, fontWeight: FontWeight.bold, color: color),
             ),
             if (!isEditable)
               Container(
@@ -4021,7 +5744,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   color: Colors.white10,
                   borderRadius: BorderRadius.circular(3),
                 ),
-                child: const Text('AUTO', style: TextStyle(fontSize: 8.5, color: Colors.white60, fontWeight: FontWeight.bold)),
+                child: const Text('AUTO',
+                    style: TextStyle(
+                        fontSize: 8.5,
+                        color: Colors.white60,
+                        fontWeight: FontWeight.bold)),
               ),
           ],
         ),
@@ -4029,10 +5756,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         Container(
           height: 38,
           decoration: BoxDecoration(
-            color: isEditable ? const Color(0xFF131722) : const Color(0xFF1A2234),
+            color:
+                isEditable ? const Color(0xFF131722) : const Color(0xFF1A2234),
             borderRadius: BorderRadius.circular(6),
             border: Border.all(
-              color: isEditable ? const Color(0xFFFFB300).withValues(alpha: 0.6) : const Color(0xFF2E384D),
+              color: isEditable
+                  ? const Color(0xFFFFB300).withValues(alpha: 0.6)
+                  : const Color(0xFF2E384D),
               width: isEditable ? 1.2 : 0.8,
             ),
           ),
@@ -4047,10 +5777,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               fontFamily: 'monospace',
             ),
             decoration: InputDecoration(
-              contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               border: InputBorder.none,
               prefixText: '$_currSym ',
-              prefixStyle: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: color),
+              prefixStyle: TextStyle(
+                  fontSize: 13, fontWeight: FontWeight.bold, color: color),
               hintText: hintText,
               hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
             ),
@@ -4070,21 +5802,26 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: const TextStyle(fontSize: 9, color: AppColors.textMuted)),
+        Text(label,
+            style: const TextStyle(fontSize: 9, color: AppColors.textMuted)),
         const SizedBox(height: 2),
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(valid ? Icons.check_circle : Icons.cancel, size: 11, color: valid ? AppColors.bullish : AppColors.textMuted),
+            Icon(valid ? Icons.check_circle : Icons.cancel,
+                size: 11,
+                color: valid ? AppColors.bullish : AppColors.textMuted),
             const SizedBox(width: 3),
-            Text(value, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white)),
+            Text(value,
+                style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white)),
           ],
         ),
       ],
     );
   }
-
-
 
   // --------------------------------------------------------------------------
   // Bottom Status Bar
@@ -4105,13 +5842,19 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
-            Icon(isLiveMode ? Icons.verified : Icons.science_outlined, size: 14, color: isLiveMode ? const Color(0xFF9B59B6) : const Color(0xFF00E5FF)),
+            Icon(isLiveMode ? Icons.verified : Icons.science_outlined,
+                size: 14,
+                color: isLiveMode
+                    ? const Color(0xFF9B59B6)
+                    : const Color(0xFF00E5FF)),
             const SizedBox(width: 6),
             Text(
               'Feed: $feedName  •  Latency: ${isLiveMode ? "15ms" : "28ms"}  •  $modeLabel',
               style: TextStyle(
                 fontSize: 11,
-                color: isLiveMode ? const Color(0xFFC39BD3) : const Color(0xFF00E5FF).withValues(alpha: 0.8),
+                color: isLiveMode
+                    ? const Color(0xFFC39BD3)
+                    : const Color(0xFF00E5FF).withValues(alpha: 0.8),
                 fontWeight: isLiveMode ? FontWeight.bold : FontWeight.normal,
               ),
             ),

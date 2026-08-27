@@ -5,18 +5,31 @@ Manage LLM provider settings, system prompt, notifications, and strategy configu
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from loguru import logger
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.config import get_settings
 from app.core.security import verify_api_key
 from app.engines.ai_engine import AIEngine
+from app.engines.indicator_core import (
+    public_indicator_core_config,
+    save_indicator_core_config,
+)
+from app.engines.regime_engine import (
+    load_regime_policy_config,
+    save_regime_policy_config,
+)
 from app.engines.strategy_engine import StrategyEngine
+from app.engines.timeframe_profiles import (
+    load_timeframe_profiles,
+    save_timeframe_profiles,
+)
+from app.core.url_security import configured_host_set, validate_service_url
+from app.core.runtime_config import load_runtime_config, update_runtime_config
 
 router = APIRouter()
 _ai = AIEngine()
@@ -31,76 +44,129 @@ def _mask_secret(val: str) -> str:
     return f"{val[:2]}****{val[-4:]}"
 
 PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts"
-ENV_FILE = Path(__file__).parent.parent.parent / ".env"
-if not ENV_FILE.exists():
-    ENV_FILE = Path(__file__).parent.parent.parent / "backend" / ".env"
-
 RUNTIME_SETTINGS_FILE = Path(__file__).parent.parent.parent / "config" / "runtime_settings.json"
 
 
 def _load_runtime_settings():
-    if RUNTIME_SETTINGS_FILE.exists():
-        try:
-            import json
-            data = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
-            cfg = get_settings()
-            if "provider" in data and data["provider"]:
-                _ai.active_provider = data["provider"]
-            elif "active_provider" in data and data["active_provider"]:
-                _ai.active_provider = data["active_provider"]
-            if "local_endpoint" in data and data["local_endpoint"]:
-                cfg.local_llm_endpoint = data["local_endpoint"]
-            if "local_model" in data and data["local_model"]:
-                cfg.local_llm_model = data["local_model"]
-            gem = data.get("gemini_api_key") or data.get("gemini_key")
-            if gem and not ("****" in gem or gem.startswith("***")):
-                cfg.gemini_api_key = gem
-            if "gemini_model" in data and data["gemini_model"]:
-                cfg.gemini_model = data["gemini_model"]
-            op = data.get("openrouter_api_key") or data.get("openrouter_key")
-            if op and not ("****" in op or op.startswith("***")):
-                cfg.openrouter_api_key = op
-            if "openrouter_model" in data and data["openrouter_model"]:
-                cfg.openrouter_model = data["openrouter_model"]
-            if "risk_per_trade" in data and data["risk_per_trade"]:
-                cfg.default_risk_per_trade = float(data["risk_per_trade"])
-            if "max_daily_loss" in data and data["max_daily_loss"]:
-                cfg.max_daily_loss = float(data["max_daily_loss"])
-            if "max_open_positions" in data and data["max_open_positions"]:
-                cfg.max_open_positions = int(data["max_open_positions"])
-        except Exception as e:
-            logger.warning(f"Failed to load runtime settings: {e}")
-
-
-_load_runtime_settings()
+    try:
+        data = load_runtime_config()
+        cfg = get_settings()
+        # One-time migration for legacy versions that wrote cloud API keys to
+        # runtime_settings.json. Keep them in this process for continuity, then
+        # remove the plaintext copies. Future restarts must source secrets from
+        # environment variables or an external secret manager.
+        legacy_gemini = data.get("gemini_api_key") or data.get("gemini_key")
+        legacy_openrouter = data.get("openrouter_api_key") or data.get("openrouter_key")
+        if legacy_gemini and not cfg.gemini_api_key:
+            cfg.gemini_api_key = str(legacy_gemini)
+        if legacy_openrouter and not cfg.openrouter_api_key:
+            cfg.openrouter_api_key = str(legacy_openrouter)
+        legacy_secret_fields = (
+            "gemini_key", "gemini_api_key", "openrouter_key", "openrouter_api_key",
+        )
+        if any(field in data for field in legacy_secret_fields):
+            update_runtime_config({}, removals=legacy_secret_fields)
+            logger.warning(
+                "Removed legacy plaintext LLM keys from runtime_settings.json; "
+                "configure environment-backed secrets before the next restart"
+            )
+            data = load_runtime_config()
+        if data.get("provider"):
+            _ai.active_provider = data["provider"]
+        elif data.get("active_provider"):
+            _ai.active_provider = data["active_provider"]
+        if data.get("local_endpoint"):
+            cfg.local_llm_endpoint = _validate_llm_endpoint(data["local_endpoint"])
+        if data.get("local_model"):
+            cfg.local_llm_model = data["local_model"]
+        if data.get("gemini_model"):
+            cfg.gemini_model = data["gemini_model"]
+        if data.get("openrouter_model"):
+            cfg.openrouter_model = data["openrouter_model"]
+        if data.get("risk_per_trade") is not None:
+            cfg.default_risk_per_trade = float(data["risk_per_trade"])
+        if data.get("max_daily_loss") is not None:
+            cfg.max_daily_loss = float(data["max_daily_loss"])
+        if data.get("max_open_positions") is not None:
+            cfg.max_open_positions = int(data["max_open_positions"])
+        for broker in data.get("disabled_brokers", []):
+            if broker == "innovestx":
+                cfg.innovestx_api_key = cfg.innovestx_api_secret = ""
+            elif broker == "binance":
+                cfg.binance_api_key = cfg.binance_api_secret = ""
+            elif broker == "bybit":
+                cfg.bybit_api_key = cfg.bybit_api_secret = ""
+            elif broker == "alpaca":
+                cfg.alpaca_api_key = cfg.alpaca_api_secret = ""
+            elif broker == "mt5":
+                cfg.mt5_login, cfg.mt5_password, cfg.mt5_server = 0, "", ""
+    except Exception as e:
+        logger.error(f"Failed to load runtime settings: {e}")
 
 
 class PromptSwitchRequest(BaseModel):
     prompt_file: str  # e.g. "advisor_v1.md"
 
 
+class ChatMessageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=16_000)
+
+
+class ChatContextRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    symbol: str = Field(default="BTC/USDT", min_length=1, max_length=30, pattern=r"^[A-Za-z0-9_./:-]+$")
+    price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    timeframe: str = Field(default="1h", max_length=10)
+    bias: Literal["bullish", "bearish", "neutral"] = "neutral"
+    confluence: int = Field(default=0, ge=0, le=100)
+    open_positions: int = Field(default=0, ge=0, le=1000)
+    strategy_approved: Optional[bool] = None
+    strategy_direction: Literal["long", "short", "wait"] = "wait"
+    setup_direction: Literal["long", "short", "wait"] = "wait"
+    rejection_reasons: list[str] = Field(default_factory=list, max_length=20)
+
+
 class ChatRequest(BaseModel):
-    messages: list[dict]
-    context: Optional[dict] = None
+    model_config = ConfigDict(extra="forbid")
+    messages: list[ChatMessageRequest] = Field(min_length=1, max_length=50)
+    context: Optional[ChatContextRequest] = None
 
 
 class LLMTestRequest(BaseModel):
-    provider: str  # "local", "gemini", "openrouter"
-    endpoint: Optional[str] = None
-    model: Optional[str] = None
-    api_key: Optional[str] = None
+    provider: Literal["local", "gemini", "openrouter"]
+    endpoint: Optional[str] = Field(default=None, max_length=500)
+    model: Optional[str] = Field(default=None, max_length=200)
+    api_key: Optional[str] = Field(default=None, max_length=1000)
 
 
 class LLMConfigRequest(BaseModel):
-    provider: Optional[str] = "local"
-    local_endpoint: Optional[str] = None
-    local_model: Optional[str] = None
-    gemini_key: Optional[str] = None
-    gemini_api_key: Optional[str] = None
-    gemini_model: Optional[str] = None
-    openrouter_key: Optional[str] = None
-    openrouter_api_key: Optional[str] = None
-    openrouter_model: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
+    provider: Optional[Literal["local", "gemini", "openrouter"]] = "local"
+    local_endpoint: Optional[str] = Field(default=None, max_length=500)
+    local_model: Optional[str] = Field(default=None, max_length=200)
+    gemini_key: Optional[str] = Field(default=None, max_length=1000)
+    gemini_api_key: Optional[str] = Field(default=None, max_length=1000)
+    gemini_model: Optional[str] = Field(default=None, max_length=200)
+    openrouter_key: Optional[str] = Field(default=None, max_length=1000)
+    openrouter_api_key: Optional[str] = Field(default=None, max_length=1000)
+    openrouter_model: Optional[str] = Field(default=None, max_length=200)
+
+
+def _validate_llm_endpoint(endpoint: str) -> str:
+    cfg = get_settings()
+    allowed = configured_host_set(cfg.allowed_llm_hosts)
+    # An endpoint provisioned by the server administrator remains valid even
+    # when it is not one of the local defaults.
+    from urllib.parse import urlparse
+    current_host = urlparse(cfg.local_llm_endpoint).hostname
+    if current_host:
+        allowed.add(current_host.lower())
+    return validate_service_url(endpoint, allowed_hosts=allowed, allow_private_ip=True)
+
+
+_load_runtime_settings()
 
 
 # ------------------------------------------------------------------
@@ -136,9 +202,21 @@ async def list_providers(_key: str = Depends(verify_api_key)):
 @router.post("/llm/test")
 async def test_llm_config(req: LLMTestRequest, _key: str = Depends(verify_api_key)):
     """Live test connectivity to a provider with specified endpoint, model, or key."""
+    try:
+        endpoint = _validate_llm_endpoint(req.endpoint) if req.endpoint else None
+    except ValueError as exc:
+        # A provider test is represented by its `ok` flag. Returning a normal
+        # test result keeps old mobile clients from exposing a raw Dio/HTTP 500
+        # exception while preserving the outbound-host security boundary.
+        return {
+            "provider": req.provider,
+            "ok": False,
+            "latency_ms": 0,
+            "error": f"AI endpoint is not allowed: {exc}",
+        }
     result = await _ai.test_connection(
         provider=req.provider,
-        custom_endpoint=req.endpoint,
+        custom_endpoint=endpoint,
         custom_model=req.model,
         custom_key=req.api_key,
     )
@@ -179,82 +257,59 @@ async def get_llm_config(_key: str = Depends(verify_api_key)):
 async def update_llm_config(req: LLMConfigRequest, _key: str = Depends(verify_api_key)):
     """Update runtime LLM settings in memory and persist to .env."""
     cfg = get_settings()
-    
+
+    validated_local_endpoint: Optional[str] = None
+    if req.local_endpoint is not None:
+        try:
+            validated_local_endpoint = _validate_llm_endpoint(req.local_endpoint)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    from app.core.config import update_runtime_setting
+
     if req.provider is not None:
         _ai.active_provider = req.provider.strip()
-    if req.local_endpoint is not None:
-        cfg.local_llm_endpoint = req.local_endpoint.strip()
+    if validated_local_endpoint is not None:
+        update_runtime_setting("local_llm_endpoint", validated_local_endpoint)
     if req.local_model is not None:
-        cfg.local_llm_model = req.local_model.strip()
+        update_runtime_setting("local_llm_model", req.local_model.strip())
     
     gem_k = req.gemini_api_key if req.gemini_api_key is not None else req.gemini_key
     if gem_k is not None:
         clean_gem = gem_k.strip()
-        if clean_gem and not ("****" in clean_gem or clean_gem.startswith("***")):
-            cfg.gemini_api_key = clean_gem
+        if clean_gem and "*" not in clean_gem:
+            update_runtime_setting("gemini_api_key", clean_gem)
     if req.gemini_model is not None:
-        cfg.gemini_model = req.gemini_model.strip()
+        update_runtime_setting("gemini_model", req.gemini_model.strip())
         
     open_k = req.openrouter_api_key if req.openrouter_api_key is not None else req.openrouter_key
     if open_k is not None:
         clean_open = open_k.strip()
-        if clean_open and not ("****" in clean_open or clean_open.startswith("***")):
-            cfg.openrouter_api_key = clean_open
+        if clean_open and "*" not in clean_open:
+            update_runtime_setting("openrouter_api_key", clean_open)
     if req.openrouter_model is not None:
-        cfg.openrouter_model = req.openrouter_model.strip()
+        update_runtime_setting("openrouter_model", req.openrouter_model.strip())
 
-    # Persist to .env if file exists
+    from app.api import signals
+    from app.services.event_trigger import MarketMonitor
+    active_provider = getattr(_ai, "active_provider", "local")
+    signals._ai.active_provider = active_provider
+    MarketMonitor.get_instance().ai.active_provider = active_provider
+
+    # Persist only non-secret provider settings. API keys must come from the
+    # process environment/secret manager and remain memory-only when changed
+    # through this endpoint.
     try:
-        if ENV_FILE.exists():
-            lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
-            new_lines = []
-            updates = {
-                "LOCAL_LLM_ENDPOINT": cfg.local_llm_endpoint,
-                "LOCAL_LLM_MODEL": cfg.local_llm_model,
-                "GEMINI_API_KEY": cfg.gemini_api_key,
-                "GEMINI_MODEL": cfg.gemini_model,
-                "OPENROUTER_API_KEY": cfg.openrouter_api_key,
-                "OPENROUTER_MODEL": cfg.openrouter_model,
-            }
-            matched_keys = set()
-            for line in lines:
-                key = line.split("=")[0].strip() if "=" in line else None
-                if key in updates:
-                    new_lines.append(f"{key}={updates[key]}")
-                    matched_keys.add(key)
-                else:
-                    new_lines.append(line)
-            
-            for key, val in updates.items():
-                if key not in matched_keys:
-                    new_lines.append(f"{key}={val}")
-
-            ENV_FILE.write_text("\n".join(new_lines), encoding="utf-8")
-    except Exception:
-        pass
-
-    # Persist to runtime JSON store with safe Load-Merge-Write
-    try:
-        import json
-        RUNTIME_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        current_data = {}
-        if RUNTIME_SETTINGS_FILE.exists():
-            try:
-                current_data = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        current_data.update({
+        update_runtime_config({
             "provider": getattr(_ai, "active_provider", "local"),
             "local_endpoint": cfg.local_llm_endpoint,
             "local_model": cfg.local_llm_model,
-            "gemini_key": cfg.gemini_api_key,
             "gemini_model": cfg.gemini_model,
-            "openrouter_key": cfg.openrouter_api_key,
             "openrouter_model": cfg.openrouter_model,
-        })
-        RUNTIME_SETTINGS_FILE.write_text(json.dumps(current_data, indent=2), encoding="utf-8")
+        }, removals=("gemini_key", "gemini_api_key", "openrouter_key", "openrouter_api_key"))
     except Exception as e:
-        logger.warning(f"Failed to save runtime settings to JSON: {e}")
+        logger.error(f"Failed to save runtime settings: {e}")
+        raise HTTPException(status_code=500, detail="Unable to persist LLM configuration") from e
 
     return {
         "status": "ok",
@@ -275,13 +330,26 @@ async def chat(
     _key: str = Depends(verify_api_key),
 ):
     """Free-form chat with the AI advisor."""
-    response = await _ai.chat(req.messages, context=req.context)
+    response = await _ai.chat(
+        [message.model_dump() for message in req.messages],
+        context=req.context.model_dump() if req.context else None,
+    )
     return {"response": response}
 
 
 # ------------------------------------------------------------------
 # Prompts
 # ------------------------------------------------------------------
+
+def _reload_all_ai_prompts() -> str:
+    from app.api import signals
+    from app.services.event_trigger import MarketMonitor
+
+    prompt = _ai.reload_prompt()
+    signals._ai.reload_prompt()
+    MarketMonitor.get_instance().ai.reload_prompt()
+    return prompt
+
 
 @router.get("/prompts")
 async def list_prompts(_key: str = Depends(verify_api_key)):
@@ -311,13 +379,13 @@ async def switch_prompt(
         raise HTTPException(status_code=404, detail=f"Prompt file not found: {req.prompt_file}")
     active_file = PROMPTS_DIR / "active_prompt.txt"
     active_file.write_text(safe_name, encoding="utf-8")
-    _ai.reload_prompt()
+    _reload_all_ai_prompts()
     return {"message": f"Switched to prompt: {safe_name}"}
 
 
 class SavePromptRequest(BaseModel):
-    name: Optional[str] = "advisor_v1.md"
-    content: str
+    name: Optional[str] = Field(default="advisor_v1.md", max_length=100)
+    content: str = Field(min_length=1, max_length=100_000)
 
 
 @router.post("/prompts/save")
@@ -335,7 +403,7 @@ async def save_prompt(req: SavePromptRequest, _key: str = Depends(verify_api_key
     
     active_file = PROMPTS_DIR / "active_prompt.txt"
     active_file.write_text(safe_name, encoding="utf-8")
-    _ai.reload_prompt()
+    _reload_all_ai_prompts()
     
     return {
         "status": "ok",
@@ -369,7 +437,7 @@ async def test_prompt(_key: str = Depends(verify_api_key)):
 
 @router.post("/prompts/reload")
 async def reload_prompt(_key: str = Depends(verify_api_key)):
-    prompt = _ai.reload_prompt()
+    prompt = _reload_all_ai_prompts()
     return {"message": "Prompt reloaded", "length": len(prompt)}
 
 
@@ -377,9 +445,169 @@ async def reload_prompt(_key: str = Depends(verify_api_key)):
 # Strategy
 # ------------------------------------------------------------------
 
+
+class IndicatorLayerConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    required: bool
+    weight: float = Field(gt=0, le=1000)
+    params: dict[str, int | float] = Field(default_factory=dict)
+    # Read-only metadata returned by GET is accepted for safe GET -> PUT
+    # round trips, then stripped before persistence.
+    label: Optional[str] = None
+    short_label: Optional[str] = None
+    description: Optional[str] = None
+
+
+class IndicatorCoreConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    minimum_data_coverage: float = Field(ge=0, le=100)
+    indicators: dict[str, IndicatorLayerConfigRequest]
+
+
+class RegimeClassificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    minimum_bars: int = Field(ge=30, le=1500)
+    atr_length: int = Field(ge=5, le=100)
+    efficiency_lookback: int = Field(ge=10, le=500)
+    volatility_lookback: int = Field(ge=20, le=1000)
+    trend_efficiency_min: float = Field(ge=0.05, le=0.95)
+    volatile_atr_ratio: float = Field(ge=1.0, le=10.0)
+    volatile_percentile: float = Field(ge=50, le=100)
+
+
+class RegimeRuleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entry_allowed: bool
+    min_confluence: float = Field(ge=0, le=100)
+    min_rr: float = Field(ge=1, le=20)
+    risk_multiplier: float = Field(ge=0, le=1)
+    require_direction_alignment: bool
+    require_liquidity_sweep: bool
+    require_volume_confirmation: bool
+    require_squeeze_fire: bool
+
+
+class RegimePolicyConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    classification: RegimeClassificationRequest
+    policies: dict[str, RegimeRuleRequest]
+
+
+class TimeframeProfilesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    enabled: bool = True
+    roles: dict[str, dict[str, Any]]
+
+
+@router.get("/indicator-core")
+async def get_indicator_core(_key: str = Depends(verify_api_key)):
+    """Return the active three-indicator registry and editable parameters."""
+    return public_indicator_core_config()
+
+
+@router.put("/indicator-core")
+async def update_indicator_core(
+    req: IndicatorCoreConfigRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Validate and atomically persist the indicator decision configuration."""
+    try:
+        config = save_indicator_core_config(
+            {
+                "version": req.version,
+                "minimum_data_coverage": req.minimum_data_coverage,
+                "indicators": {
+                    indicator_id: layer.model_dump(
+                        include={"enabled", "required", "weight", "params"}
+                    )
+                    for indicator_id, layer in req.indicators.items()
+                },
+            }
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.error("Failed to persist indicator core configuration: {}", exc)
+        raise HTTPException(
+            status_code=500, detail="Unable to persist indicator configuration"
+        ) from exc
+    return {"status": "ok", "config": config}
+
+
+@router.get("/regime-policy")
+async def get_regime_policy(_key: str = Depends(verify_api_key)):
+    """Return market-state thresholds and conservative per-regime policy."""
+    return load_regime_policy_config()
+
+
+@router.put("/regime-policy")
+async def update_regime_policy(
+    req: RegimePolicyConfigRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Validate and atomically persist the adaptive regime policy."""
+    try:
+        config = save_regime_policy_config(req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.error("Failed to persist market regime policy: {}", exc)
+        raise HTTPException(
+            status_code=500, detail="Unable to persist market regime policy"
+        ) from exc
+    return {"status": "ok", "config": config}
+
+
+@router.get("/timeframe-profiles")
+async def get_timeframe_profiles(_key: str = Depends(verify_api_key)):
+    """Return the active Phase 5 Bias/Setup/Trigger role profiles."""
+    return load_timeframe_profiles()
+
+
+@router.put("/timeframe-profiles")
+async def update_timeframe_profiles(
+    req: TimeframeProfilesRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Validate and atomically persist the ordered MTF hierarchy."""
+    try:
+        config = save_timeframe_profiles(req.model_dump())
+        from app.services.analysis_snapshot import analysis_snapshots
+        from app.services.mtf_analysis import mtf_analyses
+
+        analysis_snapshots.clear()
+        mtf_analyses.clear()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.error("Failed to persist timeframe profiles: {}", exc)
+        raise HTTPException(
+            status_code=500, detail="Unable to persist timeframe profiles"
+        ) from exc
+    return {"status": "ok", "config": config}
+
 @router.post("/strategy/reload")
 async def reload_strategy(_key: str = Depends(verify_api_key)):
     _strategy.reload()
+    from app.api import chart, signals
+    from app.services.event_trigger import MarketMonitor
+    chart._strategy.reload()
+    signals._strategy.reload()
+    MarketMonitor.get_instance().strategy.reload()
+    from app.services.analysis_snapshot import analysis_snapshots
+    from app.services.mtf_analysis import mtf_analyses
+    analysis_snapshots.clear()
+    mtf_analyses.clear()
     return {"message": "Strategy reloaded", "name": _strategy._strategy.get("name")}
 
 
@@ -433,36 +661,28 @@ async def test_notifications(
 # ------------------------------------------------------------------
 
 class WatchlistAddRequest(BaseModel):
-    symbol: str
-    market_type: str = "crypto"
-    timeframe: str = "1h"
-    htf_timeframe: str = "4h"
-    exchange: str = "binance"
+    symbol: str = Field(min_length=1, max_length=30, pattern=r"^[A-Za-z0-9_./:-]+$")
+    market_type: Literal["crypto", "forex", "stock"] = "crypto"
+    timeframe: Literal["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"] = "1h"
+    htf_timeframe: Literal["15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"] = "4h"
+    exchange: Literal["binance", "bybit", "innovestx", "mt5", "alpaca", "yfinance"] = "binance"
 
 
 class WatchlistBatchAddRequest(BaseModel):
-    items: list[WatchlistAddRequest]
+    items: list[WatchlistAddRequest] = Field(min_length=1, max_length=200)
 
 
 def _save_runtime_watchlist(watchlist: list[dict]):
     try:
-        import json
-        data = {}
-        if RUNTIME_SETTINGS_FILE.exists():
-            try:
-                data = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
-            except Exception:
-                data = {}
-        data["watchlist"] = watchlist
-        RUNTIME_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        RUNTIME_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        update_runtime_config({"watchlist": watchlist})
         try:
             from app.services.event_trigger import invalidate_runtime_settings_cache
             invalidate_runtime_settings_cache()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"Could not invalidate runtime cache: {exc}")
     except Exception as e:
-        logger.warning(f"[Settings] Failed to save watchlist to file: {e}")
+        logger.error(f"[Settings] Failed to save watchlist: {e}")
+        raise
 
 
 def _normalize_symbol(s: str) -> str:
@@ -847,14 +1067,14 @@ class BrokerConfigRequest(BaseModel):
     bybit_api_secret: Optional[str] = None
     innovestx_api_key: Optional[str] = None
     innovestx_api_secret: Optional[str] = None
-    innovestx_base_url: Optional[str] = None
+    innovestx_base_url: Optional[str] = Field(default=None, max_length=500)
     mt5_login: Optional[int] = None
     mt5_password: Optional[str] = None
     mt5_server: Optional[str] = None
     mt5_path: Optional[str] = None
     alpaca_api_key: Optional[str] = None
     alpaca_api_secret: Optional[str] = None
-    alpaca_base_url: Optional[str] = None
+    alpaca_base_url: Optional[str] = Field(default=None, max_length=500)
 
 
 @router.get("/brokers/config")
@@ -886,84 +1106,69 @@ async def get_broker_config(_key: str = Depends(verify_api_key)):
 
 @router.post("/brokers/config")
 async def update_broker_config(req: BrokerConfigRequest, _key: str = Depends(verify_api_key)):
-    """Update runtime broker & exchange settings and persist to .env."""
+    """Update runtime broker settings in memory; secrets are never written to disk."""
     cfg = get_settings()
 
-    if req.binance_api_key is not None:
+    if req.binance_api_key:
         cfg.binance_api_key = req.binance_api_key.strip()
-    if req.binance_api_secret is not None:
+    if req.binance_api_secret:
         cfg.binance_api_secret = req.binance_api_secret.strip()
-    if req.bybit_api_key is not None:
+    if req.bybit_api_key:
         cfg.bybit_api_key = req.bybit_api_key.strip()
-    if req.bybit_api_secret is not None:
+    if req.bybit_api_secret:
         cfg.bybit_api_secret = req.bybit_api_secret.strip()
 
-    if req.innovestx_api_key is not None:
+    if req.innovestx_api_key:
         cfg.innovestx_api_key = req.innovestx_api_key.strip()
-    if req.innovestx_api_secret is not None:
+    if req.innovestx_api_secret:
         cfg.innovestx_api_secret = req.innovestx_api_secret.strip()
-    if req.innovestx_base_url is not None:
-        cfg.innovestx_base_url = req.innovestx_base_url.strip()
+    if req.innovestx_base_url:
+        cfg.innovestx_base_url = validate_service_url(
+            req.innovestx_base_url,
+            allowed_hosts={"api.innovestxonline.com", "innovestxonline.com"},
+        )
 
     if req.mt5_login is not None:
         cfg.mt5_login = req.mt5_login
-    if req.mt5_password is not None:
+    if req.mt5_password:
         cfg.mt5_password = req.mt5_password.strip()
     if req.mt5_server is not None:
         cfg.mt5_server = req.mt5_server.strip()
     if req.mt5_path is not None:
         cfg.mt5_path = req.mt5_path.strip()
 
-    if req.alpaca_api_key is not None:
+    if req.alpaca_api_key:
         cfg.alpaca_api_key = req.alpaca_api_key.strip()
-    if req.alpaca_api_secret is not None:
+    if req.alpaca_api_secret:
         cfg.alpaca_api_secret = req.alpaca_api_secret.strip()
-    if req.alpaca_base_url is not None:
-        cfg.alpaca_base_url = req.alpaca_base_url.strip()
+    if req.alpaca_base_url:
+        cfg.alpaca_base_url = validate_service_url(
+            req.alpaca_base_url,
+            allowed_hosts={"paper-api.alpaca.markets", "api.alpaca.markets"},
+        )
 
-    # Persist to .env
-    try:
-        if ENV_FILE.exists():
-            lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
-            updates = {
-                "BINANCE_API_KEY": cfg.binance_api_key,
-                "BINANCE_API_SECRET": cfg.binance_api_secret,
-                "BYBIT_API_KEY": cfg.bybit_api_key,
-                "BYBIT_API_SECRET": cfg.bybit_api_secret,
-                "INNOVESTX_API_KEY": cfg.innovestx_api_key,
-                "INNOVESTX_API_SECRET": cfg.innovestx_api_secret,
-                "INNOVESTX_BASE_URL": cfg.innovestx_base_url,
-                "MT5_LOGIN": str(cfg.mt5_login),
-                "MT5_PASSWORD": cfg.mt5_password,
-                "MT5_SERVER": cfg.mt5_server,
-                "MT5_PATH": cfg.mt5_path,
-                "ALPACA_API_KEY": cfg.alpaca_api_key,
-                "ALPACA_API_SECRET": cfg.alpaca_api_secret,
-                "ALPACA_BASE_URL": cfg.alpaca_base_url,
-            }
-            new_lines = []
-            matched_keys = set()
-            for line in lines:
-                key = line.split("=")[0].strip() if "=" in line else None
-                if key in updates:
-                    new_lines.append(f"{key}={updates[key]}")
-                    matched_keys.add(key)
-                else:
-                    new_lines.append(line)
-            for key, val in updates.items():
-                os.environ[key] = str(val)
-                if key not in matched_keys:
-                    new_lines.append(f"{key}={val}")
-            ENV_FILE.write_text("\n".join(new_lines), encoding="utf-8")
-    except Exception as e:
-        logger.warning(f"Failed to persist broker settings to .env: {e}")
+    enabled = set()
+    if req.innovestx_api_key or req.innovestx_api_secret:
+        enabled.add("innovestx")
+    if req.binance_api_key or req.binance_api_secret:
+        enabled.add("binance")
+    if req.bybit_api_key or req.bybit_api_secret:
+        enabled.add("bybit")
+    if req.alpaca_api_key or req.alpaca_api_secret:
+        enabled.add("alpaca")
+    if req.mt5_login or req.mt5_password:
+        enabled.add("mt5")
+    if enabled:
+        runtime = load_runtime_config()
+        disabled = set(runtime.get("disabled_brokers", [])) - enabled
+        update_runtime_config({"disabled_brokers": sorted(disabled)})
 
     return {"status": "ok", "message": "Broker & Exchange settings updated successfully"}
 
 
 @router.delete("/brokers/config/{broker}")
 async def clear_broker_config(broker: str, _key: str = Depends(verify_api_key)):
-    """Clear credentials for a specific broker and persist to .env."""
+    """Disable a broker and clear its in-memory credentials."""
     cfg = get_settings()
     b = broker.lower().strip()
     cleared = []
@@ -992,48 +1197,24 @@ async def clear_broker_config(broker: str, _key: str = Depends(verify_api_key)):
     else:
         raise HTTPException(status_code=400, detail=f"Unknown broker: {broker}")
 
-    # Persist to .env and os.environ
-    try:
-        if ENV_FILE.exists():
-            lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
-            updates = {
-                "INNOVESTX_API_KEY": cfg.innovestx_api_key,
-                "INNOVESTX_API_SECRET": cfg.innovestx_api_secret,
-                "BINANCE_API_KEY": cfg.binance_api_key,
-                "BINANCE_API_SECRET": cfg.binance_api_secret,
-                "BYBIT_API_KEY": cfg.bybit_api_key,
-                "BYBIT_API_SECRET": cfg.bybit_api_secret,
-                "MT5_LOGIN": str(cfg.mt5_login),
-                "MT5_PASSWORD": cfg.mt5_password,
-                "MT5_SERVER": cfg.mt5_server,
-                "ALPACA_API_KEY": cfg.alpaca_api_key,
-                "ALPACA_API_SECRET": cfg.alpaca_api_secret,
-            }
-            for k, v in updates.items():
-                os.environ[k] = str(v)
-            new_lines = []
-            for line in lines:
-                key = line.split("=")[0].strip() if "=" in line else None
-                if key in updates:
-                    new_lines.append(f"{key}={updates[key]}")
-                else:
-                    new_lines.append(line)
-            ENV_FILE.write_text("\n".join(new_lines), encoding="utf-8")
-    except Exception as e:
-        logger.warning(f"Failed to persist cleared broker settings to .env: {e}")
+    canonical = "innovestx" if b == "invx" else ("mt5" if b == "metatrader" else b)
+    runtime = load_runtime_config()
+    disabled = set(runtime.get("disabled_brokers", []))
+    disabled.add(canonical)
+    update_runtime_config({"disabled_brokers": sorted(disabled)})
 
     return {"status": "ok", "message": f"Cleared {broker} credentials", "cleared_fields": cleared}
 
 
 
 class BrokerTestRequest(BaseModel):
-    broker_type: str
+    broker_type: Literal["innovestx", "binance", "bybit", "alpaca", "mt5"]
     api_key: Optional[str] = None
     api_secret: Optional[str] = None
     server: Optional[str] = None
     login: Optional[int] = None
     password: Optional[str] = None
-    base_url: Optional[str] = None
+    base_url: Optional[str] = Field(default=None, max_length=500)
 
 
 @router.post("/brokers/test")
@@ -1047,10 +1228,16 @@ async def test_broker_connection(req: BrokerTestRequest, _key: str = Depends(ver
         key = (req.api_key or cfg.innovestx_api_key).strip()
         sec = (req.api_secret or cfg.innovestx_api_secret).strip()
         base = "https://api.innovestxonline.com"
-        if req.base_url and "innovestx" in req.base_url:
-            base = req.base_url.strip()
-        elif cfg.innovestx_base_url and "innovestx" in cfg.innovestx_base_url:
-            base = cfg.innovestx_base_url.strip()
+        if req.base_url:
+            base = validate_service_url(
+                req.base_url,
+                allowed_hosts={"api.innovestxonline.com", "innovestxonline.com"},
+            )
+        elif cfg.innovestx_base_url:
+            base = validate_service_url(
+                cfg.innovestx_base_url,
+                allowed_hosts={"api.innovestxonline.com", "innovestxonline.com"},
+            )
 
         client = InnovestXClient(api_key=key, api_secret=sec, base_url=base)
         res = await client.test_connection()
@@ -1087,7 +1274,10 @@ async def test_broker_connection(req: BrokerTestRequest, _key: str = Depends(ver
     elif req.broker_type == "alpaca":
         key = (req.api_key or cfg.alpaca_api_key).strip()
         sec = (req.api_secret or cfg.alpaca_api_secret).strip()
-        raw_base = (req.base_url or cfg.alpaca_base_url or "https://paper-api.alpaca.markets").strip()
+        raw_base = validate_service_url(
+            req.base_url or cfg.alpaca_base_url or "https://paper-api.alpaca.markets",
+            allowed_hosts={"paper-api.alpaca.markets", "api.alpaca.markets"},
+        )
         clean_base = raw_base.rstrip("/").removesuffix("/v2").removesuffix("/v1")
         if not key:
             return {"status": "error", "message": "Please enter an Alpaca API Key ID"}
@@ -1111,7 +1301,7 @@ async def test_broker_connection(req: BrokerTestRequest, _key: str = Depends(ver
                         "status": "error",
                         "message": "Alpaca 401 Unauthorized: Key หรือ Secret ไม่ถูกต้อง (ระวังการ Copy ไม่ครบตัวอักษร หรือกด Generate Key ใหม่)",
                     }
-                return {"status": "error", "message": f"Alpaca auth failed (HTTP {resp.status_code}): {resp.text}"}
+                return {"status": "error", "message": f"Alpaca auth failed (HTTP {resp.status_code})"}
         except Exception as e:
             return {"status": "error", "message": f"Alpaca Connection failed: {e}"}
 
@@ -1134,43 +1324,36 @@ class TradingModeRequest(BaseModel):
 
 @router.post("/trading-mode")
 async def set_trading_mode(req: TradingModeRequest, _key: str = Depends(verify_api_key)):
-    """Set global trading mode (paper or live)."""
-    import os
-    os.environ["TRADING_MODE"] = req.mode
-    get_settings.cache_clear()
+    """Compatibility endpoint: global mode is now permanently paper-safe."""
+    from app.core.live_session import live_session_manager
+
+    if req.mode == "live":
+        raise HTTPException(
+            status_code=409,
+            detail="Persistent global Live mode was removed. Open /api/v1/live/session after explicit confirmation instead.",
+        )
     cfg = get_settings()
-    cfg.trading_mode = req.mode
-
-    # Update .env
+    cfg.trading_mode = "paper"
     try:
-        if ENV_FILE.exists():
-            lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
-            new_lines = []
-            found = False
-            for line in lines:
-                if line.startswith("TRADING_MODE="):
-                    new_lines.append(f"TRADING_MODE={req.mode}")
-                    found = True
-                else:
-                    new_lines.append(line)
-            if not found:
-                new_lines.append(f"TRADING_MODE={req.mode}")
-            ENV_FILE.write_text("\n".join(new_lines), encoding="utf-8")
+        update_runtime_config({}, removals=("trading_mode",))
     except Exception as e:
-        logger.warning(f"Failed to persist TRADING_MODE to .env: {e}")
+        logger.error(f"Failed to persist trading mode: {e}")
+        raise HTTPException(status_code=500, detail="Unable to persist trading mode") from e
 
-    return {"status": "ok", "trading_mode": req.mode}
+    revoked = live_session_manager.revoke_all()
+    logger.warning("Trading mode returned to PAPER; revoked {} live sessions", revoked)
+    return {"status": "ok", "trading_mode": "paper", "revoked_sessions": revoked}
 
 
 class RiskConfigRequest(BaseModel):
-    entry_mode: Optional[Literal["limit", "market"]] = "limit"
-    auto_sl_tp: Optional[bool] = True
-    auto_invalidation: Optional[bool] = True
-    risk_per_trade: Optional[float] = 1.0
-    max_daily_loss: Optional[float] = 3.0
-    max_open_positions: Optional[int] = 5
-    target_rr: Optional[float] = 2.0
-    default_sl_pct: Optional[float] = 1.0
+    entry_mode: Optional[Literal["limit", "market"]] = None
+    auto_sl_tp: Optional[bool] = None
+    auto_invalidation: Optional[bool] = None
+    risk_per_trade: Optional[float] = Field(default=None, gt=0, le=5)
+    max_daily_loss: Optional[float] = Field(default=None, gt=0, le=20)
+    max_open_positions: Optional[int] = Field(default=None, ge=1, le=100)
+    target_rr: Optional[float] = Field(default=None, ge=1, le=20)
+    default_sl_pct: Optional[float] = Field(default=None, gt=0, le=20)
 
 
 @router.get("/risk/config")
@@ -1182,17 +1365,16 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
     auto_invalidation = True
     target_rr = 2.0
     default_sl_pct = 1.0
-    if RUNTIME_SETTINGS_FILE.exists():
-        try:
-            import json
-            data = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
-            entry_mode = data.get("entry_mode", "limit")
-            auto_sl_tp = data.get("auto_sl_tp", True)
-            auto_invalidation = data.get("auto_invalidation", True)
-            target_rr = float(data.get("target_rr", 2.0))
-            default_sl_pct = float(data.get("default_sl_pct", 1.0))
-        except Exception:
-            pass
+    try:
+        data = load_runtime_config()
+        entry_mode = data.get("entry_mode", "limit")
+        auto_sl_tp = data.get("auto_sl_tp", True)
+        auto_invalidation = data.get("auto_invalidation", True)
+        target_rr = float(data.get("target_rr", 2.0))
+        default_sl_pct = float(data.get("default_sl_pct", 1.0))
+    except Exception as exc:
+        logger.error(f"Failed to load risk config: {exc}")
+        raise HTTPException(status_code=500, detail="Unable to load risk configuration") from exc
 
     return {
         "entry_mode": entry_mode,
@@ -1218,44 +1400,38 @@ async def update_risk_config(req: RiskConfigRequest, _key: str = Depends(verify_
         cfg.max_open_positions = req.max_open_positions
 
     try:
-        import json
-        data = {}
-        if RUNTIME_SETTINGS_FILE.exists():
-            try:
-                data = json.loads(RUNTIME_SETTINGS_FILE.read_text(encoding="utf-8"))
-            except Exception:
-                data = {}
-
+        updates = {
+            "risk_per_trade": cfg.default_risk_per_trade,
+            "max_daily_loss": cfg.max_daily_loss,
+            "max_open_positions": cfg.max_open_positions,
+        }
         if req.entry_mode is not None:
-            data["entry_mode"] = req.entry_mode
+            updates["entry_mode"] = req.entry_mode
         if req.auto_sl_tp is not None:
-            data["auto_sl_tp"] = req.auto_sl_tp
+            updates["auto_sl_tp"] = req.auto_sl_tp
         if req.auto_invalidation is not None:
-            data["auto_invalidation"] = req.auto_invalidation
+            updates["auto_invalidation"] = req.auto_invalidation
         if req.target_rr is not None:
-            data["target_rr"] = req.target_rr
+            updates["target_rr"] = req.target_rr
         if req.default_sl_pct is not None:
-            data["default_sl_pct"] = req.default_sl_pct
-
-        data["risk_per_trade"] = cfg.default_risk_per_trade
-        data["max_daily_loss"] = cfg.max_daily_loss
-        data["max_open_positions"] = cfg.max_open_positions
-
-        RUNTIME_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        RUNTIME_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            updates["default_sl_pct"] = req.default_sl_pct
+        saved = update_runtime_config(updates)
+        from app.services.event_trigger import invalidate_runtime_settings_cache
+        invalidate_runtime_settings_cache()
     except Exception as e:
-        logger.warning(f"Failed to save risk config to JSON: {e}")
+        logger.error(f"Failed to save risk config: {e}")
+        raise HTTPException(status_code=500, detail="Unable to persist risk configuration") from e
 
     return {
         "status": "ok",
         "message": "Risk & Entry settings saved successfully",
         "config": {
-            "entry_mode": req.entry_mode,
-            "auto_sl_tp": req.auto_sl_tp,
-            "auto_invalidation": req.auto_invalidation,
+            "entry_mode": saved.get("entry_mode", "limit"),
+            "auto_sl_tp": saved.get("auto_sl_tp", True),
+            "auto_invalidation": saved.get("auto_invalidation", True),
             "risk_per_trade": cfg.default_risk_per_trade,
             "max_daily_loss": cfg.max_daily_loss,
-            "target_rr": req.target_rr or 2.0,
-            "default_sl_pct": req.default_sl_pct or 1.0,
+            "target_rr": saved.get("target_rr", 2.0),
+            "default_sl_pct": saved.get("default_sl_pct", 1.0),
         },
     }
