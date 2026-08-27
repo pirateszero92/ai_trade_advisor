@@ -34,8 +34,15 @@ class ApiConfig {
     }
   }
 
+  static const _defaultApiKey =
+      'JxMJIPbRqjbXRvSO1K53mGm62EcQBMB_RiTV69sdx1-rE7H_0dlHzXXO8p17e3Jw';
+
   static Future<String?> getApiKey() async {
-    return _storage.read(key: 'api_key');
+    try {
+      final key = await _storage.read(key: 'api_key');
+      if (key != null && key.isNotEmpty) return key;
+    } catch (_) {}
+    return _defaultApiKey;
   }
 
   static Future<void> setApiKey(String key) async {
