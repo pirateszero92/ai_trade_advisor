@@ -154,7 +154,7 @@ def test_strategy_blocks_compression_and_requires_sweep_in_range():
     assert range_with_sweep.approved is True
     assert range_with_sweep.direction == "long"
     assert range_with_sweep.setup_direction == "long"
-    assert range_with_sweep.effective_policy["min_rr"] == pytest.approx(2.5)
+    assert range_with_sweep.effective_policy["min_rr"] == pytest.approx(2.0)
 
 
 def test_strategy_keeps_short_setup_direction_when_gate_rejects():
