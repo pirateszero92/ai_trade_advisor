@@ -10,9 +10,190 @@ description: >
   Minimum confluence score of 65/100.
   R:R must be at least 2.0.
 
+# Canonical decision input used by both Chart and Proactive Scanner. Strategy
+# calculations must use completed candles only; the live quote is display and
+# execution context, never an extra repainting analysis candle.
+analysis:
+  lookback: 300
+  htf_lookback: 120
+  closed_candles_only: true
+
+# Phase 5 ordered timeframe roles. These profiles reuse only the registered
+# SMC Structure, Volume Delta/CVD and Squeeze Momentum layers. The stages are
+# gates, not scores that can be averaged to bypass an upstream disagreement.
+timeframe_profiles:
+  version: 1
+  enabled: true
+  roles:
+    bias:
+      timeframe: 4h
+      lookback: 180
+      smc:
+        swing_length: 7
+        internal_swing_length: 4
+        eql_tolerance: 0.002
+        order_block_lookback: 60
+        fvg_lookback: 40
+        atr_length: 14
+      indicator_overrides:
+        smc_structure:
+          weight: 60
+        volume_delta:
+          weight: 25
+        squeeze_momentum:
+          weight: 15
+      gate:
+        min_confluence: 20
+        require_indicator_readiness: true
+        require_order_block: false
+        allow_neutral_structure: false
+        require_any_trigger: []
+    setup:
+      timeframe: 1h
+      lookback: 300
+      smc:
+        swing_length: 5
+        internal_swing_length: 3
+        eql_tolerance: 0.002
+        order_block_lookback: 50
+        fvg_lookback: 30
+        atr_length: 14
+      indicator_overrides:
+        smc_structure:
+          weight: 50
+        volume_delta:
+          weight: 30
+        squeeze_momentum:
+          weight: 20
+      gate:
+        min_confluence: 45
+        require_indicator_readiness: true
+        require_order_block: true
+        allow_neutral_structure: true
+        require_any_trigger: []
+    trigger:
+      timeframe: 15m
+      lookback: 300
+      smc:
+        swing_length: 3
+        internal_swing_length: 2
+        eql_tolerance: 0.0015
+        order_block_lookback: 48
+        fvg_lookback: 36
+        atr_length: 14
+      indicator_overrides:
+        smc_structure:
+          weight: 35
+        volume_delta:
+          weight: 30
+        squeeze_momentum:
+          weight: 35
+      gate:
+        min_confluence: 45
+        require_indicator_readiness: true
+        require_order_block: false
+        allow_neutral_structure: true
+        require_any_trigger:
+          - bos
+          - choch
+          - liquidity_sweep
+          - squeeze_fire
+
+# Phase 1 indicator decision core. The registry intentionally contains only
+# the three approved indicators. Enablement, weights and parameters can be
+# changed without editing the scoring pipeline.
+indicator_core:
+  version: 1
+  minimum_data_coverage: 70
+  indicators:
+    smc_structure:
+      enabled: true
+      required: true
+      weight: 40
+      params: {}
+    volume_delta:
+      enabled: true
+      required: false
+      weight: 30
+      params:
+        absorption_lookback: 10
+        bullish_absorption_quantile: 0.30
+        bearish_absorption_quantile: 0.70
+        volume_spike_multiplier: 1.50
+        pressure_threshold: 0.20
+    squeeze_momentum:
+      enabled: true
+      required: false
+      weight: 30
+      params:
+        bb_length: 20
+        bb_mult: 2.0
+        kc_length: 20
+        kc_mult: 1.5
+
+# Phase 2 market-state policy. These are environment statistics and policy
+# gates, not a fourth indicator and never add points to confluence.
+regime_policy:
+  version: 1
+  classification:
+    minimum_bars: 60
+    atr_length: 14
+    efficiency_lookback: 30
+    volatility_lookback: 80
+    trend_efficiency_min: 0.38
+    volatile_atr_ratio: 1.65
+    volatile_percentile: 80
+  policies:
+    trending:
+      entry_allowed: true
+      min_confluence: 65
+      min_rr: 2.0
+      risk_multiplier: 1.0
+      require_direction_alignment: true
+      require_liquidity_sweep: false
+      require_volume_confirmation: false
+      require_squeeze_fire: false
+    ranging:
+      entry_allowed: true
+      min_confluence: 72
+      min_rr: 2.0
+      risk_multiplier: 0.65
+      require_direction_alignment: false
+      require_liquidity_sweep: false
+      require_volume_confirmation: false
+      require_squeeze_fire: false
+    volatile:
+      entry_allowed: true
+      min_confluence: 82
+      min_rr: 2.5
+      risk_multiplier: 0.40
+      require_direction_alignment: true
+      require_liquidity_sweep: false
+      require_volume_confirmation: true
+      require_squeeze_fire: false
+    compression:
+      entry_allowed: false
+      min_confluence: 85
+      min_rr: 2.5
+      risk_multiplier: 0.0
+      require_direction_alignment: true
+      require_liquidity_sweep: false
+      require_volume_confirmation: false
+      require_squeeze_fire: true
+    unknown:
+      entry_allowed: false
+      min_confluence: 100
+      min_rr: 3.0
+      risk_multiplier: 0.0
+      require_direction_alignment: true
+      require_liquidity_sweep: false
+      require_volume_confirmation: false
+      require_squeeze_fire: false
+
 # Universal filters applied to ALL trades
 filters:
   min_confluence: 65          # SMC confluence score (0-100)
+  require_indicator_readiness: true  # Block entries when required data is unavailable
   require_bos: false          # Require Break of Structure
   require_ob: true            # Require Order Block
   require_fvg: false          # Require Fair Value Gap
@@ -44,7 +225,7 @@ symbol_overrides:
   "BTC/USDT":
     filters:
       min_rr: 2.5
-      min_confluence: 6
+      min_confluence: 65
   "XAUUSD":
     filters:
       min_rr: 2.0
