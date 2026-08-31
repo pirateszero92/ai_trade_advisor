@@ -17,7 +17,7 @@ from app.models.paper_oms import (
     PaperOMSOrder,
     PaperOMSPosition,
 )
-from app.services.paper_oms import PaperOMS
+from app.services.paper_oms import PaperOMS, PaperOMSError, PaperOMSValidation
 
 
 async def _make_oms(tmp_path: Path):
@@ -46,7 +46,7 @@ def _order_payload(*, direction: str, order_type: str = "market", symbol: str) -
         stop_loss, take_profit = 95.0, 110.0
     else:
         stop_loss, take_profit = 105.0, 90.0
-    return {
+    payload = {
         "symbol": symbol,
         "direction": direction,
         "order_type": order_type,
@@ -58,6 +58,123 @@ def _order_payload(*, direction: str, order_type: str = "market", symbol: str) -
         "risk_pct": 1.0,
         "idempotency_key": f"entry-{uuid.uuid4()}",
     }
+    if order_type == "market":
+        from app.engines.price_hub import price_hub
+
+        price_hub.update_price(
+            symbol,
+            99.995,
+            bid=99.99,
+            ask=100.0,
+            source="test_ws",
+            transport="websocket",
+            data_quality="test",
+        )
+    return payload
+
+
+@pytest.mark.anyio
+async def test_market_order_requires_a_fresh_quote(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6NOQUOTE{uuid.uuid4().hex[:6]}/USDT"
+    payload = _order_payload(direction="long", order_type="limit", symbol=symbol)
+    payload["order_type"] = "market"
+
+    with pytest.raises(PaperOMSError, match="Fresh market quote unavailable"):
+        await oms.place_order(payload)
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_auto_pilot_order_requires_approved_risk_assessment(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6NORISK{uuid.uuid4().hex[:6]}/USDT"
+    payload = _order_payload(direction="long", symbol=symbol)
+    payload["source"] = "auto_pilot"
+
+    with pytest.raises(PaperOMSValidation, match="approved RiskAssessment"):
+        await oms.place_order(payload)
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_manual_close_without_price_requires_a_fresh_quote(tmp_path):
+    from app.engines.price_hub import price_hub
+
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6STALE{uuid.uuid4().hex[:6]}/USDT"
+    opened = await oms.place_order(_order_payload(direction="long", symbol=symbol))
+    price_hub.update_price(
+        symbol,
+        100.0,
+        bid=99.99,
+        ask=100.0,
+        source="test_ws",
+        transport="websocket",
+        received_timestamp_ms=1,
+    )
+
+    with pytest.raises(PaperOMSError, match="Fresh market quote unavailable"):
+        await oms.close_position(opened["id"])
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_protective_gap_uses_observed_market_price(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6GAP{uuid.uuid4().hex[:6]}/USDT"
+    opened = await oms.place_order(_order_payload(direction="long", symbol=symbol))
+
+    closed = (await oms.process_market_tick({
+        "symbol": symbol,
+        "price": 90.0,
+        "bid": 90.0,
+        "ask": 90.01,
+        "sequence": 991,
+        "source": "test_ws",
+        "transport": "websocket",
+        "received_timestamp": 1_787_776_991.0,
+    }))[0]
+    fills = await oms.list_fills(opened["id"])
+
+    assert closed["status"] == "closed"
+    assert fills["fills"][-1]["fill_price"] < 95.0
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_market_tick_matches_canonical_symbol_across_delimiters(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    token = uuid.uuid4().hex[:6].upper()
+    stored_symbol = f"P6-{token}/USDT"
+    compact_symbol = f"P6{token}USDT"
+    placed = await oms.place_order(
+        _order_payload(direction="long", order_type="limit", symbol=stored_symbol)
+    )
+
+    changed = await oms.process_market_tick({
+        "symbol": compact_symbol,
+        "price": 99.0,
+        "bid": 98.99,
+        "ask": 99.0,
+        "last_trade_quantity": 1000.0,
+        "sequence": 992,
+        "source": "test_ws",
+        "transport": "websocket",
+        "received_timestamp": 1_787_776_992.0,
+    })
+
+    assert changed[0]["id"] == placed["id"]
+    assert changed[0]["status"] == "open"
+    await oms.stop()
+    await engine.dispose()
 
 
 @pytest.mark.anyio

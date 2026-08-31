@@ -147,7 +147,7 @@ regime_policy:
     trending:
       entry_allowed: true
       min_confluence: 65
-      min_rr: 1.8
+      min_rr: 2.0
       risk_multiplier: 1.0
       require_direction_alignment: true
       require_liquidity_sweep: false
@@ -155,22 +155,22 @@ regime_policy:
       require_squeeze_fire: false
     ranging:
       entry_allowed: true
-      min_confluence: 72
-      min_rr: 1.8
+      min_confluence: 75
+      min_rr: 2.0
       risk_multiplier: 0.65
       require_direction_alignment: false
-      require_liquidity_sweep: false
+      require_liquidity_sweep: true
       require_volume_confirmation: false
       require_squeeze_fire: false
     volatile:
       entry_allowed: true
-      min_confluence: 75
-      min_rr: 1.8
+      min_confluence: 82
+      min_rr: 2.5
       risk_multiplier: 0.40
       require_direction_alignment: true
       require_liquidity_sweep: false
       require_volume_confirmation: true
-      require_squeeze_fire: false
+      require_squeeze_fire: true
     compression:
       entry_allowed: false
       min_confluence: 85
@@ -198,7 +198,7 @@ filters:
   require_ob: true            # Require Order Block
   require_fvg: false          # Require Fair Value Gap
   require_liquidity_sweep: false  # Require prior liquidity sweep
-  min_rr: 1.8                 # Minimum Risk:Reward ratio (optimized for Day Trading)
+  min_rr: 2.0                 # Minimum achievable structural Risk:Reward ratio
   htf_alignment_required: false   # Require HTF/LTF bias alignment
   allowed_directions:
     - long
@@ -209,7 +209,7 @@ long_conditions:
   bias_must_be:
     - bullish
     - neutral
-  price_zone: "any"             # discount_only | discount_or_eq | any (any for Day Trading momentum)
+  price_zone: "discount_or_eq"  # Never initiate a long from premium without a qualified sweep scenario
   ob_direction: "bullish"
 
 # Short trade conditions
@@ -217,7 +217,7 @@ short_conditions:
   bias_must_be:
     - bearish
     - neutral
-  price_zone: "any"             # premium_only | premium_or_eq | any (any for Day Trading momentum)
+  price_zone: "premium_or_eq"   # Never initiate a short from discount without a qualified sweep scenario
   ob_direction: "bearish"
 
 # Symbol-specific overrides (optional)

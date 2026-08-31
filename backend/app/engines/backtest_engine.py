@@ -8,10 +8,9 @@ from typing import Any
 
 import pandas as pd
 
-from app.engines.smc_engine import SMCEngine
-from app.engines.strategy_engine import StrategyEngine
-from app.engines.timeframe_profiles import PROFILE_ROLES, validate_timeframe_profiles
-from app.services.mtf_analysis import analyze_mtf_frames
+from app.engines.risk_engine import RiskEngine
+from app.engines.timeframe_profiles import validate_timeframe_profiles
+from app.services.execution_analysis import analyze_execution_frame
 
 
 _RESAMPLE_RULES = {
@@ -96,7 +95,8 @@ class ExecutionAssumptions:
 
 @dataclass(frozen=True)
 class ReleaseCriteria:
-    min_completed_trades: int = 30
+    min_completed_trades: int = 100
+    min_trades_per_scenario: int = 20
     min_expectancy_r: float = 0.05
     min_profit_factor: float = 1.15
     max_drawdown_pct: float = 12.0
@@ -107,6 +107,8 @@ class ReleaseCriteria:
     def __post_init__(self) -> None:
         if not 1 <= self.min_completed_trades <= 100_000:
             raise ValueError("min_completed_trades must be positive")
+        if not 1 <= self.min_trades_per_scenario <= self.min_completed_trades:
+            raise ValueError("min_trades_per_scenario must be positive and not exceed total minimum")
         if not -5 <= self.min_expectancy_r <= 10:
             raise ValueError("min_expectancy_r is outside the safe range")
         if not 0 <= self.min_profit_factor <= 100:
@@ -158,6 +160,7 @@ def simulate_execution(
     requested_quantity: float,
     future_bars: pd.DataFrame,
     assumptions: ExecutionAssumptions,
+    market_regime: str = "unknown",
 ) -> dict[str, Any]:
     """Simulate entry, costs, partial fills and conservative SL/TP ordering."""
     if direction not in {"long", "short"}:
@@ -189,11 +192,52 @@ def simulate_execution(
     bars.columns = [str(column).lower() for column in bars.columns]
     entry_fills: list[dict[str, Any]] = []
     remaining = requested_quantity
-    start_offset = min(assumptions.latency_bars, len(bars) - 1)
+    start_offset = assumptions.latency_bars
+    if start_offset >= len(bars):
+        return {
+            "status": "unfilled",
+            "requested_quantity": requested_quantity,
+            "filled_quantity": 0.0,
+            "fill_rate": 0.0,
+            "fills": [],
+            "exit_offset": len(bars) - 1,
+        }
     entry_deadline = min(len(bars), start_offset + assumptions.entry_timeout_bars)
     last_entry_offset = start_offset
+    first_entry_offset: int | None = None
+    exit_reason: str | None = None
+    exit_reference: float | None = None
+    exit_offset: int | None = None
+
+    active_stop = stop_loss
+
+    def protective_exit(bar: pd.Series) -> tuple[str, float] | None:
+        """Return conservative, gap-aware execution reference for one bar."""
+        open_price = float(bar["open"])
+        if direction == "long":
+            if float(bar["low"]) <= active_stop:
+                return "stop_loss", min(active_stop, open_price)
+            if float(bar["high"]) >= take_profit:
+                return "take_profit", max(take_profit, open_price)
+        else:
+            if float(bar["high"]) >= active_stop:
+                return "stop_loss", max(active_stop, open_price)
+            if float(bar["low"]) <= take_profit:
+                return "take_profit", min(take_profit, open_price)
+        return None
+
     for offset in range(start_offset, entry_deadline):
         bar = bars.iloc[offset]
+
+        # Quantity filled on an earlier bar is already exposed. A terminal
+        # event cancels the unfilled remainder before any new fill this bar.
+        if entry_fills:
+            triggered = protective_exit(bar)
+            if triggered is not None:
+                exit_reason, exit_reference = triggered
+                exit_offset = offset
+                break
+
         touched = order_type == "market"
         if order_type == "limit":
             touched = (
@@ -225,7 +269,16 @@ def simulate_execution(
             }
         )
         remaining -= quantity
+        first_entry_offset = offset if first_entry_offset is None else first_entry_offset
         last_entry_offset = offset
+
+        # The new fill is exposed for the rest of this bar. Stop-first ordering
+        # is conservative when OHLC data cannot reveal the intrabar sequence.
+        triggered = protective_exit(bar)
+        if triggered is not None:
+            exit_reason, exit_reference = triggered
+            exit_offset = offset
+            break
         if remaining <= requested_quantity * 1e-12:
             break
 
@@ -246,31 +299,71 @@ def simulate_execution(
     if risk_per_unit <= 0:
         raise ValueError("Execution costs produced an invalid risk distance")
 
-    exit_offset = min(last_entry_offset + 1, len(bars) - 1)
-    exit_reason = "end_of_data"
-    exit_reference = float(bars.iloc[exit_offset]["close"])
-    observed = bars.iloc[last_entry_offset: min(len(bars), last_entry_offset + assumptions.max_holding_bars + 1)]
-    for relative, (_, bar) in enumerate(observed.iloc[1:].iterrows(), start=1):
-        offset = last_entry_offset + relative
-        if direction == "long":
-            hit_stop = float(bar["low"]) <= stop_loss
-            hit_target = float(bar["high"]) >= take_profit
-        else:
-            hit_stop = float(bar["high"]) >= stop_loss
-            hit_target = float(bar["low"]) <= take_profit
-        if hit_stop:
-            # Conservative ordering when SL and TP occur inside the same bar.
-            exit_reason = "stop_loss"
-            exit_reference = stop_loss
+    assert first_entry_offset is not None
+    if exit_reason is None:
+        monitor_start = last_entry_offset + 1 if remaining <= requested_quantity * 1e-12 else entry_deadline
+        holding_end = min(len(bars), first_entry_offset + assumptions.max_holding_bars + 1)
+        default_offset = min(max(last_entry_offset, monitor_start - 1), holding_end - 1)
+        exit_reason = "end_of_data"
+        exit_offset = default_offset
+        exit_reference = float(bars.iloc[default_offset]["close"])
+        favorable_extreme = average_entry
+        for offset in range(monitor_start, holding_end):
+            bar = bars.iloc[offset]
+            triggered = protective_exit(bar)
             exit_offset = offset
-            break
-        if hit_target:
-            exit_reason = "take_profit"
-            exit_reference = take_profit
-            exit_offset = offset
-            break
-        exit_offset = offset
-        exit_reference = float(bar["close"])
+            if triggered is not None:
+                exit_reason, exit_reference = triggered
+                break
+            exit_reference = float(bar["close"])
+            # OHLC cannot reveal intrabar sequencing, so protection advances
+            # only after this bar and becomes executable on the next bar.
+            favorable_extreme = (
+                max(favorable_extreme, float(bar["high"]))
+                if direction == "long"
+                else min(favorable_extreme, float(bar["low"]))
+            )
+            r_multiple_seen = (
+                (favorable_extreme - average_entry) / risk_per_unit
+                if direction == "long"
+                else (average_entry - favorable_extreme) / risk_per_unit
+            )
+            candidate = active_stop
+            if r_multiple_seen >= 2.5:
+                candidate = (
+                    favorable_extreme - risk_per_unit * 0.8
+                    if direction == "long"
+                    else favorable_extreme + risk_per_unit * 0.8
+                )
+            elif r_multiple_seen >= 2.0:
+                candidate = (
+                    average_entry + risk_per_unit * 1.2
+                    if direction == "long"
+                    else average_entry - risk_per_unit * 1.2
+                )
+            elif r_multiple_seen >= 1.5:
+                candidate = (
+                    average_entry + risk_per_unit * 0.6
+                    if direction == "long"
+                    else average_entry - risk_per_unit * 0.6
+                )
+            elif r_multiple_seen >= 1.0 and market_regime.lower() != "trending":
+                round_trip_cost = average_entry * (
+                    assumptions.fee_bps * 2.0
+                    + assumptions.spread_bps
+                    + assumptions.slippage_bps * 2.0
+                ) / 10_000.0
+                candidate = (
+                    average_entry + round_trip_cost
+                    if direction == "long"
+                    else average_entry - round_trip_cost
+                )
+            if direction == "long":
+                active_stop = min(max(active_stop, candidate), take_profit - 1e-12)
+            else:
+                active_stop = max(min(active_stop, candidate), take_profit + 1e-12)
+
+    assert exit_offset is not None and exit_reference is not None
 
     exit_price = _execution_price(exit_reference, direction, "exit", assumptions)
     exit_fee = abs(exit_price * filled_quantity) * assumptions.fee_bps / 10_000.0
@@ -283,7 +376,7 @@ def simulate_execution(
     risk_amount = risk_per_unit * filled_quantity
     r_multiple = net_pnl / risk_amount if risk_amount > 0 else 0.0
 
-    path = bars.iloc[last_entry_offset: exit_offset + 1]
+    path = bars.iloc[first_entry_offset: exit_offset + 1]
     if direction == "long":
         favorable = max(0.0, float(path["high"].max()) - average_entry)
         adverse = max(0.0, average_entry - float(path["low"].min()))
@@ -325,9 +418,10 @@ def simulate_execution(
         "mfe_r": mfe_r,
         "mae_r": mae_r,
         "realized_slippage_bps": realized_slippage_bps,
-        "holding_bars": max(0, exit_offset - last_entry_offset),
+        "holding_bars": max(0, exit_offset - first_entry_offset),
         "exit_offset": exit_offset,
         "fills": all_fills,
+        "final_protective_stop": active_stop,
     }
 
 
@@ -376,6 +470,31 @@ def calculate_backtest_metrics(
             "expectancy_r": sum(regime_r) / len(regime_r),
             "net_pnl": sum(float(value["net_pnl"]) for value in values),
         }
+
+    scenarios: dict[str, list[dict[str, Any]]] = {}
+    for item in completed:
+        scenario = str(item.get("scenario_id") or item.get("scenario") or "UNKNOWN")
+        scenarios.setdefault(scenario, []).append(item)
+
+    by_scenario = {}
+    for scenario_name, values in sorted(scenarios.items()):
+        sc_r = [float(val["r_multiple"]) for val in values]
+        sc_pnl = [float(val["net_pnl"]) for val in values]
+        sc_wins = [v for v in sc_r if v > 1e-9]
+        sc_losses = [v for v in sc_r if v < -1e-9]
+        sc_gross_profit = sum(v for v in sc_pnl if v > 0)
+        sc_gross_loss = abs(sum(v for v in sc_pnl if v < 0))
+        sc_pf = round(sc_gross_profit / sc_gross_loss, 2) if sc_gross_loss > 0 else (99.9 if sc_gross_profit > 0 else 0.0)
+        by_scenario[scenario_name] = {
+            "trades": len(values),
+            "wins": len(sc_wins),
+            "losses": len(sc_losses),
+            "win_rate_pct": round(len(sc_wins) / len(values) * 100.0, 2) if values else 0.0,
+            "expectancy_r": round(sum(sc_r) / len(sc_r), 4) if sc_r else 0.0,
+            "profit_factor": sc_pf,
+            "net_pnl": round(sum(sc_pnl), 2),
+        }
+
     calibration = {
         label: {
             "trades": len(outcomes),
@@ -404,6 +523,7 @@ def calculate_backtest_metrics(
         "fill_rate": filled / requested if requested > 0 else 0.0,
         "regimes_tested": len([name for name in regimes if name != "unknown"]),
         "by_regime": by_regime,
+        "by_scenario": by_scenario,
         "confidence_calibration": calibration,
     }
 
@@ -422,8 +542,9 @@ def run_walk_forward_backtest(
     oos_fraction: float = 0.70,
     stride_bars: int = 3,
     max_trades: int = 1000,
+    entry_mode: str = "limit",
 ) -> dict[str, Any]:
-    """Run a non-overlapping out-of-sample walk-forward evaluation."""
+    """Run a non-overlapping anchored out-of-sample replay."""
     if market_data is None or market_data.empty:
         raise ValueError("Backtest market data is empty")
     if not 0.50 <= oos_fraction <= 0.95:
@@ -434,121 +555,34 @@ def run_walk_forward_backtest(
         raise ValueError("stride_bars must be between 1 and 100")
     if initial_capital <= 0 or not 0 < risk_per_trade_pct <= 5 or max_leverage <= 0:
         raise ValueError("Invalid capital or risk settings")
+    if entry_mode not in {"limit", "market"}:
+        raise ValueError("entry_mode must be limit or market")
 
     frame = market_data.copy()
     frame.columns = [str(column).lower() for column in frame.columns]
     start_index = max(warmup_bars, int(len(frame) * oos_fraction))
-    signal_engine = SMCEngine()
-    strategy_engine = StrategyEngine(strategy_config=config)
+    profiles = validate_timeframe_profiles(config.get("timeframe_profiles"))
+    trigger_profile = profiles["roles"]["trigger"]
+    if timeframe != trigger_profile["timeframe"]:
+        raise ValueError(
+            f"Execution backtests must use configured timeframe {trigger_profile['timeframe']}"
+        )
+    risk_engine = RiskEngine()
     attempts: list[dict[str, Any]] = []
     rejection_counts: dict[str, int] = {}
     decision_count = 0
     approved_count = 0
     index = start_index
     equity = initial_capital
-    mtf_profiles_raw = config.get("timeframe_profiles")
-    mtf_profiles = (
-        validate_timeframe_profiles(mtf_profiles_raw)
-        if isinstance(mtf_profiles_raw, dict) else None
-    )
-    mtf_enabled = bool(mtf_profiles and mtf_profiles["enabled"])
-    if mtf_enabled:
-        trigger_timeframe = mtf_profiles["roles"]["trigger"]["timeframe"]
-        if timeframe != trigger_timeframe:
-            raise ValueError(
-                f"Phase 5 backtests must use the configured trigger timeframe {trigger_timeframe}"
-            )
-    htf_timeframe = {
-        "1m": "15m",
-        "3m": "15m",
-        "5m": "1h",
-        "15m": "1h",
-        "30m": "4h",
-        "1h": "4h",
-        "2h": "4h",
-        "4h": "1d",
-        "1d": "1w",
-    }.get(timeframe)
-    resample_rule = {
-        "15m": "15min",
-        "1h": "1h",
-        "4h": "4h",
-        "1d": "1D",
-        "1w": "1W",
-    }.get(htf_timeframe or "")
+    peak_equity = equity
     while index < len(frame) - 2 and len(attempts) < max_trades:
         history = frame.iloc[max(0, index - 499): index + 1]
-        if mtf_enabled:
-            all_history = frame.iloc[: index + 1]
-            role_frames: dict[str, pd.DataFrame] = {}
-            for role in PROFILE_ROLES:
-                role_profile = mtf_profiles["roles"][role]
-                role_tf = role_profile["timeframe"]
-                if role == "trigger":
-                    role_frame = all_history
-                else:
-                    role_frame = _resample_closed_history(
-                        all_history,
-                        target_timeframe=role_tf,
-                        trigger_timeframe=trigger_timeframe,
-                    )
-                role_frames[role] = role_frame.tail(int(role_profile["lookback"]))
-            minimum_bars = int(
-                (config.get("regime_policy") or {})
-                .get("classification", {})
-                .get("minimum_bars", 60)
-            )
-            if any(len(role_frames[role]) < minimum_bars for role in PROFILE_ROLES):
-                rejection_counts["Insufficient MTF warmup history"] = (
-                    rejection_counts.get("Insufficient MTF warmup history", 0) + 1
-                )
-                decision_count += 1
-                index += stride_bars
-                continue
-            mtf = analyze_mtf_frames(
-                frames=role_frames,
-                symbol=symbol,
-                entry_mode="limit",
-                config_snapshot=config,
-            )
-            signal = mtf.trigger_signal
-            strategy = mtf.strategy
-        else:
-            htf_bias = "neutral"
-            if resample_rule and isinstance(history.index, pd.DatetimeIndex):
-                htf_history = history[["open", "high", "low", "close", "volume"]].resample(
-                    resample_rule, label="right", closed="right"
-                ).agg({
-                    "open": "first",
-                    "high": "max",
-                    "low": "min",
-                    "close": "last",
-                    "volume": "sum",
-                }).dropna()
-                # A resampled bar labelled after the decision timestamp is still
-                # open and must not influence historical confirmation.
-                htf_history = htf_history[htf_history.index <= history.index[-1]]
-                if len(htf_history) >= 20:
-                    htf_signal = signal_engine.analyze(
-                        htf_history,
-                        symbol,
-                        htf_timeframe or timeframe,
-                        htf_bias="neutral",
-                        entry_mode="limit",
-                        indicator_config=config.get("indicator_core"),
-                        regime_config=config.get("regime_policy"),
-                    )
-                    htf_bias = htf_signal.bias
-            signal = signal_engine.analyze(
-                history,
-                symbol,
-                timeframe,
-                htf_bias=htf_bias,
-                entry_mode="limit",
-                indicator_config=config.get("indicator_core"),
-                regime_config=config.get("regime_policy"),
-            )
-            strategy = strategy_engine.evaluate(signal)
+        signal, strategy, _execution_timeframe = analyze_execution_frame(
+            frame=history,
+            symbol=symbol,
+            entry_mode=entry_mode,
+            config_snapshot=config,
+        )
         decision_count += 1
         if not strategy.approved:
             for reason in strategy.rejection_reasons:
@@ -566,14 +600,27 @@ def run_walk_forward_backtest(
         if risk_distance <= 0:
             index += stride_bars
             continue
-        regime_policy = signal.market_regime.get("policy", {})
-        risk_multiplier = min(1.0, max(0.0, float(regime_policy.get("risk_multiplier", 1.0))))
-        risk_budget = max(equity, 0.0) * risk_per_trade_pct / 100.0 * risk_multiplier
-        quantity = risk_budget / risk_distance if risk_distance > 0 else 0.0
-        quantity = min(quantity, max(equity, 0.0) * max_leverage / entry)
-        if quantity <= 0:
+        execution_cost_per_unit = entry * (
+            assumptions.fee_bps * 2.0
+            + assumptions.spread_bps
+            + assumptions.slippage_bps * 2.0
+        ) / 10_000.0
+        drawdown_pct = (peak_equity - equity) / peak_equity * 100.0 if peak_equity > 0 else 0.0
+        risk = risk_engine.evaluate(
+            signal,
+            account_balance=max(equity, 0.0),
+            drawdown_pct=drawdown_pct,
+            quantity_step=0.000001,
+            max_leverage=max_leverage,
+            execution_cost_per_unit=execution_cost_per_unit,
+            risk_per_trade_pct=risk_per_trade_pct,
+        )
+        if not risk.approved:
+            reason = risk.rejection_reason or "Risk Engine rejected setup"
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
             index += stride_bars
             continue
+        quantity = risk.position_size
         future = frame.iloc[index + 1: index + 1 + assumptions.max_holding_bars + assumptions.entry_timeout_bars + assumptions.latency_bars]
         execution = simulate_execution(
             direction=signal.direction,
@@ -584,7 +631,10 @@ def run_walk_forward_backtest(
             requested_quantity=quantity,
             future_bars=future,
             assumptions=assumptions,
+            market_regime=str(signal.market_regime.get("regime", "unknown")),
         )
+        scenario_res = getattr(signal, "scenario", None)
+        scenario_id = scenario_res.get("scenario_id", "UNKNOWN") if isinstance(scenario_res, dict) else "UNKNOWN"
         execution.update(
             {
                 "decision_time": pd.Timestamp(frame.index[index]).isoformat(),
@@ -594,17 +644,19 @@ def run_walk_forward_backtest(
                 "take_profit": target,
                 "confluence": signal.confluence_score,
                 "regime": signal.market_regime.get("regime", "unknown"),
+                "scenario_id": scenario_id,
                 "strategy_approved": True,
             }
         )
         attempts.append(execution)
         if execution.get("status") == "closed":
             equity += float(execution["net_pnl"])
+            peak_equity = max(peak_equity, equity)
             index += max(stride_bars, int(execution.get("exit_offset", 0)) + 1)
         else:
             index += stride_bars
 
-    evaluation_mode = "out_of_sample_walk_forward"
+    evaluation_mode = "anchored_out_of_sample_replay"
     metrics = calculate_backtest_metrics(
         attempts,
         initial_capital=initial_capital,
@@ -620,18 +672,9 @@ def run_walk_forward_backtest(
         "oos_start_timestamp": pd.Timestamp(frame.index[start_index]).isoformat(),
         "decision_count": decision_count,
         "approved_setups": approved_count,
-        "htf_timeframe": (
-            mtf_profiles["roles"]["bias"]["timeframe"]
-            if mtf_enabled else htf_timeframe
-        ),
-        "strategy_pipeline": "phase5_mtf_hierarchy" if mtf_enabled else "legacy_ltf_htf",
-        "timeframe_roles": (
-            {
-                role: mtf_profiles["roles"][role]["timeframe"]
-                for role in PROFILE_ROLES
-            }
-            if mtf_enabled else None
-        ),
+        "htf_timeframe": None,
+        "strategy_pipeline": "single_timeframe",
+        "timeframe_roles": None,
         "rejection_diagnostics": [
             {"reason": reason, "count": count}
             for reason, count in sorted(
@@ -649,6 +692,13 @@ def evaluate_release_gate(
 ) -> dict[str, Any]:
     """Evaluate deterministic criteria without promoting or mutating strategy config."""
     profit_factor = metrics.get("profit_factor")
+    scenario_counts = {
+        str(name): int(values.get("trades", 0))
+        for name, values in (metrics.get("by_scenario") or {}).items()
+    }
+    scenario_sample_ok = bool(scenario_counts) and all(
+        count >= criteria.min_trades_per_scenario for count in scenario_counts.values()
+    )
     checks = [
         {
             "name": "completed_trades",
@@ -656,6 +706,13 @@ def evaluate_release_gate(
             "operator": ">=",
             "threshold": criteria.min_completed_trades,
             "passed": int(metrics.get("completed_trades", 0)) >= criteria.min_completed_trades,
+        },
+        {
+            "name": "scenario_sample_size",
+            "value": scenario_counts,
+            "operator": "all >=",
+            "threshold": criteria.min_trades_per_scenario,
+            "passed": scenario_sample_ok,
         },
         {
             "name": "expectancy_r",
@@ -696,10 +753,10 @@ def evaluate_release_gate(
             "name": "out_of_sample",
             "value": metrics.get("evaluation_mode"),
             "operator": "==",
-            "threshold": "out_of_sample_walk_forward",
+            "threshold": "anchored_out_of_sample_replay",
             "passed": (
                 not criteria.require_out_of_sample
-                or metrics.get("evaluation_mode") == "out_of_sample_walk_forward"
+                or metrics.get("evaluation_mode") == "anchored_out_of_sample_replay"
             ),
         },
     ]

@@ -196,8 +196,14 @@ class MarketDataEngine:
         limit: int = 300,
         *,
         closed_only: bool = False,
+        include_forming: bool = False,
     ) -> pd.DataFrame:
-        """Fetch OHLCV dataframe with automatic caching and fallback chain."""
+        """Fetch OHLCV data, optionally including the provider's forming candle.
+
+        Indicators must request ``closed_only=True``. Chart callers may request
+        ``include_forming=True`` so the live candle is kept separate from the
+        immutable analysis snapshot instead of overwriting the last closed bar.
+        """
         import time
         now = time.time()
         _prune_caches(now)
@@ -212,6 +218,8 @@ class MarketDataEngine:
                 logger.debug(f"[MarketData] Stream registration skipped for {symbol}: {exc}")
         # Fetch one additional provider row when a closed snapshot is needed;
         # many APIs include the currently-forming candle in their limit.
+        if closed_only and include_forming:
+            raise ValueError("closed_only and include_forming are mutually exclusive")
         fetch_limit = min(1500, limit + 1) if closed_only else limit
         cache_key = f"{symbol}:{tf}:{market_type}:{exchange}:{fetch_limit}"
 
@@ -220,6 +228,8 @@ class MarketDataEngine:
                 candidate.copy(), symbol, tf, market_type, fetch_limit
             )
             if closed_only:
+                return closed_candle_frame(merged, tf, limit=limit)
+            if not include_forming:
                 return closed_candle_frame(merged, tf, limit=limit)
             return merged.tail(limit)
 
@@ -529,10 +539,10 @@ class MarketDataEngine:
                                 "close_time", "qav", "trades", "tb_base", "tb_quote", "ignore"
                             ],
                         )
-                        # Exclude the currently-forming candle to prevent
-                        # indicator repainting and false structure breaks.
-                        now_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
-                        df = df[pd.to_numeric(df["close_time"], errors="coerce") <= now_ms]
+                        # Keep the provider row intact here. ``get_ohlcv`` owns
+                        # the closed/forming policy so chart and indicator
+                        # consumers cannot accidentally receive different
+                        # behavior from Binance and fallback providers.
                         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
                         df.set_index("timestamp", inplace=True)
                         for col in ["open", "high", "low", "close", "volume", "tb_base"]:

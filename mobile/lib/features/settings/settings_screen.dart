@@ -35,6 +35,11 @@ class SettingsState {
   final bool autoInvalidation;
   final double targetRr;
   final double defaultSlPct;
+  final bool autoTradeEnabled;
+  final String autoTradeMinGrade;
+  final String autoTradeEntryType;
+  final int autoTradeCooldownSeconds;
+  final bool mtfHierarchyRequired;
 
   const SettingsState({
     this.apiBaseUrl = '',
@@ -47,7 +52,7 @@ class SettingsState {
     this.openRouterModel = 'anthropic/claude-3.5-sonnet',
     this.riskPerTrade = 1.0,
     this.maxDailyLoss = 3.0,
-    this.maxPositions = 3,
+    this.maxPositions = 8,
     this.targetRr = 2.0,
     this.defaultSlPct = 1.0,
     this.isPaperMode = true,
@@ -58,6 +63,11 @@ class SettingsState {
     this.entryMode = 'limit',
     this.autoSlTp = true,
     this.autoInvalidation = true,
+    this.autoTradeEnabled = false,
+    this.autoTradeMinGrade = 'A',
+    this.autoTradeEntryType = 'momentum_market',
+    this.autoTradeCooldownSeconds = 300,
+    this.mtfHierarchyRequired = false,
   });
 
   SettingsState copyWith({
@@ -82,6 +92,11 @@ class SettingsState {
     String? entryMode,
     bool? autoSlTp,
     bool? autoInvalidation,
+    bool? autoTradeEnabled,
+    String? autoTradeMinGrade,
+    String? autoTradeEntryType,
+    int? autoTradeCooldownSeconds,
+    bool? mtfHierarchyRequired,
   }) {
     return SettingsState(
       apiBaseUrl: apiBaseUrl ?? this.apiBaseUrl,
@@ -105,6 +120,12 @@ class SettingsState {
       entryMode: entryMode ?? this.entryMode,
       autoSlTp: autoSlTp ?? this.autoSlTp,
       autoInvalidation: autoInvalidation ?? this.autoInvalidation,
+      autoTradeEnabled: autoTradeEnabled ?? this.autoTradeEnabled,
+      autoTradeMinGrade: autoTradeMinGrade ?? this.autoTradeMinGrade,
+      autoTradeEntryType: autoTradeEntryType ?? this.autoTradeEntryType,
+      autoTradeCooldownSeconds:
+          autoTradeCooldownSeconds ?? this.autoTradeCooldownSeconds,
+      mtfHierarchyRequired: mtfHierarchyRequired ?? this.mtfHierarchyRequired,
     );
   }
 }
@@ -165,6 +186,16 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
       autoSlTp: prefs.getBool('auto_sl_tp') ?? state.autoSlTp,
       autoInvalidation:
           prefs.getBool('auto_invalidation') ?? state.autoInvalidation,
+      autoTradeEnabled:
+          prefs.getBool('auto_trade_enabled') ?? state.autoTradeEnabled,
+      autoTradeMinGrade:
+          prefs.getString('auto_trade_min_grade') ?? state.autoTradeMinGrade,
+      autoTradeEntryType:
+          prefs.getString('auto_trade_entry_type') ?? state.autoTradeEntryType,
+      autoTradeCooldownSeconds: prefs.getInt('auto_trade_cooldown_seconds') ??
+          state.autoTradeCooldownSeconds,
+      mtfHierarchyRequired:
+          prefs.getBool('mtf_hierarchy_required') ?? state.mtfHierarchyRequired,
       geminiKey: await _storage.read(key: 'gemini_key') ?? '',
       openRouterKey: await _storage.read(key: 'openrouter_key') ?? '',
     );
@@ -201,6 +232,14 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     await prefs.setString('entry_mode', safeState.entryMode);
     await prefs.setBool('auto_sl_tp', safeState.autoSlTp);
     await prefs.setBool('auto_invalidation', safeState.autoInvalidation);
+    await prefs.setBool('auto_trade_enabled', safeState.autoTradeEnabled);
+    await prefs.setString('auto_trade_min_grade', safeState.autoTradeMinGrade);
+    await prefs.setString(
+        'auto_trade_entry_type', safeState.autoTradeEntryType);
+    await prefs.setInt(
+        'auto_trade_cooldown_seconds', safeState.autoTradeCooldownSeconds);
+    await prefs.setBool(
+        'mtf_hierarchy_required', safeState.mtfHierarchyRequired);
     await _storage.write(key: 'gemini_key', value: safeState.geminiKey);
     await _storage.write(key: 'openrouter_key', value: safeState.openRouterKey);
   }
@@ -1509,6 +1548,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'max_open_positions': current.maxPositions,
           'target_rr': current.targetRr,
           'default_sl_pct': current.defaultSlPct,
+          'auto_trade_enabled': current.autoTradeEnabled,
+          'auto_trade_min_grade': current.autoTradeMinGrade,
+          'auto_trade_entry_type': current.autoTradeEntryType,
+          'auto_trade_cooldown_seconds': current.autoTradeCooldownSeconds,
+          'mtf_hierarchy_required': current.mtfHierarchyRequired,
         },
       );
     } catch (error) {
@@ -2393,6 +2437,128 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               suffix: '',
               isInt: true,
             ),
+          ]),
+
+          const SizedBox(height: 16),
+
+          // ---- Auto-Pilot Execution (Autonomous 15M Bot) ----
+          _sectionHeader('🤖 Auto-Pilot Execution (บอทเทรดอัตโนมัติ)'),
+          _card([
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Autonomous Auto-Pilot',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14)),
+              subtitle: const Text(
+                  'เข้าเทรดอัตโนมัติทันที พร้อมระบบ Auto-BE Shield (+1.0R) + Multi-tier Trailing Stop',
+                  style: TextStyle(color: Colors.white60, fontSize: 12)),
+              value: settings.autoTradeEnabled,
+              activeThumbColor: AppColors.bullish,
+              onChanged: (v) async {
+                ref
+                    .read(settingsProvider.notifier)
+                    .save(settings.copyWith(autoTradeEnabled: v));
+                try {
+                  await AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'),
+                      data: {'auto_trade_enabled': v});
+                } catch (_) {}
+              },
+            ),
+            if (settings.autoTradeEnabled) ...[
+              const Divider(color: Colors.white12, height: 16),
+              const Text('Decision Timeframe:',
+                  style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              const ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.speed, color: AppColors.bullish),
+                title: Text('15M Execution Only',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: Text(
+                    'MTF แสดงเป็นข้อมูลประกอบเท่านั้น ไม่มีผลต่อคะแนนหรือการตัดสินใจ',
+                    style: TextStyle(color: Colors.white54, fontSize: 12)),
+              ),
+              const SizedBox(height: 12),
+              const Text('Minimum Setup Grade:',
+                  style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: _modeButton(
+                      label: 'Grade S Only\n(Confluence ≥ 85 / Fire)',
+                      icon: Icons.workspace_premium,
+                      selected: settings.autoTradeMinGrade == 'S',
+                      color: const Color(0xFFFFD700),
+                      onTap: () {
+                        ref
+                            .read(settingsProvider.notifier)
+                            .save(settings.copyWith(autoTradeMinGrade: 'S'));
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _modeButton(
+                      label: 'Grade S & A\n(Confluence ≥ 70)',
+                      icon: Icons.diamond_outlined,
+                      selected: settings.autoTradeMinGrade == 'A',
+                      color: AppColors.bullish,
+                      onTap: () {
+                        ref
+                            .read(settingsProvider.notifier)
+                            .save(settings.copyWith(autoTradeMinGrade: 'A'));
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              const Text('Auto-Pilot Entry Style:',
+                  style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: _modeButton(
+                      label: '⚡ Momentum Market\n(เข้าทันที SL ชิด 15M)',
+                      icon: Icons.flash_on,
+                      selected:
+                          settings.autoTradeEntryType == 'momentum_market',
+                      color: AppColors.bullish,
+                      onTap: () {
+                        ref.read(settingsProvider.notifier).save(settings
+                            .copyWith(autoTradeEntryType: 'momentum_market'));
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _modeButton(
+                      label: '🎯 Limit Pullback\n(ตั้งรอ Order Block)',
+                      icon: Icons.schedule,
+                      selected: settings.autoTradeEntryType == 'limit_pullback',
+                      color: AppColors.neutral,
+                      onTap: () {
+                        ref.read(settingsProvider.notifier).save(settings
+                            .copyWith(autoTradeEntryType: 'limit_pullback'));
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ]),
 
           const SizedBox(height: 16),

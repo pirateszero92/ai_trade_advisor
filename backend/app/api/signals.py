@@ -17,7 +17,8 @@ from app.engines.risk_engine import RiskEngine
 from app.engines.smc_engine import SMCEngine
 from app.engines.strategy_engine import StrategyEngine
 from app.services.evidence import capture_decision_evidence
-from app.services.mtf_analysis import mtf_analyses
+from app.services.execution_analysis import execution_analyses
+from app.services.mtf_analysis import mtf_analyses  # research-only endpoint
 
 router = APIRouter()
 
@@ -55,21 +56,21 @@ async def analyse_signal(
     Run full SMC analysis, strategy evaluation, risk assessment,
     and optional AI analysis for the requested symbol.
     """
-    # Phase 5 makes the deterministic MTF hierarchy the authority for manual
-    # analysis as well as Chart and Scanner. ``timeframe`` remains accepted for
-    # older clients but cannot bypass the configured trigger profile.
+    # The execution timeframe is the only decision authority. The legacy
+    # MTF service currently supplies that closed-candle snapshot, but its
+    # bias/setup stages are excluded from scoring, risk and evidence.
     try:
-        mtf = await mtf_analyses.get(
+        execution = await execution_analyses.get(
             symbol=req.symbol,
             market_type=req.market_type,
             exchange=req.exchange,
             entry_mode="limit",
         )
     except (ValueError, OSError) as exc:
-        raise HTTPException(status_code=502, detail=f"MTF analysis unavailable: {exc}") from exc
-    signal = mtf.trigger_signal
-    strategy_result = mtf.strategy
-    df = mtf.frames["trigger"]
+        raise HTTPException(status_code=502, detail=f"Execution analysis unavailable: {exc}") from exc
+    signal = execution.signal
+    strategy_result = execution.strategy
+    df = execution.frame
 
     # 4. Risk assessment
     risk = _risk.evaluate(
@@ -114,19 +115,19 @@ async def analyse_signal(
     evidence = await capture_decision_evidence(
         source="manual_analysis",
         symbol=req.symbol,
-        timeframe=mtf.stages["trigger"].timeframe,
+        timeframe=execution.timeframe,
         market_type=req.market_type,
         exchange=req.exchange,
         market_data=df,
-        htf_bias=mtf.stages["bias"].signal.bias,
+        htf_bias="neutral",
         entry_mode=signal.entry_type,
         signal=signal.to_dict(),
         strategy=strategy_result.to_dict(),
         risk=risk_payload,
         ai_analysis=ai_result,
-        config_snapshot=mtf.config_snapshot,
-        mtf_market_data=mtf.frames,
-        mtf_decision=mtf.decision_dict(),
+        config_snapshot=execution.config_snapshot,
+        mtf_market_data=None,
+        mtf_decision=None,
     )
 
     return {
@@ -134,7 +135,7 @@ async def analyse_signal(
         "strategy": strategy_result.to_dict(),
         "risk": risk_payload,
         "ai_analysis": ai_result,
-        "mtf": mtf.to_dict(),
+        "decision_authority": "execution_timeframe_only",
         "evidence": evidence,
     }
 
@@ -163,7 +164,7 @@ async def get_mtf_matrix(
     entry_mode: Literal["limit", "market"] = Query("limit"),
     _key: str = Depends(verify_api_key),
 ):
-    """Return the canonical ordered 4H/1H/15m matrix used by every entry gate."""
+    """Return an informational 4H/1H/15m matrix; it never affects entry gates."""
     resolved_exchange = exchange or {
         "crypto": "binance",
         "forex": "mt5",

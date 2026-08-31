@@ -46,6 +46,7 @@ def _config() -> dict:
     )
     config["indicator_core"] = deepcopy(DEFAULT_INDICATOR_CORE)
     config["timeframe_profiles"] = deepcopy(DEFAULT_TIMEFRAME_PROFILES)
+    config["risk_parameters"] = {"mtf_hierarchy_required": True}
     return config
 
 
@@ -115,7 +116,7 @@ def test_mtf_hierarchy_reaches_ready_for_long_and_short(monkeypatch, direction):
     assert all(stage.status == "ready" for stage in result.stages.values())
 
 
-def test_opposite_one_hour_structure_blocks_trigger(monkeypatch):
+def test_opposite_one_hour_structure_never_blocks_trigger(monkeypatch):
     signals = {
         "4h": _signal("4h", "long"),
         "1h": _signal("1h", "short"),
@@ -137,14 +138,15 @@ def test_opposite_one_hour_structure_blocks_trigger(monkeypatch):
         config_snapshot=_config(),
     )
 
-    assert result.status == "blocked"
-    assert result.actionable is False
+    assert result.status == "ready"
+    assert result.actionable is True
     assert result.stages["setup"].status == "blocked"
-    assert result.stages["trigger"].status == "blocked"
+    assert result.strategy.direction == "long"
+    assert result.decision_dict()["decision_influence"] == "none"
     assert any("against 4H" in reason for reason in result.stages["setup"].reasons)
 
 
-def test_aligned_setup_without_fifteen_minute_event_is_watch(monkeypatch):
+def test_strategy_approval_does_not_depend_on_mtf_stage_event(monkeypatch):
     signals = {
         "4h": _signal("4h", "long"),
         "1h": _signal("1h", "long"),
@@ -166,8 +168,8 @@ def test_aligned_setup_without_fifteen_minute_event_is_watch(monkeypatch):
         config_snapshot=_config(),
     )
 
-    assert result.status == "watch"
-    assert result.actionable is False
+    assert result.status == "ready"
+    assert result.actionable is True
     assert result.stages["bias"].status == "ready"
     assert result.stages["setup"].status == "ready"
     assert result.stages["trigger"].status == "watch"
@@ -269,3 +271,74 @@ def test_mtf_evidence_replays_all_three_market_windows(monkeypatch):
     assert replay["recorded"] == replay["replayed"]
     assert replay["match"] is True
     assert set(envelope.payload["mtf_market_data"]) == {"bias", "setup", "trigger"}
+
+
+def test_agile_15m_quant_mode_not_blocked_by_neutral_4h(monkeypatch):
+    """When mtf_hierarchy_required is False, neutral 4H bias must not block a valid 15M trigger."""
+    # 4H is neutral, 1H is neutral, but 15M has a valid S1 breakout
+    bias_sig = _signal("4h", "wait")
+    bias_sig.bias = "neutral"
+    setup_sig = _signal("1h", "wait")
+    setup_sig.bias = "neutral"
+    trigger_sig = _signal("15m", "short", trigger=True)
+    trigger_sig.confluence = 85
+    trigger_sig.scenario = {"actionable": True, "name": "S1_BREAKDOWN"}
+
+    signals = {
+        "4h": bias_sig,
+        "1h": setup_sig,
+        "15m": trigger_sig,
+    }
+
+    def fake_analyze(_self, _df, _symbol, timeframe, *_args, **_kwargs):
+        return deepcopy(signals[timeframe])
+
+    monkeypatch.setattr("app.services.mtf_analysis.SMCEngine.analyze", fake_analyze)
+    config = _config()
+    config["risk_parameters"] = {"mtf_hierarchy_required": False}
+
+    result = analyze_mtf_frames(
+        frames={
+            "bias": _frame(180, "4h"),
+            "setup": _frame(300, "1h"),
+            "trigger": _frame(300, "15min"),
+        },
+        symbol="XRP/USDT",
+        entry_mode="limit",
+        config_snapshot=config,
+    )
+
+    assert result.actionable is True
+    assert result.strategy.approved is True
+    assert result.strategy.direction == "short"
+    assert result.decision_dict()["grade_badge"] == "EXECUTION TF · READY"
+    assert result.decision_dict()["decision_influence"] == "none"
+
+
+def test_mtf_flag_true_is_ignored_for_decision(monkeypatch):
+    signals = {
+        "4h": _signal("4h", "short"),
+        "1h": _signal("1h", "short"),
+        "15m": _signal("15m", "long", trigger=True),
+    }
+
+    def fake_analyze(_self, _df, _symbol, timeframe, *_args, **_kwargs):
+        return deepcopy(signals[timeframe])
+
+    monkeypatch.setattr("app.services.mtf_analysis.SMCEngine.analyze", fake_analyze)
+    config = _config()
+    config["risk_parameters"]["mtf_hierarchy_required"] = True
+    result = analyze_mtf_frames(
+        frames={
+            "bias": _frame(180, "4h"),
+            "setup": _frame(300, "1h"),
+            "trigger": _frame(300, "15min"),
+        },
+        symbol="BTC/USDT",
+        entry_mode="limit",
+        config_snapshot=config,
+    )
+
+    assert result.actionable is True
+    assert result.direction == "long"
+    assert result.strategy.direction == "long"

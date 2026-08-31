@@ -61,6 +61,7 @@ class StrategyResult:
     strategy_name: str = ""
     rejection_reasons: list[str] = field(default_factory=list)
     passed_checks: list[str] = field(default_factory=list)
+    override_reasons: list[str] = field(default_factory=list)  # MTF/OB rejections softened in agile mode
     score: int = 0
     market_regime: str = "legacy"
     effective_policy: dict[str, Any] = field(default_factory=dict)
@@ -74,6 +75,7 @@ class StrategyResult:
             "strategy_name": self.strategy_name,
             "rejection_reasons": self.rejection_reasons,
             "passed_checks": self.passed_checks,
+            "override_reasons": self.override_reasons,
             "score": self.score,
             "market_regime": self.market_regime,
             "effective_policy": self.effective_policy,
@@ -133,6 +135,13 @@ class StrategyEngine:
             result.rejection_reasons.append("No trade direction identified")
             return result
 
+        scenario = getattr(signal, "scenario", {}) or {}
+        if scenario and not bool(scenario.get("actionable", False)):
+            result.rejection_reasons.append(
+                f"Scenario {scenario.get('scenario_id', 'unknown')} is observation-only"
+            )
+            return result
+
         direction = signal.direction
         if direction not in filters.get("allowed_directions", ["long", "short"]):
             result.rejection_reasons.append(f"Direction {direction} not allowed by strategy")
@@ -184,11 +193,11 @@ class StrategyEngine:
         result.market_regime = regime
         filters["min_confluence"] = max(
             float(filters.get("min_confluence", 65)),
-            float(policy.get("min_confluence", 100)),
+            float(policy.get("min_confluence", 65)),  # safe fallback matches DEFAULT_STRATEGY
         )
         filters["min_rr"] = max(
             float(filters.get("min_rr", 1.5)),
-            float(policy.get("min_rr", 20)),
+            float(policy.get("min_rr", 1.5)),  # safe fallback matches DEFAULT_STRATEGY
         )
         for flag in (
             "require_liquidity_sweep",
@@ -214,10 +223,14 @@ class StrategyEngine:
         else:
             result.passed_checks.append(f"{regime.title()} regime allows selective entries")
 
-        if policy.get("require_direction_alignment", False):
+        scenario = getattr(signal, "scenario", {}) or {}
+        scenario_archetype = scenario.get("archetype", "")
+        is_sweep = scenario_archetype == "liquidity_sweep"
+
+        if policy.get("require_direction_alignment", False) and not is_sweep:
             regime_direction = regime_data.get("direction", "neutral")
             expected = "bullish" if signal.direction == "long" else "bearish"
-            if regime_direction != expected:
+            if regime_direction != expected and regime_direction != "neutral":
                 result.rejection_reasons.append(
                     f"Trade direction is not aligned with {regime} regime ({regime_direction})"
                 )
@@ -234,13 +247,17 @@ class StrategyEngine:
             .get(signal.symbol, {})
             .get("long_conditions", {})
         )
+        scenario = getattr(signal, "scenario", {}) or {}
+        scenario_archetype = scenario.get("archetype", "")
+        is_sweep = scenario_archetype == "liquidity_sweep"
+
         allowed_bias = cond.get("bias_must_be", ["bullish", "neutral"])
-        if signal.bias not in allowed_bias and signal.htf_bias not in allowed_bias:
+        if not is_sweep and signal.bias not in allowed_bias:
             result.rejection_reasons.append(
                 f"Long requires bias in {allowed_bias}, got bias={signal.bias}"
             )
         else:
-            result.passed_checks.append("Bullish bias confirmed")
+            result.passed_checks.append("Bullish bias confirmed or liquidity sweep reversal allowed")
             result.score += 1
 
         zone_rule = cond.get("price_zone", "discount_or_eq")
@@ -252,8 +269,10 @@ class StrategyEngine:
             result.passed_checks.append("Price zone OK for long")
             result.score += 1
 
+        is_pattern_exempt = scenario_archetype in ("breakout", "liquidity_sweep", "breaker_flip") or not filters.get("require_ob", True)
+
         ob_dir = cond.get("ob_direction", "bullish")
-        if filters.get("require_ob") and (
+        if filters.get("require_ob") and not is_pattern_exempt and (
             signal.order_block is None or signal.order_block.direction != ob_dir
         ):
             result.rejection_reasons.append(f"Long requires {ob_dir} order block")
@@ -271,13 +290,17 @@ class StrategyEngine:
             .get(signal.symbol, {})
             .get("short_conditions", {})
         )
+        scenario = getattr(signal, "scenario", {}) or {}
+        scenario_archetype = scenario.get("archetype", "")
+        is_sweep = scenario_archetype == "liquidity_sweep"
+
         allowed_bias = cond.get("bias_must_be", ["bearish", "neutral"])
-        if signal.bias not in allowed_bias and signal.htf_bias not in allowed_bias:
+        if not is_sweep and signal.bias not in allowed_bias:
             result.rejection_reasons.append(
                 f"Short requires bias in {allowed_bias}, got bias={signal.bias}"
             )
         else:
-            result.passed_checks.append("Bearish bias confirmed")
+            result.passed_checks.append("Bearish bias confirmed or liquidity sweep reversal allowed")
             result.score += 1
 
         zone_rule = cond.get("price_zone", "premium_or_eq")
@@ -289,8 +312,12 @@ class StrategyEngine:
             result.passed_checks.append("Price zone OK for short")
             result.score += 1
 
+        scenario = getattr(signal, "scenario", {}) or {}
+        scenario_archetype = scenario.get("archetype", "")
+        is_pattern_exempt = scenario_archetype in ("breakout", "liquidity_sweep", "breaker_flip") or not filters.get("require_ob", True)
+
         ob_dir = cond.get("ob_direction", "bearish")
-        if filters.get("require_ob") and (
+        if filters.get("require_ob") and not is_pattern_exempt and (
             signal.order_block is None or signal.order_block.direction != ob_dir
         ):
             result.rejection_reasons.append(f"Short requires {ob_dir} order block")
@@ -346,7 +373,10 @@ class StrategyEngine:
             result.score += 1
 
         if filters.get("require_volume_confirmation"):
-            volume_valid = getattr(signal, "volume_data_valid", False)
+            volume_valid = (
+                getattr(signal, "volume_data_valid", False)
+                and getattr(signal, "volume_quality", "unavailable") == "exchange_aggressor"
+            )
             delta = float(getattr(signal, "volume_delta", 0.0))
             absorption_type = getattr(signal, "delta_absorption_type", None)
             aligned = (
@@ -380,14 +410,7 @@ class StrategyEngine:
             result.passed_checks.append(f"R:R {signal.risk_reward:.2f} OK")
             result.score += 1
 
-        if filters.get("htf_alignment_required"):
-            if signal.htf_bias != "neutral" and signal.htf_bias != signal.bias:
-                result.rejection_reasons.append(
-                    f"HTF ({signal.htf_bias}) / LTF ({signal.bias}) misaligned"
-                )
-            else:
-                result.passed_checks.append("HTF/LTF aligned")
-                result.score += 1
+        # MTF/HTF context is deliberately excluded from entry decisions.
 
     # ------------------------------------------------------------------
     # Loader

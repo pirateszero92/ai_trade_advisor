@@ -1,4 +1,4 @@
-﻿from app.engines.risk_engine import RiskEngine
+from app.engines.risk_engine import RiskEngine
 from app.engines.smc_engine import SMCSignal
 
 
@@ -75,3 +75,49 @@ def test_risk_engine_max_positions_rejection():
 
     assert assessment.approved is False
     assert "Max open positions reached" in (assessment.rejection_reason or "")
+
+
+def test_risk_engine_cluster_exposure_control():
+    engine = RiskEngine()
+    signal = SMCSignal(
+        symbol="ETH/USDT",
+        timeframe="15m",
+        bias="bullish",
+        direction="long",
+        entry=2500.0,
+        stop_loss=2475.0,
+        take_profit=2575.0,
+        risk_reward=3.0,
+    )
+
+    # 1. First position in crypto_l1 cluster -> Full size (cluster_risk_multiplier = 1.0)
+    res1 = engine.evaluate(
+        signal=signal,
+        account_balance=10000.0,
+        active_positions=[],
+    )
+    assert res1.approved is True
+    assert res1.cluster_risk_multiplier == 1.0
+    assert res1.asset_cluster == "crypto_l1"
+
+    # 2. Second position in crypto_l1 cluster (e.g. BTC already open) -> 50% scale
+    res2 = engine.evaluate(
+        signal=signal,
+        account_balance=10000.0,
+        active_positions=[{"symbol": "BTC/USDT", "direction": "long", "status": "open"}],
+    )
+    assert res2.approved is True
+    assert res2.cluster_risk_multiplier == 0.50
+    assert any("Cluster concentration" in w for w in res2.warnings)
+
+    # 3. Third position in crypto_l1 cluster (BTC and SOL already open) -> Rejected
+    res3 = engine.evaluate(
+        signal=signal,
+        account_balance=10000.0,
+        active_positions=[
+            {"symbol": "BTC/USDT", "direction": "long", "status": "open"},
+            {"symbol": "SOL/USDT", "direction": "long", "status": "open"},
+        ],
+    )
+    assert res3.approved is False
+    assert "Cluster exposure limit reached" in (res3.rejection_reason or "")

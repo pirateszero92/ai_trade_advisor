@@ -21,8 +21,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiosqlite
+from app.core.config import get_settings
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -90,13 +92,19 @@ async def init_db() -> None:
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+def _app_timezone() -> ZoneInfo:
+    try:
+        return ZoneInfo(get_settings().app_timezone)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
 def _today_label() -> str:
-    return date.today().isoformat()
+    return datetime.now(_app_timezone()).date().isoformat()
 
 def _thai_day_title(day_label: str) -> str:
     try:
         d = date.fromisoformat(day_label)
-        today = date.today()
+        today = datetime.now(_app_timezone()).date()
         delta = (today - d).days
         if delta == 0:
             return f"Today - {d.strftime('%d %b %Y')}"

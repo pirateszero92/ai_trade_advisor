@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     cors_allowed_origins: str = "http://localhost:3000,http://localhost:8080"
+    app_timezone: str = "Asia/Bangkok"
     allowed_llm_hosts: str = "localhost,127.0.0.1,::1,host.docker.internal"
 
     database_url: str = "postgresql+asyncpg://localhost/ai_trade_db"

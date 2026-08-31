@@ -1,8 +1,8 @@
-"""Phase 5 hierarchical 4H Bias -> 1H Setup -> 15m Trigger analysis.
+"""Multi-timeframe presentation matrix.
 
-Timeframes are evaluated as ordered gates.  Scores are never averaged across
-roles: an execution trigger cannot overrule an opposite or unavailable parent
-structure, and AI remains downstream of the final deterministic gate.
+Every timeframe is analysed independently. Only the execution/trigger signal
+is passed to StrategyEngine; parent timeframes never affect direction, score,
+approval, risk, alerts, or order execution.
 """
 
 from __future__ import annotations
@@ -185,20 +185,20 @@ class MTFAnalysis:
         }
         ready_count = sum(stage.status == "ready" for stage in self.stages.values())
         if self.actionable:
-            grade = "SUPREME GRADE A+"
+            grade = "EXECUTION TF · READY"
         elif ready_count >= 2:
             grade = "GRADE A · WATCH TRIGGER"
         elif ready_count == 1:
             grade = "GRADE B · WATCH SETUP"
         else:
-            grade = "WAIT · MTF BLOCKED"
+            grade = "EXECUTION TF · WAIT"
         direction_label = self.direction.upper()
         if self.actionable:
-            summary = f"{direction_label} ผ่าน 4H Bias, 1H Setup และ 15m Trigger ครบทุกชั้น"
+            summary = f"{direction_label} อนุมัติจาก Execution Timeframe เท่านั้น"
         elif self.status == "watch":
             summary = f"{direction_label} อยู่ในสถานะ WATCH; รอชั้นถัดไปหรือ Execution Gate ยืนยัน"
         else:
-            summary = "MTF hierarchy ยังไม่มีทิศทางที่สอดคล้องครบทุกชั้น"
+            summary = "Execution Timeframe ยังไม่ผ่าน Strategy Gate; MTF ไม่มีผลต่อการตัดสินใจ"
         trigger = self.trigger_signal
         return {
             "version": int(self.profile["version"]),
@@ -208,6 +208,7 @@ class MTFAnalysis:
             "direction": self.direction,
             "aligned_bias": _bias_for(self.direction).upper(),
             "actionable": self.actionable,
+            "decision_influence": "none",
             "alignment_count": ready_count,
             "total_timeframes": len(PROFILE_ROLES),
             "grade_badge": grade,
@@ -300,7 +301,6 @@ def analyze_mtf_frames(
     base_indicator = config_snapshot.get("indicator_core") or load_indicator_core_config()
     regime_config = config_snapshot.get("regime_policy") or load_regime_policy_config()
     signals: dict[str, SMCSignal] = {}
-    parent_bias = "neutral"
     for role in PROFILE_ROLES:
         role_profile = profiles["roles"][role]
         engine = SMCEngine(**role_profile["smc"])
@@ -309,14 +309,14 @@ def analyze_mtf_frames(
             frames[role].copy(),
             symbol,
             role_profile["timeframe"],
-            htf_bias=parent_bias,
+            htf_bias="neutral",
             entry_mode=entry_mode,
             indicator_config=indicator_config,
             regime_config=regime_config,
         )
         signals[role] = signal
-        if role == "bias":
-            parent_bias = signal.bias
+    # Policy invariant: MTF can be rendered but can never become an entry gate.
+    mtf_hierarchy_required = False
 
     stages: dict[str, TimeframeStage] = {}
     bias_signal = signals["bias"]
@@ -351,13 +351,20 @@ def analyze_mtf_frames(
     setup_profile = profiles["roles"]["setup"]
     setup_checks: list[str] = []
     setup_reasons: list[str] = []
-    setup_blocked = stages["bias"].status != "ready"
+
+    if mtf_hierarchy_required:
+        setup_blocked = stages["bias"].status != "ready"
+        setup_dir = direction
+    else:
+        setup_blocked = False
+        setup_dir = direction if direction != "wait" else _trade_direction(setup_signal.bias)
+
     if setup_blocked:
         setup_reasons.append("4H Bias gate is not ready")
     else:
-        expected_bias = _bias_for(direction)
+        expected_bias = _bias_for(setup_dir)
         opposite_bias = "bearish" if expected_bias == "bullish" else "bullish"
-        if setup_signal.bias == opposite_bias:
+        if setup_dir != "wait" and setup_signal.bias == opposite_bias:
             setup_reasons.append(
                 f"1H structure is {opposite_bias} against 4H {expected_bias} bias"
             )
@@ -366,9 +373,10 @@ def analyze_mtf_frames(
             setup_reasons.append("1H neutral structure is not allowed by the setup profile")
             setup_blocked = True
         else:
-            setup_checks.append("1H structure does not oppose 4H Bias")
+            if setup_dir != "wait":
+                setup_checks.append("1H structure does not oppose 4H Bias")
         checks, reasons = _stage_base_checks(
-            signal=setup_signal, profile=setup_profile, direction=direction
+            signal=setup_signal, profile=setup_profile, direction=setup_dir
         )
         setup_checks.extend(checks)
         setup_reasons.extend(reasons)
@@ -379,7 +387,7 @@ def analyze_mtf_frames(
         role="setup",
         timeframe=setup_profile["timeframe"],
         status=setup_status,
-        direction=direction if not setup_blocked else "wait",
+        direction=setup_dir if not setup_blocked else "wait",
         signal=setup_signal,
         checks=setup_checks,
         reasons=setup_reasons,
@@ -391,29 +399,43 @@ def analyze_mtf_frames(
     trigger_checks: list[str] = []
     trigger_reasons: list[str] = []
     trigger_events: list[str] = []
-    trigger_blocked = setup_status == "blocked"
-    if setup_status != "ready":
-        trigger_reasons.append("1H Setup gate is not ready")
+
+    if mtf_hierarchy_required:
         trigger_blocked = setup_status == "blocked"
+        trigger_dir = direction
+        if setup_status != "ready":
+            trigger_reasons.append("1H Setup gate is not ready")
+            trigger_blocked = setup_status == "blocked"
     else:
-        expected_bias = _bias_for(direction)
+        trigger_blocked = False
+        trigger_dir = (
+            trigger_signal.direction
+            if trigger_signal.direction in ("long", "short")
+            else (_trade_direction(trigger_signal.bias) if trigger_signal.bias != "neutral" else direction)
+        )
+
+    if trigger_blocked:
+        pass
+    else:
+        expected_bias = _bias_for(trigger_dir)
         opposite_bias = "bearish" if expected_bias == "bullish" else "bullish"
-        if trigger_signal.bias == opposite_bias:
+        if trigger_dir != "wait" and trigger_signal.bias == opposite_bias:
             trigger_reasons.append(
-                f"15m structure is {opposite_bias} against the authorized {expected_bias} setup"
+                f"15m structure is {opposite_bias} against authorized {expected_bias} setup"
             )
             trigger_blocked = True
         elif trigger_signal.bias == "neutral" and not trigger_profile["gate"]["allow_neutral_structure"]:
             trigger_reasons.append("15m neutral structure is not allowed by the trigger profile")
             trigger_blocked = True
         else:
-            trigger_checks.append("15m structure does not oppose the 1H Setup")
+            if trigger_dir != "wait":
+                trigger_checks.append("15m structure aligns with trigger setup")
         checks, reasons = _stage_base_checks(
-            signal=trigger_signal, profile=trigger_profile, direction=direction
+            signal=trigger_signal, profile=trigger_profile, direction=trigger_dir
         )
         trigger_checks.extend(checks)
         trigger_reasons.extend(reasons)
-        trigger_events = _directional_triggers(trigger_signal, direction)
+        trigger_events = _directional_triggers(trigger_signal, trigger_dir)
         required_events = trigger_profile["gate"]["require_any_trigger"]
         if required_events and not set(required_events).intersection(trigger_events):
             trigger_reasons.append(
@@ -428,7 +450,7 @@ def analyze_mtf_frames(
         role="trigger",
         timeframe=trigger_profile["timeframe"],
         status=trigger_status,
-        direction=direction if not trigger_blocked else "wait",
+        direction=trigger_dir if (not trigger_blocked and trigger_status == "ready") else "wait",
         signal=trigger_signal,
         checks=trigger_checks,
         reasons=trigger_reasons,
@@ -439,30 +461,21 @@ def analyze_mtf_frames(
     strategy = StrategyEngine(strategy_config=config_snapshot).evaluate(trigger_signal)
     if strategy.effective_policy:
         trigger_signal.market_regime["effective_policy"] = strategy.effective_policy
-    all_roles_ready = all(stage.status == "ready" for stage in stages.values())
-    if not all_roles_ready:
-        strategy.approved = False
-        strategy.direction = "wait"
-        strategy.setup_direction = direction
-        for role in PROFILE_ROLES:
-            stage = stages[role]
-            if stage.status != "ready":
-                for reason in stage.reasons:
-                    tagged = f"MTF {stage.timeframe} {stage.role}: {reason}"
-                    if tagged not in strategy.rejection_reasons:
-                        strategy.rejection_reasons.append(tagged)
+    effective_overall_dir = (
+        trigger_signal.direction if trigger_signal.direction in ("long", "short") else "wait"
+    )
+    actionable = strategy.approved
 
-    actionable = all_roles_ready and strategy.approved
     if actionable:
         overall_status: StageStatus = "ready"
-    elif any(stage.status == "blocked" for stage in stages.values()):
+    elif strategy.rejection_reasons:
         overall_status = "blocked"
     else:
         overall_status = "watch"
     return MTFAnalysis(
         symbol=symbol,
         status=overall_status,
-        direction=direction if direction in {"long", "short"} else "wait",
+        direction=effective_overall_dir if effective_overall_dir in {"long", "short"} else "wait",
         actionable=actionable,
         stages=stages,
         strategy=strategy,
@@ -490,6 +503,9 @@ class MTFAnalysisService:
         config["indicator_core"] = load_indicator_core_config()
         config["regime_policy"] = load_regime_policy_config()
         config["timeframe_profiles"] = load_timeframe_profiles()
+        if "risk_parameters" not in config:
+            config["risk_parameters"] = {}
+        config["risk_parameters"]["mtf_hierarchy_required"] = False
         return config
 
     async def get(

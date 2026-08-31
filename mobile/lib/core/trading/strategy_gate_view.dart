@@ -51,20 +51,16 @@ class StrategyGateView {
         ? Map<String, dynamic>.from(policyRaw)
         : const <String, dynamic>{};
 
-    final evidence = source['evidence'] is List
-        ? (source['evidence'] as List).map((e) => e.toString().toLowerCase()).toList()
-        : <String>[];
-    final triggerEvidence = source['trigger_evidence'] is List
-        ? (source['trigger_evidence'] as List).map((e) => e.toString().toLowerCase()).toList()
-        : <String>[];
+    final sweepDirection = source['sweep_direction']?.toString().toLowerCase();
+    final hasSweep = source['liquidity_swept'] == true &&
+        ((action == 'long' && sweepDirection == 'low') ||
+            (action == 'short' && sweepDirection == 'high'));
 
-    final hasSweep = source['liquidity_swept'] == true ||
-        evidence.any((e) => e.contains('sweep')) ||
-        triggerEvidence.any((e) => e.contains('sweep'));
-
-    final hasSqueeze = source['squeeze_status'] == 'squeeze_fire' ||
-        evidence.any((e) => e.contains('squeeze')) ||
-        triggerEvidence.any((e) => e.contains('squeeze'));
+    final squeezeMomentum =
+        (source['squeeze_momentum'] as num?)?.toDouble() ?? 0;
+    final hasSqueeze = source['squeeze_status'] == 'squeeze_fire' &&
+        ((action == 'long' && squeezeMomentum > 0) ||
+            (action == 'short' && squeezeMomentum < 0));
 
     return StrategyGateView(
       approved: approved,
@@ -100,6 +96,17 @@ class StrategyGateView {
     if (setupDirection == 'long') return 'BULLISH BIAS';
     if (setupDirection == 'short') return 'BEARISH BIAS';
     return 'NEUTRAL';
+  }
+
+  String get directionBadgeLabel {
+    if (approved) {
+      if (action == 'long') return 'LONG';
+      if (action == 'short') return 'SHORT';
+      return 'WAIT';
+    }
+    if (setupDirection == 'long') return 'LONG BIAS · NOT ENTRY';
+    if (setupDirection == 'short') return 'SHORT BIAS · NOT ENTRY';
+    return 'NEUTRAL · WAIT';
   }
 
   bool get isGradeS =>
@@ -151,11 +158,14 @@ class StrategyGateView {
     if (lower.contains('r:r')) return 'R:R ยังต่ำกว่าเกณฑ์';
     if (lower.contains('premium zone')) return 'ราคาอยู่ Premium Zone';
     if (lower.contains('discount zone')) return 'ราคาอยู่ Discount Zone';
-    if (lower.contains('not aligned')) {
-      return 'ทิศทางยังไม่สอดคล้องกับ Market Regime';
-    }
-    if (lower.contains('not ready') || lower.contains('data is not ready')) {
+    if (lower.contains('data is not ready') ||
+        lower.contains('coverage below') ||
+        lower.contains('indicator core data')) {
       return 'ข้อมูล Indicator/Regime ยังไม่พร้อม';
+    }
+    if (lower.contains('gate is not ready')) return 'Strategy Gate ยังไม่พร้อม';
+    if (lower.contains('market structure is neutral')) {
+      return 'โครงสร้างตลาดเป็น Sideway (Neutral)';
     }
     if (lower.contains('blocked')) return 'Market Regime ปิดรับคำสั่งใหม่';
     if (lower.contains('order block')) return 'ยังไม่พบ Order Block ตามทิศทาง';

@@ -1,7 +1,8 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from app.engines.smc_engine import SMCEngine, SwingPoint
+from app.api.chart import _clean_smc_overlay
+from app.engines.smc_engine import SMCEngine, SMCSignal, StructureBreak, SwingPoint, Zone
 
 
 def generate_synthetic_ohlcv(bars: int = 100, trend: str = "bullish") -> pd.DataFrame:
@@ -102,7 +103,79 @@ def test_fvg_detection():
 
     engine = SMCEngine(swing_length=5)
     signal = engine.analyze(df, symbol="TEST", timeframe="1h", htf_bias="bullish")
-    if signal.fvg is not None:
-        assert signal.fvg.bottom == 102
-        assert signal.fvg.top == 108
+    assert signal.fvg is not None
+    assert signal.fvg.bottom == 102
+    assert signal.fvg.top == 108
+
+
+def test_luxalgo_overlay_payload_is_bounded_and_has_time_segments():
+    df = generate_synthetic_ohlcv(bars=300, trend="bullish")
+    signal = SMCEngine().analyze(df, symbol="SOLUSDT", timeframe="15m")
+
+    assert len(signal.swing_structures) <= 6
+    assert len(signal.internal_structures) <= 8
+    assert len([zone for zone in signal.order_blocks if zone.source == "swing"]) <= 5
+    assert len([zone for zone in signal.order_blocks if zone.source == "internal"]) <= 5
+    for structure in signal.swing_structures + signal.internal_structures:
+        assert structure.pivot_time is not None
+        assert structure.break_time is not None
+        assert structure.pivot_time < structure.break_time
+
+
+def test_structure_break_event_is_only_fresh_on_latest_bar():
+    df = generate_synthetic_ohlcv(bars=300, trend="bullish")
+    signal = SMCEngine(swing_length=5, internal_swing_length=3).analyze(
+        df, symbol="SOLUSDT", timeframe="15m"
+    )
+
+    if signal.structure_event_age is not None and signal.structure_event_age > 0:
+        assert signal.bos is False
+        assert signal.choch is False
+        assert signal.structure_bias_source == "confirmed_swing_trend"
+    if signal.bos or signal.choch:
+        assert signal.structure_event_age == 0
+        assert signal.structure_event_id
+
+
+def test_htf_bias_never_changes_single_timeframe_score():
+    df = generate_synthetic_ohlcv(bars=160, trend="bullish")
+    engine = SMCEngine(swing_length=5, internal_swing_length=3)
+    bullish_context = engine.analyze(df, "BTCUSDT", "15m", htf_bias="bullish")
+    bearish_context = engine.analyze(df, "BTCUSDT", "15m", htf_bias="bearish")
+
+    assert bullish_context.direction == bearish_context.direction
+    assert bullish_context.confluence == bearish_context.confluence
+    assert bullish_context.indicator_decision == bearish_context.indicator_decision
+
+
+def test_clean_overlay_keeps_only_primary_zones_and_latest_structure():
+    signal = SMCSignal(symbol="SOLUSDT", timeframe="15m")
+    signal.order_block = Zone("ob", "bullish", top=102, bottom=101, index=20)
+    signal.order_blocks = [
+        Zone("ob", "bearish", top=110, bottom=109, index=5),
+        signal.order_block,
+    ]
+    signal.fvg = Zone("fvg", "bullish", top=103, bottom=102.5, index=21)
+    signal.fvgs = [
+        Zone("fvg", "bearish", top=108, bottom=107, index=6),
+        signal.fvg,
+    ]
+    now = pd.Timestamp("2026-01-01T12:00:00Z")
+    signal.swing_structures = [
+        StructureBreak("BOS", "swing", "bullish", 101, 3, now, 10, now),
+        StructureBreak("CHoCH", "swing", "bearish", 104, 8, now, 22, now),
+    ]
+    signal.internal_structures = [
+        StructureBreak("BOS", "internal", "bullish", 102, 9, now, 23, now)
+    ]
+
+    overlay = _clean_smc_overlay(signal)
+
+    assert overlay["overlay_policy"] == "clean_v1"
+    assert len(overlay["order_blocks"]) == 1
+    assert overlay["order_blocks"][0]["mid"] == 101.5
+    assert len(overlay["fvgs"]) == 1
+    assert len(overlay["swing_structures"]) == 1
+    assert overlay["swing_structures"][0]["tag"] == "CHoCH"
+    assert overlay["internal_structures"] == []
 

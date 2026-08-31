@@ -87,6 +87,60 @@ def test_same_bar_stop_and_target_uses_conservative_stop_ordering():
     assert result["r_multiple"] < 0
 
 
+def test_gap_through_stop_executes_at_open_not_trigger_price():
+    future = _bars([
+        (100, 101, 99, 100, 10_000),
+        (90, 92, 89, 91, 10_000),
+    ])
+    result = simulate_execution(
+        direction="long",
+        order_type="market",
+        entry=100,
+        stop_loss=95,
+        take_profit=110,
+        requested_quantity=1,
+        future_bars=future,
+        assumptions=ExecutionAssumptions(
+            fee_bps=0,
+            spread_bps=0,
+            slippage_bps=0,
+            latency_bars=0,
+            entry_timeout_bars=1,
+        ),
+    )
+    assert result["exit_reason"] == "stop_loss"
+    assert result["exit_price"] == pytest.approx(90.0)
+
+
+def test_partial_fill_is_exposed_before_remaining_entry_can_fill():
+    future = _bars([
+        (100, 101, 99, 100, 10),
+        (94, 100, 94, 95, 10),
+        (100, 101, 99, 100, 10),
+    ])
+    result = simulate_execution(
+        direction="long",
+        order_type="limit",
+        entry=100,
+        stop_loss=95,
+        take_profit=110,
+        requested_quantity=10,
+        future_bars=future,
+        assumptions=ExecutionAssumptions(
+            fee_bps=0,
+            spread_bps=0,
+            slippage_bps=0,
+            latency_bars=0,
+            entry_timeout_bars=3,
+            max_volume_participation=0.1,
+            max_fill_fraction_per_bar=1.0,
+        ),
+    )
+    assert result["exit_reason"] == "stop_loss"
+    assert result["filled_quantity"] == pytest.approx(1.0)
+    assert result["exit_price"] == pytest.approx(94.0)
+
+
 def test_short_execution_opens_sell_and_closes_with_buy_to_cover_costs():
     future = _bars([
         (100, 101, 99, 100, 10_000),
@@ -130,13 +184,13 @@ def test_metrics_include_expectancy_drawdown_regime_and_calibration():
             "status": "closed", "r_multiple": 2.0, "net_pnl": 200.0,
             "requested_quantity": 1.0, "filled_quantity": 1.0,
             "mfe_r": 2.2, "mae_r": 0.3, "realized_slippage_bps": 2.0,
-            "regime": "trending", "confluence": 80,
+            "regime": "trending", "scenario_id": "S1_BULL_BREAKOUT", "confluence": 80,
         },
         {
             "status": "closed", "r_multiple": -1.0, "net_pnl": -100.0,
             "requested_quantity": 1.0, "filled_quantity": 0.5,
             "mfe_r": 0.4, "mae_r": 1.0, "realized_slippage_bps": 3.0,
-            "regime": "ranging", "confluence": 70,
+            "regime": "ranging", "scenario_id": "S2_BULL_OB_RETEST", "confluence": 70,
         },
     ]
     metrics = calculate_backtest_metrics(
@@ -150,17 +204,24 @@ def test_metrics_include_expectancy_drawdown_regime_and_calibration():
     assert metrics["fill_rate"] == 0.75
     assert metrics["regimes_tested"] == 2
     assert set(metrics["by_regime"]) == {"trending", "ranging"}
+    assert set(metrics["by_scenario"]) == {"S1_BULL_BREAKOUT", "S2_BULL_OB_RETEST"}
+    assert metrics["by_scenario"]["S1_BULL_BREAKOUT"]["win_rate_pct"] == 100.0
+    assert metrics["by_scenario"]["S2_BULL_OB_RETEST"]["win_rate_pct"] == 0.0
 
 
 def test_release_gate_never_marks_result_production_eligible():
     metrics = {
-        "evaluation_mode": "out_of_sample_walk_forward",
-        "completed_trades": 40,
+        "evaluation_mode": "anchored_out_of_sample_replay",
+        "completed_trades": 120,
         "expectancy_r": 0.2,
         "profit_factor": 1.5,
         "max_drawdown_pct": 6.0,
         "fill_rate": 0.9,
         "regimes_tested": 3,
+        "by_scenario": {
+            "S1_BULL_BREAKOUT": {"trades": 60},
+            "S2_BULL_OB_RETEST": {"trades": 60},
+        },
     }
     gate = evaluate_release_gate(metrics, ReleaseCriteria())
     assert gate["passed"] is True
@@ -184,12 +245,12 @@ def test_release_gate_fails_closed_for_insufficient_sample():
     assert any("profit_factor" in reason for reason in gate["failure_reasons"])
 
 
-def test_phase5_backtest_rejects_non_trigger_timeframe():
+def test_backtest_rejects_non_execution_timeframe():
     config = deepcopy(DEFAULT_STRATEGY)
     config["timeframe_profiles"] = deepcopy(DEFAULT_TIMEFRAME_PROFILES)
     frame = _bars([(100, 101, 99, 100, 1000)] * 120)
 
-    with pytest.raises(ValueError, match="trigger timeframe 15m"):
+    with pytest.raises(ValueError, match="configured timeframe 15m"):
         run_walk_forward_backtest(
             market_data=frame,
             symbol="BTC/USDT",

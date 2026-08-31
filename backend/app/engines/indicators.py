@@ -30,11 +30,12 @@ class SqueezeResult:
 class VolumeDeltaResult:
     delta: float
     delta_ratio: float  # -1.0 (100% sell) to +1.0 (100% buy)
-    cvd: float
+    cvd: float  # raw cumulative volume delta
     is_absorption: bool
     absorption_type: Optional[Literal["bullish_absorption", "bearish_absorption"]]
     volume_spike: bool
     description: str
+    cvd_zscore: float = 0.0
     source: Literal["exchange_aggressor", "estimated_candle_anatomy", "unavailable"] = "estimated_candle_anatomy"
 
 
@@ -255,9 +256,9 @@ class AdvancedIndicatorsEngine:
             delta_series = buy_vol - sell_vol
             delta_source = "estimated_candle_anatomy"
 
-        # Rolling CVD and a true z-score for cross-symbol comparability.
+        # Keep actual cumulative delta separate from its normalized view.
         cvd_window = min(200, len(delta_series))
-        cvd_series = delta_series.rolling(window=cvd_window, min_periods=1).sum()
+        cvd_series = delta_series.cumsum()
         cvd_mean = cvd_series.rolling(window=cvd_window, min_periods=2).mean()
         cvd_std = cvd_series.rolling(window=cvd_window, min_periods=2).std(ddof=0)
         cvd_normalized = ((cvd_series - cvd_mean) / cvd_std.replace(0, np.nan)).fillna(0.0)
@@ -268,7 +269,8 @@ class AdvancedIndicatorsEngine:
         volume_spike = curr_vol >= (avg_vol * volume_spike_multiplier)
 
         curr_delta = float(delta_series.iloc[-1])
-        curr_cvd = float(cvd_normalized.iloc[-1])
+        curr_cvd = float(cvd_series.iloc[-1])
+        curr_cvd_zscore = float(cvd_normalized.iloc[-1])
         curr_total_vol = curr_vol if curr_vol > 0 else 1.0
         delta_ratio = float(np.clip(curr_delta / curr_total_vol, -1.0, 1.0))
 
@@ -305,9 +307,10 @@ class AdvancedIndicatorsEngine:
             delta=round(curr_delta, 2),
             delta_ratio=round(delta_ratio, 3),
             cvd=round(curr_cvd, 2),
-            is_absorption=is_absorption,
+            cvd_zscore=round(curr_cvd_zscore, 4),
+            is_absorption=is_absorption and delta_source == "exchange_aggressor",
             absorption_type=absorption_type,
             volume_spike=volume_spike,
-            description=desc,
+            description=(desc if delta_source == "exchange_aggressor" else f"Estimated candle-volume proxy: {desc}"),
             source=delta_source,
         )

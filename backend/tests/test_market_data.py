@@ -71,3 +71,50 @@ def test_closed_candle_frame_removes_forming_row_and_keeps_requested_lookback():
 
     assert list(closed.index) == list(index[:3])
     assert closed.index[-1] == pd.Timestamp("2026-08-27T06:00:00Z")
+
+
+@pytest.mark.anyio
+async def test_ohlcv_keeps_forming_candle_only_when_explicitly_requested():
+    mde = MarketDataEngine()
+    current_bucket = pd.Timestamp.now(tz="UTC").floor("15min")
+    index = pd.date_range(end=current_bucket, periods=5, freq="15min")
+    frame = pd.DataFrame(
+        {
+            "open": [1, 2, 3, 4, 5],
+            "high": [2, 3, 4, 5, 6],
+            "low": [0, 1, 2, 3, 4],
+            "close": [1.5, 2.5, 3.5, 4.5, 5.5],
+            "volume": [10, 10, 10, 10, 10],
+        },
+        index=index,
+    )
+    cache_key = "FORMING/USDT:15m:crypto:binance:5"
+    import time
+
+    _OHLCV_CACHE[cache_key] = (time.time(), frame)
+    try:
+        closed = await mde.get_ohlcv(
+            "FORMING/USDT", "15m", "crypto", limit=5
+        )
+        chart = await mde.get_ohlcv(
+            "FORMING/USDT", "15m", "crypto", limit=5, include_forming=True
+        )
+    finally:
+        _OHLCV_CACHE.pop(cache_key, None)
+
+    assert list(closed.index) == list(index[:-1])
+    assert list(chart.index) == list(index)
+    assert float(chart.iloc[-1]["close"]) == 5.5
+
+
+@pytest.mark.anyio
+async def test_ohlcv_rejects_conflicting_candle_policies():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        await MarketDataEngine().get_ohlcv(
+            "BTC/USDT",
+            "15m",
+            "crypto",
+            limit=5,
+            closed_only=True,
+            include_forming=True,
+        )

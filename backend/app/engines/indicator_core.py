@@ -202,7 +202,9 @@ def validate_indicator_core_config(raw: Any) -> dict[str, Any]:
             raise ValueError(f"{indicator_id} cannot be required while disabled")
         weight = _number(
             supplied.get("weight", defaults["weight"]),
-            name=f"{indicator_id}.weight", minimum=0.1, maximum=1000.0,
+            name=f"{indicator_id}.weight",
+            minimum=0.1 if enabled else 0.0,
+            maximum=1000.0,
         )
         if enabled:
             enabled_count += 1
@@ -280,9 +282,10 @@ def _score_smc(signal: Any, _params: dict[str, Any]) -> LayerScore:
     direction = getattr(signal, "direction", "wait")
     if not available:
         return LayerScore("smc_structure", False, 0, 40, "unavailable", ["No valid OHLC structure"])
-    if getattr(signal, "htf_bias", "neutral") != "neutral" and signal.htf_bias == signal.bias:
+    if _aligned(direction, signal.bias == "bullish", signal.bias == "bearish"):
         score += 8
-        evidence.append("HTF/LTF bias aligned")
+        evidence.append("Execution-timeframe structure bias aligns with direction")
+    # Higher timeframes are presentation-only and never affect scoring.
     order_block = getattr(signal, "order_block", None)
     if order_block and _aligned(
         direction, order_block.direction == "bullish", order_block.direction == "bearish"
@@ -302,8 +305,20 @@ def _score_smc(signal: Any, _params: dict[str, Any]) -> LayerScore:
         score += 5
         evidence.append("Entry is in the correct premium/discount zone")
     if getattr(signal, "bos", False) or getattr(signal, "choch", False):
-        score += 3
-        evidence.append("BOS/CHoCH structure confirmation")
+        structure_events = list(getattr(signal, "swing_structures", [])) + list(
+            getattr(signal, "internal_structures", [])
+        )
+        latest_event = max(
+            structure_events,
+            key=lambda item: int(getattr(item, "break_index", -1)),
+            default=None,
+        )
+        expected = "bullish" if direction == "long" else "bearish" if direction == "short" else ""
+        if latest_event is not None and getattr(latest_event, "direction", "") == expected:
+            score += 3
+            evidence.append("Direction-aligned BOS/CHoCH structure confirmation")
+        elif latest_event is not None:
+            evidence.append("Latest BOS/CHoCH opposes trade direction and received no score")
     status = "strong" if score >= 28 else "supporting" if score >= 16 else "weak"
     return LayerScore("smc_structure", True, score, 40, status, evidence)
 
@@ -311,6 +326,9 @@ def _score_smc(signal: Any, _params: dict[str, Any]) -> LayerScore:
 def _score_volume(signal: Any, params: dict[str, Any]) -> LayerScore:
     if not getattr(signal, "volume_data_valid", False):
         return LayerScore("volume_delta", False, 0, 30, "unavailable", ["Reliable volume is unavailable"])
+    quality = getattr(signal, "volume_quality", "unavailable")
+    if quality == "unavailable":
+        return LayerScore("volume_delta", False, 0, 30, "unavailable", ["Volume data is unavailable"])
     score = 0.0
     evidence: list[str] = []
     direction = getattr(signal, "direction", "wait")
@@ -319,14 +337,14 @@ def _score_volume(signal: Any, params: dict[str, Any]) -> LayerScore:
     threshold = float(params["pressure_threshold"])
     if _aligned(direction, delta > 0, delta < 0):
         score += 10
-        evidence.append("Volume delta supports trade direction")
+        evidence.append("Aggressor volume delta supports trade direction" if quality == "exchange_aggressor" else "Estimated candle-volume proxy supports trade direction")
     absorption_type = getattr(signal, "delta_absorption_type", None)
     absorption_aligned = _aligned(
         direction,
         absorption_type == "bullish_absorption",
         absorption_type == "bearish_absorption",
     )
-    if getattr(signal, "delta_absorption", False) and absorption_aligned:
+    if quality == "exchange_aggressor" and getattr(signal, "delta_absorption", False) and absorption_aligned:
         score += 15
         evidence.append("Institutional absorption is direction-aligned")
     elif _aligned(direction, ratio >= threshold, ratio <= -threshold):
@@ -335,6 +353,8 @@ def _score_volume(signal: Any, params: dict[str, Any]) -> LayerScore:
     if getattr(signal, "volume_spike", False):
         score += 5
         evidence.append("Volume expansion confirmed")
+    if quality != "exchange_aggressor":
+        score = min(score * 0.4, 6.0)
     status = "strong" if score >= 22 else "supporting" if score >= 10 else "weak"
     return LayerScore("volume_delta", True, score, 30, status, evidence)
 
@@ -342,6 +362,7 @@ def _score_volume(signal: Any, params: dict[str, Any]) -> LayerScore:
 def _score_squeeze(signal: Any, _params: dict[str, Any]) -> LayerScore:
     if not getattr(signal, "squeeze_data_valid", False):
         return LayerScore("squeeze_momentum", False, 0, 30, "unavailable", ["Insufficient momentum history"])
+    direction = getattr(signal, "direction", "wait")
     score = 0.0
     evidence: list[str] = []
     status_value = getattr(signal, "squeeze_status", "no_squeeze")
@@ -352,9 +373,16 @@ def _score_squeeze(signal: Any, _params: dict[str, Any]) -> LayerScore:
         score += 8
         evidence.append("Momentum is not compressed")
     elif status_value == "squeeze_on":
-        score -= 5
-        evidence.append("Momentum remains compressed")
-    direction = getattr(signal, "direction", "wait")
+        order_block = getattr(signal, "order_block", None)
+        in_correct_zone = _aligned(
+            direction, getattr(signal, "in_discount", False), getattr(signal, "in_premium", False)
+        )
+        if order_block and in_correct_zone:
+            score += 8
+            evidence.append("Squeeze compression storing energy at Order Block")
+        else:
+            score += 2
+            evidence.append("Momentum is compressed")
     momentum_direction = getattr(signal, "momentum_direction", "")
     momentum = float(getattr(signal, "squeeze_momentum", 0.0))
     if _aligned(
@@ -371,7 +399,7 @@ def _score_squeeze(signal: Any, _params: dict[str, Any]) -> LayerScore:
     ):
         score += 8
         evidence.append("Momentum supports direction but is decelerating")
-    score = max(0.0, score)
+    # score is always >= 0 by construction; status thresholds:
     status = "strong" if score >= 22 else "supporting" if score >= 10 else "weak"
     return LayerScore("squeeze_momentum", True, score, 30, status, evidence)
 

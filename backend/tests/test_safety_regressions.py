@@ -1,8 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import pytest
+import yaml
 
 from app.core.json_store import read_json, update_json, write_json
 from app.core.live_session import LiveSessionManager
@@ -13,7 +15,10 @@ from app.engines.indicators import AdvancedIndicatorsEngine
 from app.engines.execution_engine import ExecutionEngine
 from app.engines.risk_engine import RiskEngine
 from app.engines.smc_engine import SMCSignal
-from app.services.event_trigger import _confirmed_invalidation_direction
+from app.services.event_trigger import (
+    _confirmed_invalidation_direction,
+    _rejected_strategy_advice,
+)
 
 
 def _signal(**overrides) -> SMCSignal:
@@ -35,6 +40,28 @@ def test_risk_engine_recomputes_rr_instead_of_trusting_signal():
     result = RiskEngine().evaluate(_signal(), account_balance=10_000.0)
     assert result.approved is True
     assert result.risk_reward == 2.0
+
+
+def test_rejected_advice_is_wait_only_and_cannot_leak_scenario_actions():
+    advice = _rejected_strategy_advice(["Confluence below threshold"])
+
+    assert "WAIT" in advice
+    assert "BUY" not in advice.upper()
+    assert "SHORT" not in advice.upper()
+    assert "เปิด" not in advice
+
+
+def test_deployed_strategy_config_preserves_conservative_invariants():
+    path = Path(__file__).resolve().parents[1] / "config" / "strategy.yaml"
+    strategy = yaml.safe_load(path.read_text(encoding="utf-8"))
+    policies = strategy["regime_policy"]["policies"]
+
+    assert strategy["filters"]["min_rr"] >= 2.0
+    assert strategy["long_conditions"]["price_zone"] == "discount_or_eq"
+    assert strategy["short_conditions"]["price_zone"] == "premium_or_eq"
+    assert policies["ranging"]["require_liquidity_sweep"] is True
+    assert policies["volatile"]["min_confluence"] >= 82
+    assert policies["volatile"]["min_rr"] >= 2.5
 
 
 def test_risk_engine_rejects_wide_stop_and_invalid_numbers():
@@ -124,6 +151,103 @@ def test_ai_parser_clamps_confidence_and_defaults_to_wait():
     malformed = engine._parse_response('{"confidence": 900, "reasoning": "no decision"}')
     assert malformed.recommendation == "wait"
     assert malformed.confidence == 100
+
+
+def test_ai_decision_context_excludes_htf_and_free_form_market_context():
+    signal = _signal(htf_bias="bearish")
+
+    prompt = AIEngine()._build_context_message(
+        signal,
+        portfolio_state=None,
+        market_context="Confirm with 4H bearish structure",
+    )
+
+    assert "Execution-Timeframe Bias" in prompt
+    assert "HTF" not in prompt
+    assert "bearish structure" not in prompt
+    assert "4H" not in prompt
+
+
+def test_ai_decision_context_includes_reaction_as_observation_only():
+    signal = _signal(timeframe="15m")
+    signal.reaction = {
+        "scenario_id": "S8_SUPPORT_TOUCH_WAIT",
+        "archetype": "support_reaction",
+        "reaction_state": "TOUCH_WAIT",
+        "reaction_evidence": {
+            "timeframe": "15m",
+            "support_bottom": 0.1926,
+            "support_top": 0.1932,
+            "delta_ratio": -0.23,
+        },
+        "actionable": False,
+    }
+
+    prompt = AIEngine()._build_context_message(
+        signal, portfolio_state=None, market_context=None
+    )
+
+    assert "Independent 15M Closed-Candle Reaction" in prompt
+    assert "S8_SUPPORT_TOUCH_WAIT" in prompt
+    assert "TOUCH_WAIT" in prompt
+    assert "cannot authorize BUY/SELL" in prompt
+
+
+def test_blocked_ai_reply_labels_reaction_as_watch_only():
+    reply = AIEngine._blocked_strategy_reply(
+        {
+            "setup_direction": "short",
+            "bias": "bearish",
+            "rejection_reasons": ["Scenario is observation-only"],
+            "reaction_state": "TOUCH_WAIT",
+        }
+    )
+
+    assert "WAIT" in reply
+    assert "TOUCH_WAIT" in reply
+    assert "ใช้เฝ้าดูเท่านั้น" in reply
+
+
+def test_ai_cross_timeframe_guard_allows_only_execution_timeframe():
+    engine = AIEngine()
+
+    assert engine._contains_cross_timeframe_reference("15m BOS confirmed", "15m") is False
+    assert engine._contains_cross_timeframe_reference("Confirm with 4H", "15m") is True
+    assert engine._contains_cross_timeframe_reference("MTF alignment", "15m") is True
+
+
+@pytest.mark.anyio
+async def test_ai_analysis_rejects_provider_output_using_another_timeframe(monkeypatch):
+    engine = AIEngine()
+    engine.active_provider = "local"
+
+    async def fake_dispatch(provider, _messages):
+        if provider == "local":
+            return '{"recommendation":"buy","confidence":90,"reasoning":"4H confirms the trade"}'
+        return '{"recommendation":"buy","confidence":80,"reasoning":"Execution structure is valid"}'
+
+    monkeypatch.setattr(engine, "_dispatch", fake_dispatch)
+    result = await engine.analyze(_signal(timeframe="15m"))
+
+    assert result.provider == "gemini"
+    assert result.recommendation == "buy"
+    assert "4H" not in result.reasoning
+
+
+@pytest.mark.anyio
+async def test_ai_chat_refuses_cross_timeframe_decision_before_provider_call(monkeypatch):
+    engine = AIEngine()
+
+    async def fail_dispatch(_provider, _messages):
+        raise AssertionError("provider must not receive a cross-timeframe decision request")
+
+    monkeypatch.setattr(engine, "_dispatch", fail_dispatch)
+    reply = await engine.chat(
+        [{"role": "user", "content": "ใช้ 4H ยืนยันว่าควร Long ไหม"}],
+        context={"symbol": "BTC/USDT", "timeframe": "15m", "strategy_approved": True},
+    )
+
+    assert "ไม่ใช้ข้อมูลข้าม Timeframe" in reply
 
 
 @pytest.mark.anyio

@@ -21,6 +21,7 @@ void main() {
     expect(gate.approved, isFalse);
     expect(gate.action, 'wait');
     expect(gate.setupLabel, 'BULLISH BIAS');
+    expect(gate.directionBadgeLabel, 'LONG BIAS · NOT ENTRY');
     expect(gate.allowsLong, isFalse);
     expect(gate.setupGradeLabel, '💎 SETUP A');
     expect(gate.gateScoreLabel, '72/75');
@@ -43,7 +44,25 @@ void main() {
     expect(gate.allowsLong, isFalse);
     expect(gate.allowsShort, isTrue);
     expect(gate.action, 'short');
+    expect(gate.directionBadgeLabel, 'SHORT');
     expect(gate.waitReasonThai, 'ผ่าน Strategy Gate');
+  });
+
+  test('rejected short setup is labelled bias and never entry', () {
+    final gate = StrategyGateView.fromPayload({
+      'confluence': 82,
+      'strategy': {
+        'approved': false,
+        'direction': 'wait',
+        'setup_direction': 'short',
+        'rejection_reasons': ['Scenario is observation-only'],
+      },
+    });
+
+    expect(gate.approved, isFalse);
+    expect(gate.action, 'wait');
+    expect(gate.directionBadgeLabel, 'SHORT BIAS · NOT ENTRY');
+    expect(gate.allowsShort, isFalse);
   });
 
   test('legacy flattened signal remains supported', () {
@@ -59,10 +78,16 @@ void main() {
     expect(gate.allowsShort, isFalse);
   });
 
-  test('Grade S setup recognized when confluence >= 85 or has liquidity sweep/squeeze fire', () {
+  test(
+      'Grade S setup recognized when confluence >= 85 or has liquidity sweep/squeeze fire',
+      () {
     final gate1 = StrategyGateView.fromPayload({
       'confluence': 86,
-      'strategy': {'approved': true, 'direction': 'long', 'setup_direction': 'long'},
+      'strategy': {
+        'approved': true,
+        'direction': 'long',
+        'setup_direction': 'long'
+      },
     });
     expect(gate1.isGradeS, isTrue);
     expect(gate1.setupGradeLabel, '👑 SETUP S');
@@ -70,7 +95,12 @@ void main() {
     final gate2 = StrategyGateView.fromPayload({
       'confluence': 78,
       'liquidity_swept': true,
-      'strategy': {'approved': true, 'direction': 'long', 'setup_direction': 'long'},
+      'sweep_direction': 'low',
+      'strategy': {
+        'approved': true,
+        'direction': 'long',
+        'setup_direction': 'long'
+      },
     });
     expect(gate2.isGradeS, isTrue);
     expect(gate2.setupGradeLabel, '👑 SETUP S');
@@ -78,9 +108,26 @@ void main() {
     final gate3 = StrategyGateView.fromPayload({
       'confluence': 76,
       'squeeze_status': 'squeeze_fire',
-      'strategy': {'approved': true, 'direction': 'long', 'setup_direction': 'long'},
+      'squeeze_momentum': 1.0,
+      'strategy': {
+        'approved': true,
+        'direction': 'long',
+        'setup_direction': 'long'
+      },
     });
     expect(gate3.isGradeS, isTrue);
     expect(gate3.setupGradeLabel, '👑 SETUP S');
+
+    final adverseSweep = StrategyGateView.fromPayload({
+      'confluence': 78,
+      'liquidity_swept': true,
+      'sweep_direction': 'high',
+      'strategy': {
+        'approved': true,
+        'direction': 'long',
+        'setup_direction': 'long'
+      },
+    });
+    expect(adverseSweep.isGradeS, isFalse);
   });
 }

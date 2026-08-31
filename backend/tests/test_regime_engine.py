@@ -81,14 +81,12 @@ def test_classifier_detects_range_and_compression():
     ranging = MarketRegimeEngine().classify(
         _frame(close), ranging_signal, _nonvolatile_config()
     )
-    compression_signal = _signal(
-        bias="neutral",
-        htf_bias="neutral",
-        squeeze_data_valid=True,
-        squeeze_status="squeeze_on",
-    )
+    compressed_close = close.copy()
+    compressed_close[-40:] = 100.0 + 0.05 * np.sin(np.linspace(0, 4 * np.pi, 40))
+    compressed_spread = np.r_[np.full(100, 0.6), np.full(40, 0.03)]
+    compression_signal = _signal(bias="neutral", htf_bias="neutral")
     compression = MarketRegimeEngine().classify(
-        _frame(close), compression_signal, _nonvolatile_config()
+        _frame(compressed_close, compressed_spread), compression_signal, _nonvolatile_config()
     )
 
     assert ranging["regime"] == "ranging"

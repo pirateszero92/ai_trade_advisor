@@ -7,8 +7,10 @@ invokes Apex AI advisor on high-confluence setups, and sends multi-channel alert
 from __future__ import annotations
 
 import asyncio
+import math
+from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 from loguru import logger
 
 from app.engines.market_data import MarketDataEngine
@@ -18,7 +20,8 @@ from app.engines.ai_engine import AIEngine
 from app.engines.risk_engine import RiskEngine
 from app.services.notification import NotificationService
 from app.api.ws import broadcast
-from app.services.mtf_analysis import mtf_analyses
+from app.services.execution_analysis import execution_analyses
+from app.services.instrument_rules import instrument_rules
 
 DEFAULT_WATCHLIST = [
     # Crypto
@@ -35,7 +38,14 @@ DEFAULT_WATCHLIST = [
 ]
 
 _ALERT_HISTORY: dict[str, float] = {}
+_AUTO_TRADE_HISTORY: dict[str, float] = {}
 _RUNTIME_CFG_CACHE: tuple[float, dict] = (0.0, {})
+
+
+def _rejected_strategy_advice(reasons: list[str]) -> str:
+    """Fail-closed copy for every rejected candidate; scenario plans are excluded."""
+    detail = "; ".join(str(reason) for reason in reasons[:3])
+    return f'คำแนะนำ: รอ (WAIT) — {detail or "setup นี้ยังไม่ผ่าน Strategy Gate"}'
 
 
 def _get_cached_runtime_settings() -> dict:
@@ -511,25 +521,21 @@ class MarketMonitor:
         ex = item.get("exchange", "binance")
 
         try:
-            # Phase 5 owns the timeframe hierarchy. Watchlist timeframe fields
-            # remain display defaults for older clients but cannot bypass the
-            # ordered 4H Bias -> 1H Setup -> 15m Trigger gates.
+            # One closed-candle execution snapshot owns the whole decision.
             r_cfg = _get_cached_runtime_settings()
             entry_mode = r_cfg.get("entry_mode", "limit")
             auto_invalidation = r_cfg.get("auto_invalidation", True)
-            mtf = await mtf_analyses.get(
+            execution = await execution_analyses.get(
                 symbol=symbol,
                 market_type=m_type,
                 exchange=ex,
                 entry_mode=entry_mode,
             )
-            ltf_sig = mtf.trigger_signal
-            ltf_df = mtf.frames["trigger"].copy()
-            strat_res = mtf.strategy
-            tf = mtf.stages["trigger"].timeframe
-            setup_tf = mtf.stages["setup"].timeframe
-            htf = mtf.stages["bias"].timeframe
-            htf_bias = mtf.stages["bias"].signal.bias
+            ltf_sig = execution.signal
+            ltf_df = execution.frame.copy()
+            strat_res = execution.strategy
+            tf = execution.timeframe
+            htf_bias = "neutral"
 
             confluence = ltf_sig.confluence_score
 
@@ -659,19 +665,30 @@ class MarketMonitor:
             if ltf_sig.squeeze_status == "squeeze_fire":
                 structure_summary += " | ⚡ Squeeze Fired"
 
+            reaction_info = getattr(ltf_sig, "reaction", {}) or {}
+            reaction_state = str(reaction_info.get("reaction_state", "")).strip()
+            if reaction_state:
+                structure_summary += f" | 15M Reaction: {reaction_state} (observation-only)"
+
             regime_data = ltf_sig.market_regime or {}
             regime_label = regime_data.get("label", "Unknown")
             regime_policy = regime_data.get("effective_policy") or regime_data.get("policy", {})
             structure_summary += f" | Regime: {regime_label}"
 
             price_decimals = 4 if entry < 5.0 else 2
+            scenario_info = getattr(ltf_sig, "scenario", {}) or {}
+            c_plan = scenario_info.get("contingency_plan", {})
+
             if not strat_res.approved:
-                gate_reasons = "; ".join(strat_res.rejection_reasons[:3])
-                advice_text = f'คำแนะนำ: รอ (WAIT) — {gate_reasons or "setup นี้ยังไม่ผ่าน Strategy Gate"}'
+                # A rejected candidate is observational only. Never leak the
+                # scenario's actionable Plan A/Plan B through the Strategy Gate.
+                advice_text = _rejected_strategy_advice(strat_res.rejection_reasons)
+            elif scenario_info.get("name_th") and c_plan.get("plan_a"):
+                advice_text = f"คำแนะนำ: {scenario_info['name_th']} — {c_plan['plan_a']}"
             elif confluence >= float(regime_policy.get("min_confluence", 65)) + 5:
                 advice_text = f"คำแนะนำ: โครงสร้างผ่าน Strategy Gate ใน {regime_label} regime ให้พิจารณาแผน {entry_type_label} Entry ${entry:.{price_decimals}f} SL ${sl:.{price_decimals}f} และใช้ Risk ×{float(regime_policy.get('risk_multiplier', 1.0)):.2f} จาก Risk Engine"
             elif confluence >= float(regime_policy.get("min_confluence", 65)):
-                advice_text = f"คำแนะนำ: โครงสร้าง {direction.upper()} ผ่านเกณฑ์ขั้นต่ำของ {regime_label} regime แต่ควรรอแท่งยืนยัน Rejection ใน TF ย่อยและให้ Risk Engine ตรวจขนาดก่อนเข้า"
+                advice_text = f"คำแนะนำ: โครงสร้าง {direction.upper()} ผ่านเกณฑ์ขั้นต่ำของ {regime_label} regime แต่ควรรอแท่ง 15M ปิดยืนยัน Rejection และให้ Risk Engine ตรวจขนาดก่อนเข้า"
             else:
                 advice_text = 'คำแนะนำ: รอยืนยันการเคลื่อนไหวของราคา แนะนำ "รอ (WAIT)" สัญญาณ CHoCH หรือ Squeeze Release ก่อน'
 
@@ -681,8 +698,7 @@ class MarketMonitor:
                 "market_type": m_type,
                 "exchange": ex,
                 "timeframe": tf.upper(),
-                "setup_timeframe": setup_tf.upper(),
-                "htf_timeframe": htf.upper(),
+                "setup_timeframe": tf.upper(),
                 "direction": direction.upper(),
                 "setup_direction": strat_res.setup_direction.upper(),
                 "actionable": strat_res.approved,
@@ -708,18 +724,18 @@ class MarketMonitor:
                 "volume_spike": ltf_sig.volume_spike,
                 "indicator_decision": ltf_sig.indicator_decision,
                 "market_regime": ltf_sig.market_regime,
-                "analysis_snapshot": mtf.metadata(),
-                "mtf": mtf.to_dict(),
+                "scenario": scenario_info,
+                "reaction": reaction_info,
+                "analysis_snapshot": {
+                    "authority": "execution_timeframe_only",
+                    "timeframe": tf.upper(),
+                },
                 "message": structure_summary,
                 "advice": advice_text,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
-            # Phase 3 evidence is analysis-only. It cannot call a broker,
-            # mutate either order ledger, or grant a Live Session.
-            from app.services.evidence import (
-                capture_decision_evidence,
-            )
+            from app.services.evidence import capture_decision_evidence
             evidence = await capture_decision_evidence(
                 source="proactive_scanner",
                 symbol=symbol,
@@ -727,15 +743,18 @@ class MarketMonitor:
                 market_type=m_type,
                 exchange=ex,
                 market_data=ltf_df,
-                htf_bias=htf_bias,
+                htf_bias="neutral",
                 entry_mode=entry_mode,
                 signal=ltf_sig.to_dict(),
                 strategy=strat_res.to_dict(),
                 risk=None,
                 ai_analysis=None,
-                config_snapshot=mtf.config_snapshot,
-                mtf_market_data=mtf.frames,
-                mtf_decision=mtf.decision_dict(),
+                config_snapshot={
+                    **execution.config_snapshot,
+                    "decision_authority": "execution_timeframe_only",
+                },
+                mtf_market_data=None,
+                mtf_decision=None,
             )
             signal_payload["evidence"] = evidence
 
@@ -768,11 +787,280 @@ class MarketMonitor:
                 else:
                     logger.debug(f"Alert for {alert_key} skipped due to 30m cooldown")
 
+            # 6. Autonomous Auto-Pilot Execution (Grade S / Grade A)
+            if strat_res.approved and direction in ("long", "short"):
+                try:
+                    await self._evaluate_and_execute_auto_pilot(
+                        symbol=symbol,
+                        direction=direction,
+                        m_type=m_type,
+                        ex=ex,
+                        ltf_sig=ltf_sig,
+                        live_price=live_price,
+                        strat_res=strat_res,
+                        confluence=confluence,
+                        entry_mode=entry_mode,
+                    )
+                except Exception as auto_exc:
+                    logger.error(f"[Auto-Pilot] Error evaluating auto-trade for {symbol}: {auto_exc}")
+
             return signal_payload
 
         except Exception as e:
             logger.error(f"Error scanning {symbol} ({tf}): {e}")
             return None
+
+    async def _evaluate_and_execute_auto_pilot(
+        self,
+        *,
+        symbol: str,
+        direction: str,
+        m_type: str,
+        ex: str,
+        ltf_sig: Any,
+        live_price: float,
+        strat_res: Any,
+        confluence: int,
+        entry_mode: str,
+    ) -> Optional[dict]:
+        """Execute only when the execution-timeframe Strategy Gate approves."""
+        r_cfg = _get_cached_runtime_settings()
+        if not r_cfg.get("auto_trade_enabled", False):
+            return None
+
+        # 1. Canonical single-timeframe approval. MTF status is never read.
+        if not strat_res.approved or strat_res.direction != direction:
+            return None
+
+        # 2. Grade Check
+        scenario = getattr(ltf_sig, "scenario", {}) or {}
+        directional_sweep = bool(ltf_sig.liquidity_swept) and (
+            (direction == "long" and ltf_sig.sweep_direction == "low")
+            or (direction == "short" and ltf_sig.sweep_direction == "high")
+        )
+        directional_squeeze = ltf_sig.squeeze_status == "squeeze_fire" and (
+            (direction == "long" and ltf_sig.squeeze_momentum > 0)
+            or (direction == "short" and ltf_sig.squeeze_momentum < 0)
+        )
+        is_grade_s = (
+            confluence >= 85
+            or (scenario.get("actionable") and scenario.get("setup_grade") == "GRADE_S")
+            or directional_sweep
+            or directional_squeeze
+        )
+        is_grade_a = confluence >= 70 or is_grade_s
+        min_grade = str(r_cfg.get("auto_trade_min_grade", "A")).upper()
+        if min_grade == "S" and not is_grade_s:
+            return None
+        if min_grade == "A" and not is_grade_a:
+            return None
+        grade_label = "👑 SETUP S" if is_grade_s else "💎 SETUP A"
+
+        # 3. Cooldown Check
+        cooldown_sec = float(r_cfg.get("auto_trade_cooldown_seconds", 300))
+        now_ts = asyncio.get_event_loop().time()
+        history_key = _compact_symbol(symbol)
+        last_exec = _AUTO_TRADE_HISTORY.get(history_key, 0.0)
+        if now_ts - last_exec < cooldown_sec:
+            logger.debug(f"[Auto-Pilot] Cooldown active for {symbol} ({now_ts - last_exec:.1f}s < {cooldown_sec}s)")
+            return None
+
+        # 4. OMS & Capacity Check
+        from app.services.paper_oms import paper_oms
+        from app.core.config import get_settings
+        if not paper_oms.ready:
+            return None
+
+        oms_res = await paper_oms.list_positions(include_live=False)
+        all_positions = oms_res.get("trades", []) if isinstance(oms_res, dict) else (oms_res or [])
+        wall_now = datetime.now(timezone.utc)
+        for historical in all_positions:
+            if _compact_symbol(historical.get("symbol", "")) != _compact_symbol(symbol):
+                continue
+            raw_opened = historical.get("opened_at") or historical.get("filled_at")
+            if not raw_opened:
+                continue
+            try:
+                opened_at = datetime.fromisoformat(str(raw_opened).replace("Z", "+00:00"))
+                elapsed = (wall_now - opened_at.astimezone(timezone.utc)).total_seconds()
+            except (TypeError, ValueError):
+                continue
+            if 0 <= elapsed < cooldown_sec:
+                logger.debug(
+                    f"[Auto-Pilot] Durable cooldown active for {symbol} ({elapsed:.1f}s)"
+                )
+                return None
+        active_positions = [
+            position for position in all_positions
+            if position.get("status") in ("open", "pending")
+        ]
+        existing_sym = [
+            p for p in active_positions
+            if _compact_symbol(p.get("symbol", "")) == _compact_symbol(symbol)
+        ]
+        if existing_sym:
+            logger.debug(f"[Auto-Pilot] Active position already exists for {symbol}")
+            return None
+
+        cfg = get_settings()
+        if len(active_positions) >= cfg.max_open_positions:
+            logger.warning(f"[Auto-Pilot] Position capacity limit reached ({len(active_positions)}/{cfg.max_open_positions})")
+            return None
+
+        quote = paper_oms.quote_snapshot(symbol)
+        executable_quote = quote.get("ask" if direction == "long" else "bid")
+        if not executable_quote or float(executable_quote) <= 0:
+            logger.warning(f"[Auto-Pilot] Fresh executable quote unavailable for {symbol}")
+            return None
+        live_price = float(executable_quote)
+
+        # 5. Price & SL/TP Calculation
+        entry_style = str(r_cfg.get("auto_trade_entry_type", "momentum_market"))
+        if entry_style == "momentum_market":
+            exec_entry = live_price
+            if direction == "long":
+                if not (
+                    ltf_sig.stop_loss
+                    and ltf_sig.take_profit
+                    and float(ltf_sig.stop_loss) < live_price < float(ltf_sig.take_profit)
+                ):
+                    logger.warning(f"[Auto-Pilot] No valid structural levels for {symbol} LONG")
+                    return None
+                exec_sl = float(ltf_sig.stop_loss)
+                exec_tp = float(ltf_sig.take_profit)
+            else:
+                if not (
+                    ltf_sig.stop_loss
+                    and ltf_sig.take_profit
+                    and float(ltf_sig.take_profit) < live_price < float(ltf_sig.stop_loss)
+                ):
+                    logger.warning(f"[Auto-Pilot] No valid structural levels for {symbol} SHORT")
+                    return None
+                exec_sl = float(ltf_sig.stop_loss)
+                exec_tp = float(ltf_sig.take_profit)
+            order_type = "market"
+        else:
+            exec_entry = float(ltf_sig.entry or live_price)
+            exec_sl = float(ltf_sig.stop_loss or (live_price * 0.99 if direction == "long" else live_price * 1.01))
+            exec_tp = float(ltf_sig.take_profit or (live_price * 1.02 if direction == "long" else live_price * 0.98))
+            order_type = "limit"
+
+        rules = await instrument_rules.get(
+            symbol=symbol,
+            market_type=m_type,
+            exchange=ex,
+        )
+        if direction == "long":
+            exec_entry = rules.price(exec_entry, upward=order_type == "market")
+            exec_sl = rules.price(exec_sl, upward=False)
+            exec_tp = rules.price(exec_tp, upward=False)
+        else:
+            exec_entry = rules.price(exec_entry, upward=False)
+            exec_sl = rules.price(exec_sl, upward=True)
+            exec_tp = rules.price(exec_tp, upward=True)
+
+        # 6. Mandatory portfolio-aware Risk Engine assessment. Include modeled
+        # round-trip spread/slippage/fees so requested risk survives execution.
+        account = await paper_oms.account_snapshot()
+        equity = float(account.get("total_equity", 0.0) or 0.0)
+        if not math.isfinite(equity) or equity <= 0:
+            logger.warning("[Auto-Pilot] Paper account equity is unavailable")
+            return None
+        initial_capital = float(account.get("initial_capital", equity) or equity)
+        daily_pnl_pct = float(account.get("daily_pnl_pct", 0.0) or 0.0)
+        drawdown_pct = max(0.0, (initial_capital - equity) / max(initial_capital, 0.01) * 100.0)
+        fee_rate = float(cfg.paper_oms_fee_bps) / 10_000.0
+        spread_rate = float(cfg.paper_oms_spread_bps) / 10_000.0
+        slippage_rate = float(cfg.paper_oms_slippage_bps) / 10_000.0
+        execution_cost_per_unit = exec_entry * (
+            fee_rate * 2.0 + spread_rate + slippage_rate * 2.0
+        )
+        quantity_step = rules.quantity_step
+        execution_signal = replace(
+            ltf_sig,
+            direction=direction,
+            entry=exec_entry,
+            stop_loss=exec_sl,
+            take_profit=exec_tp,
+        )
+        risk_assessment = self.risk.evaluate(
+            execution_signal,
+            account_balance=equity,
+            open_positions=len(active_positions),
+            daily_pnl_pct=daily_pnl_pct,
+            drawdown_pct=drawdown_pct,
+            quantity_step=quantity_step,
+            active_positions=active_positions,
+            execution_cost_per_unit=execution_cost_per_unit,
+            minimum_rr=float(r_cfg.get("target_rr", 2.0)),
+            max_stop_distance_pct=float(r_cfg.get("default_sl_pct", 1.0)),
+        )
+        if not risk_assessment.approved:
+            logger.warning(
+                f"[Auto-Pilot] Risk Engine rejected {symbol}: "
+                f"{risk_assessment.rejection_reason}"
+            )
+            return None
+        qty = risk_assessment.position_size
+        if qty < rules.min_quantity or qty * exec_entry < rules.min_notional:
+            logger.warning(
+                f"[Auto-Pilot] {symbol} size is below exchange minimum filters"
+            )
+            return None
+
+        tag = f"#AUTO-{_compact_symbol(symbol)}-{direction.upper()}-{int(now_ts) % 10000}"
+        order_payload = {
+            "symbol": symbol,
+            "direction": direction,
+            "entry": exec_entry,
+            "stop_loss": exec_sl,
+            "take_profit": exec_tp,
+            "order_type": order_type,
+            "position_size": qty,
+            "size": qty,
+            "tag": tag,
+            "mode": "paper",
+            "exchange": ex,
+            "source": "auto_pilot",
+            "risk_pct": risk_assessment.risk_pct,
+            "market_regime": risk_assessment.market_regime,
+            "risk_assessment": {
+                "approved": True,
+                "position_size": risk_assessment.position_size,
+                "risk_amount": risk_assessment.risk_amount,
+                "risk_pct": risk_assessment.risk_pct,
+                "risk_reward": risk_assessment.risk_reward,
+                "asset_cluster": risk_assessment.asset_cluster,
+                "cluster_risk_multiplier": risk_assessment.cluster_risk_multiplier,
+                "regime_risk_multiplier": risk_assessment.regime_risk_multiplier,
+                "execution_cost_per_unit": risk_assessment.execution_cost_per_unit,
+                "evaluated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            "auto_be": True,
+            "trailing_stop": True,
+            "idempotency_key": f"auto-{symbol}-{direction}-{int(now_ts // 60)}",
+        }
+
+        try:
+            res = await paper_oms.place_order(order_payload)
+            _AUTO_TRADE_HISTORY[history_key] = now_ts
+            logger.info(f"🚀 [AUTO-PILOT EXECUTED] {direction.upper()} {qty} {symbol} @ {exec_entry} ({grade_label})")
+            await broadcast({"type": "auto_trade_executed", "data": res})
+            await self.notifier.send_signal_alert(
+                symbol=symbol,
+                timeframe="15M",
+                direction=direction,
+                message=f"🚀 [AUTO-PILOT] เข้าออเดอร์ {direction.upper()} {symbol} อัตโนมัติ @ ${exec_entry:,.2f} | SL: ${exec_sl:,.2f} | TP: ${exec_tp:,.2f} ({grade_label})",
+                confluence_score=confluence,
+                entry=exec_entry,
+                sl=exec_sl,
+                tp=exec_tp,
+            )
+            return res
+        except Exception as exc:
+            logger.error(f"[Auto-Pilot] Failed to place order for {symbol}: {exc}")
+            return None
+
 
     async def scan_all(self) -> list[dict]:
         """Scan only Settings watchlist symbols with bounded concurrency."""

@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import verify_api_key
+from app.core.runtime_config import load_runtime_config
 from app.engines.backtest_engine import (
     ExecutionAssumptions,
     ReleaseCriteria,
@@ -53,7 +54,8 @@ class ExecutionAssumptionsRequest(BaseModel):
 
 class ReleaseCriteriaRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    min_completed_trades: int = Field(default=30, ge=1, le=100_000)
+    min_completed_trades: int = Field(default=100, ge=1, le=100_000)
+    min_trades_per_scenario: int = Field(default=20, ge=1, le=100_000)
     min_expectancy_r: float = Field(default=0.05, ge=-5, le=10)
     min_profit_factor: float = Field(default=1.15, ge=0, le=100)
     max_drawdown_pct: float = Field(default=12.0, gt=0, le=100)
@@ -180,6 +182,12 @@ async def create_backtest_run(
         raise HTTPException(status_code=502, detail="Insufficient market data for backtest")
     config = current_decision_config(_strategy)
     assumptions = _assumptions(req.assumptions)
+    runtime = load_runtime_config()
+    execution_entry_mode = (
+        "market"
+        if runtime.get("auto_trade_entry_type") == "momentum_market"
+        else "limit"
+    )
     try:
         result = await asyncio.to_thread(
             run_walk_forward_backtest,
@@ -195,6 +203,7 @@ async def create_backtest_run(
             oos_fraction=req.oos_fraction,
             stride_bars=req.stride_bars,
             max_trades=req.max_trades,
+            entry_mode=execution_entry_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -217,6 +226,7 @@ async def create_backtest_run(
             "warmup_bars": req.warmup_bars,
             "oos_fraction": req.oos_fraction,
             "stride_bars": req.stride_bars,
+            "entry_mode": execution_entry_mode,
         },
         metrics=result["metrics"],
         result=result,

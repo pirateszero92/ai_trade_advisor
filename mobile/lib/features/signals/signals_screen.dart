@@ -956,6 +956,10 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                                   ? Map<String, dynamic>.from(regimePolicyRaw)
                                   : <String, dynamic>{};
                               final gate = StrategyGateView.fromPayload(s);
+                              final reaction = s['reaction'] is Map
+                                  ? Map<String, dynamic>.from(
+                                      s['reaction'] as Map)
+                                  : <String, dynamic>{};
                               final mtf = s['mtf'] is Map
                                   ? Map<String, dynamic>.from(s['mtf'] as Map)
                                   : <String, dynamic>{};
@@ -991,6 +995,9 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                                 mtf: mtf,
                                 message: msg,
                                 advice: s['advice'] as String?,
+                                scenario:
+                                    s['scenario'] as Map<String, dynamic>?,
+                                reaction: reaction,
                                 time: date,
                                 openPositions: matchingPositions,
                                 onExecuteTrade: () => _placeOrderFromSignal(s),
@@ -1093,6 +1100,8 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
 class _SignalCard extends StatelessWidget {
   final String symbol, direction, timeframe, message, time;
   final String? advice;
+  final Map<String, dynamic>? scenario;
+  final Map<String, dynamic> reaction;
   final int confluence;
   final double? entry, livePrice, sl, tp, rr;
   final String entryType;
@@ -1132,6 +1141,8 @@ class _SignalCard extends StatelessWidget {
     required this.gate,
     required this.mtf,
     this.advice,
+    this.scenario,
+    this.reaction = const <String, dynamic>{},
     this.entry,
     this.livePrice,
     this.sl,
@@ -1141,13 +1152,13 @@ class _SignalCard extends StatelessWidget {
 
   String _getAdviceText(String? customAdvice, String direction, int confluence,
       bool isGradeA, bool isGradeB) {
-    if (!gate.approved) {
-      return 'คำตัดสิน: รอ (WAIT) — ${gate.waitReasonThai}';
-    }
     if (customAdvice != null &&
         customAdvice.trim().isNotEmpty &&
         customAdvice.contains('คำแนะนำ:')) {
       return customAdvice;
+    }
+    if (!gate.approved) {
+      return 'คำตัดสิน: รอ (WAIT) — ${gate.waitReasonThai}';
     }
     if (isGradeA) {
       return 'คำแนะนำ: Setup คุณภาพสูงและผ่าน Strategy Gate โปรดใช้ขนาดความเสี่ยงที่ backend อนุมัติ';
@@ -1265,20 +1276,6 @@ class _SignalCard extends StatelessWidget {
       if (direction == 'LONG' || direction == 'SHORT') {
         return direction;
       }
-      final mtfDir = mtf['direction']?.toString().toUpperCase();
-      if (mtfDir != null && (mtfDir == 'LONG' || mtfDir == 'SHORT')) {
-        return mtfDir;
-      }
-      final stages = mtf['stages'];
-      if (stages is Map) {
-        final setupStage = stages['setup'];
-        if (setupStage is Map) {
-          final sDir = setupStage['direction']?.toString().toUpperCase();
-          if (sDir != null && (sDir == 'LONG' || sDir == 'SHORT')) {
-            return sDir;
-          }
-        }
-      }
       if (tp != null && sl != null && entry != null) {
         if (tp! > entry! && sl! < entry!) return 'LONG';
         if (tp! < entry! && sl! > entry!) return 'SHORT';
@@ -1289,9 +1286,7 @@ class _SignalCard extends StatelessWidget {
     final resolvedSetupDir = resolveSetupDir();
     final isSetupLong = resolvedSetupDir == 'LONG';
     final isSetupShort = resolvedSetupDir == 'SHORT';
-    final displayDirText = isSetupLong
-        ? 'LONG'
-        : (isSetupShort ? 'SHORT' : 'NEUTRAL');
+    final displayDirText = gate.directionBadgeLabel;
     final displayDirIcon = isSetupLong
         ? Icons.arrow_upward
         : (isSetupShort ? Icons.arrow_downward : Icons.remove);
@@ -1441,6 +1436,55 @@ class _SignalCard extends StatelessWidget {
                                       fontSize: 8,
                                       fontWeight: FontWeight.bold,
                                       color: Color(0xFFFF9900))),
+                            ),
+                          ],
+                          if (scenario != null &&
+                              scenario!['name_th'] != null) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 5, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF9B51E0)
+                                    .withValues(alpha: 0.20),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(
+                                    color: const Color(0xFFBB6BD9)
+                                        .withValues(alpha: 0.8),
+                                    width: 0.8),
+                              ),
+                              child: Text(
+                                "${scenario!['name_th'].toString().split(' ')[0]} ${(scenario!['archetype'] ?? 'SETUP').toString().toUpperCase()}",
+                                style: const TextStyle(
+                                    fontSize: 8,
+                                    fontWeight: FontWeight.bold,
+                                    color: Color(0xFFE0B0FF)),
+                              ),
+                            ),
+                          ],
+                          if (reaction['reaction_state'] != null &&
+                              reaction['reaction_state']
+                                  .toString()
+                                  .trim()
+                                  .isNotEmpty) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 5, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFFC857)
+                                    .withValues(alpha: 0.14),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(
+                                    color: const Color(0xFFFFC857)
+                                        .withValues(alpha: 0.75),
+                                    width: 0.8),
+                              ),
+                              child: Text(
+                                '15M ${reaction['reaction_state']} · WATCH',
+                                style: const TextStyle(
+                                    fontSize: 8,
+                                    fontWeight: FontWeight.bold,
+                                    color: Color(0xFFFFD98A)),
+                              ),
                             ),
                           ],
                           if (deltaAbsorption) ...[
@@ -1797,8 +1841,8 @@ class _SignalCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 6),
                 Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 6, vertical: 1.5),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
                   decoration: BoxDecoration(
                     color: displayDirBg,
                     borderRadius: BorderRadius.circular(4),

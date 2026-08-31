@@ -14,6 +14,7 @@ import uuid
 
 from loguru import logger
 import pandas as pd
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.strategy_config_store import read_strategy_config
@@ -361,14 +362,31 @@ async def capture_decision_evidence(**kwargs: Any) -> dict[str, Any]:
         envelope = build_decision_evidence(**kwargs)
         async with async_session_factory() as session:
             try:
-                await append_evidence_event(envelope, session)
+                # Scanner runs more frequently than the execution candle closes.
+                # Reuse the immutable event when input, config and decision are
+                # identical instead of storing another full candle window.
+                existing = await session.scalar(
+                    select(EvidenceEvent)
+                    .where(
+                        EvidenceEvent.source == envelope.source,
+                        EvidenceEvent.symbol == envelope.symbol,
+                        EvidenceEvent.timeframe == envelope.timeframe,
+                        EvidenceEvent.market_data_hash == envelope.market_data_hash,
+                        EvidenceEvent.config_hash == envelope.config_hash,
+                        EvidenceEvent.decision_hash == envelope.decision_hash,
+                    )
+                    .limit(1)
+                )
+                if existing is None:
+                    await append_evidence_event(envelope, session)
                 await session.commit()
+                persisted_id = envelope.event_id if existing is None else existing.id
             except Exception:
                 await session.rollback()
                 raise
         return {
-            "status": "persisted",
-            "event_id": str(envelope.event_id),
+            "status": "persisted" if existing is None else "deduplicated",
+            "event_id": str(persisted_id),
             "decision_hash": envelope.decision_hash,
             "schema_version": envelope.schema_version,
         }

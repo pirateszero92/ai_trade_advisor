@@ -11,6 +11,8 @@ from typing import Any, List, Literal, Optional
 from loguru import logger
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.security import verify_api_key
@@ -30,6 +32,8 @@ from app.engines.timeframe_profiles import (
 )
 from app.core.url_security import configured_host_set, validate_service_url
 from app.core.runtime_config import load_runtime_config, update_runtime_config
+from app.models.base import get_db
+from app.models.phase3 import BacktestRun, ReleaseGateEvaluation
 
 router = APIRouter()
 _ai = AIEngine()
@@ -126,6 +130,10 @@ class ChatContextRequest(BaseModel):
     strategy_direction: Literal["long", "short", "wait"] = "wait"
     setup_direction: Literal["long", "short", "wait"] = "wait"
     rejection_reasons: list[str] = Field(default_factory=list, max_length=20)
+    reaction_scenario_id: str = Field(default="", max_length=80)
+    reaction_state: str = Field(default="", max_length=50)
+    reaction_archetype: str = Field(default="", max_length=50)
+    reaction_evidence: dict[str, Any] = Field(default_factory=dict, max_length=30)
 
 
 class ChatRequest(BaseModel):
@@ -584,9 +592,11 @@ async def update_timeframe_profiles(
         config = save_timeframe_profiles(req.model_dump())
         from app.services.analysis_snapshot import analysis_snapshots
         from app.services.mtf_analysis import mtf_analyses
+        from app.services.execution_analysis import execution_analyses
 
         analysis_snapshots.clear()
         mtf_analyses.clear()
+        execution_analyses.clear()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except OSError as exc:
@@ -606,8 +616,10 @@ async def reload_strategy(_key: str = Depends(verify_api_key)):
     MarketMonitor.get_instance().strategy.reload()
     from app.services.analysis_snapshot import analysis_snapshots
     from app.services.mtf_analysis import mtf_analyses
+    from app.services.execution_analysis import execution_analyses
     analysis_snapshots.clear()
     mtf_analyses.clear()
+    execution_analyses.clear()
     return {"message": "Strategy reloaded", "name": _strategy._strategy.get("name")}
 
 
@@ -1005,15 +1017,15 @@ async def import_innovestx_watchlist(
 
 @router.get("/broker/innovestx/symbols")
 async def get_innovestx_symbols(
-    api_key: Optional[str] = None,
-    api_secret: Optional[str] = None,
     _key: str = Depends(verify_api_key),
 ):
-    """Get list of formatted InnovestX symbols."""
+    """Get symbols using server-side credentials; secrets never enter a URL."""
     from app.engines.innovestx_client import InnovestXClient
     cfg = get_settings()
-    key = (api_key or cfg.innovestx_api_key).strip()
-    sec = (api_secret or cfg.innovestx_api_secret).strip()
+    key = (cfg.innovestx_api_key or "").strip()
+    sec = (cfg.innovestx_api_secret or "").strip()
+    if not key or not sec:
+        raise HTTPException(status_code=409, detail="InnovestX credentials are not configured")
     client = InnovestXClient(api_key=key, api_secret=sec)
     pairs = await client.get_formatted_symbols()
     return {"symbols": pairs, "count": len(pairs)}
@@ -1354,6 +1366,11 @@ class RiskConfigRequest(BaseModel):
     max_open_positions: Optional[int] = Field(default=None, ge=1, le=100)
     target_rr: Optional[float] = Field(default=None, ge=1, le=20)
     default_sl_pct: Optional[float] = Field(default=None, gt=0, le=20)
+    auto_trade_enabled: Optional[bool] = None
+    auto_trade_min_grade: Optional[Literal["S", "A"]] = None
+    auto_trade_entry_type: Optional[Literal["momentum_market", "limit_pullback"]] = None
+    auto_trade_cooldown_seconds: Optional[int] = Field(default=None, ge=30, le=3600)
+    mtf_hierarchy_required: Optional[bool] = None
 
 
 @router.get("/risk/config")
@@ -1365,6 +1382,11 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
     auto_invalidation = True
     target_rr = 2.0
     default_sl_pct = 1.0
+    auto_trade_enabled = False
+    auto_trade_min_grade = "A"
+    auto_trade_entry_type = "momentum_market"
+    auto_trade_cooldown_seconds = 300
+    mtf_hierarchy_required = False
     try:
         data = load_runtime_config()
         entry_mode = data.get("entry_mode", "limit")
@@ -1372,6 +1394,11 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
         auto_invalidation = data.get("auto_invalidation", True)
         target_rr = float(data.get("target_rr", 2.0))
         default_sl_pct = float(data.get("default_sl_pct", 1.0))
+        auto_trade_enabled = bool(data.get("auto_trade_enabled", False))
+        auto_trade_min_grade = str(data.get("auto_trade_min_grade", "A"))
+        auto_trade_entry_type = str(data.get("auto_trade_entry_type", "momentum_market"))
+        auto_trade_cooldown_seconds = int(data.get("auto_trade_cooldown_seconds", 300))
+        mtf_hierarchy_required = False
     except Exception as exc:
         logger.error(f"Failed to load risk config: {exc}")
         raise HTTPException(status_code=500, detail="Unable to load risk configuration") from exc
@@ -1385,12 +1412,56 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
         "max_open_positions": cfg.max_open_positions,
         "target_rr": target_rr,
         "default_sl_pct": default_sl_pct,
+        "auto_trade_enabled": auto_trade_enabled,
+        "auto_trade_min_grade": auto_trade_min_grade,
+        "auto_trade_entry_type": auto_trade_entry_type,
+        "auto_trade_cooldown_seconds": auto_trade_cooldown_seconds,
+        "mtf_hierarchy_required": mtf_hierarchy_required,
     }
 
 
 @router.post("/risk/config")
-async def update_risk_config(req: RiskConfigRequest, _key: str = Depends(verify_api_key)):
+async def update_risk_config(
+    req: RiskConfigRequest,
+    _key: str = Depends(verify_api_key),
+    session: AsyncSession = Depends(get_db),
+):
     """Update risk management and entry mode settings and persist to JSON storage."""
+    if req.auto_trade_enabled is True:
+        latest = (
+            await session.execute(
+                select(ReleaseGateEvaluation, BacktestRun)
+                .join(BacktestRun, BacktestRun.id == ReleaseGateEvaluation.backtest_run_id)
+                .where(
+                    ReleaseGateEvaluation.passed.is_(True),
+                    BacktestRun.status == "completed",
+                    BacktestRun.timeframe == "15m",
+                    BacktestRun.evaluation_mode == "anchored_out_of_sample_replay",
+                )
+                .order_by(ReleaseGateEvaluation.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+        if latest is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Auto-Pilot remains locked: no passing 15m anchored OOS release gate. "
+                    "Run Paper backtests with at least 100 completed trades first."
+                ),
+            )
+        gate, run = latest
+        criteria = dict(gate.criteria or {})
+        metrics = dict(run.metrics or {})
+        if (
+            int(criteria.get("min_completed_trades", 0)) < 100
+            or int(criteria.get("min_trades_per_scenario", 0)) < 20
+            or int(metrics.get("completed_trades", 0)) < 100
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Auto-Pilot remains locked: latest gate used insufficient release samples",
+            )
     cfg = get_settings()
     if req.risk_per_trade is not None:
         cfg.default_risk_per_trade = req.risk_per_trade
@@ -1415,6 +1486,16 @@ async def update_risk_config(req: RiskConfigRequest, _key: str = Depends(verify_
             updates["target_rr"] = req.target_rr
         if req.default_sl_pct is not None:
             updates["default_sl_pct"] = req.default_sl_pct
+        if req.auto_trade_enabled is not None:
+            updates["auto_trade_enabled"] = req.auto_trade_enabled
+        if req.auto_trade_min_grade is not None:
+            updates["auto_trade_min_grade"] = req.auto_trade_min_grade
+        if req.auto_trade_entry_type is not None:
+            updates["auto_trade_entry_type"] = req.auto_trade_entry_type
+        if req.auto_trade_cooldown_seconds is not None:
+            updates["auto_trade_cooldown_seconds"] = req.auto_trade_cooldown_seconds
+        # MTF is permanently informational-only.
+        updates["mtf_hierarchy_required"] = False
         saved = update_runtime_config(updates)
         from app.services.event_trigger import invalidate_runtime_settings_cache
         invalidate_runtime_settings_cache()
@@ -1431,7 +1512,13 @@ async def update_risk_config(req: RiskConfigRequest, _key: str = Depends(verify_
             "auto_invalidation": saved.get("auto_invalidation", True),
             "risk_per_trade": cfg.default_risk_per_trade,
             "max_daily_loss": cfg.max_daily_loss,
+            "max_open_positions": cfg.max_open_positions,
             "target_rr": saved.get("target_rr", 2.0),
             "default_sl_pct": saved.get("default_sl_pct", 1.0),
+            "auto_trade_enabled": saved.get("auto_trade_enabled", False),
+            "auto_trade_min_grade": saved.get("auto_trade_min_grade", "A"),
+            "auto_trade_entry_type": saved.get("auto_trade_entry_type", "momentum_market"),
+            "auto_trade_cooldown_seconds": saved.get("auto_trade_cooldown_seconds", 300),
+            "mtf_hierarchy_required": False,
         },
     }

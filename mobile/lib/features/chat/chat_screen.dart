@@ -81,13 +81,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final List<ChatMessage> _messages = [];
   bool _isLoading = false;
   bool _isHistoryLoading = true;
+  late final Future<void> _sessionReady;
+  int _sessionLoadGeneration = 0;
 
   // ------------- lifecycle ---------------
 
   @override
   void initState() {
     super.initState();
-    _loadTodaySession();
+    _sessionReady = _loadTodaySession();
   }
 
   @override
@@ -100,15 +102,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   // ------------- session management ------
 
   Future<void> _loadTodaySession() async {
+    final generation = ++_sessionLoadGeneration;
     setState(() => _isHistoryLoading = true);
     try {
       final resp = await _dio.get(AppApi.url('/api/v1/chat/sessions/today'));
       final data = resp.data as Map<String, dynamic>;
-      _sessionId = data['id'] as String;
-      _sessionTitle = data['title'] as String? ?? 'Chat';
       final rawMsgs = data['messages'] as List<dynamic>? ?? [];
-      if (!mounted) return;
+      if (!mounted || generation != _sessionLoadGeneration) return;
       setState(() {
+        _sessionId = data['id'] as String;
+        _sessionTitle = data['title'] as String? ?? 'Chat';
         _messages.clear();
         _messages.addAll(rawMsgs
             .map((m) => ChatMessage.fromJson(m as Map<String, dynamic>))
@@ -127,22 +130,23 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       });
       _scrollToBottom();
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || generation != _sessionLoadGeneration) return;
       setState(() => _isHistoryLoading = false);
     }
   }
 
   Future<void> _loadSession(String sessionId) async {
+    final generation = ++_sessionLoadGeneration;
     setState(() => _isHistoryLoading = true);
     try {
       final resp =
           await _dio.get(AppApi.url('/api/v1/chat/sessions/$sessionId'));
       final data = resp.data as Map<String, dynamic>;
-      _sessionId = data['id']?.toString();
-      _sessionTitle = data['title'] as String? ?? 'Chat';
       final rawMsgs = data['messages'] as List<dynamic>? ?? [];
-      if (!mounted) return;
+      if (!mounted || generation != _sessionLoadGeneration) return;
       setState(() {
+        _sessionId = data['id']?.toString();
+        _sessionTitle = data['title'] as String? ?? 'Chat';
         _messages.clear();
         _messages.addAll(rawMsgs
             .map((m) => ChatMessage.fromJson(m as Map<String, dynamic>))
@@ -160,20 +164,22 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       });
       _scrollToBottom();
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || generation != _sessionLoadGeneration) return;
       setState(() => _isHistoryLoading = false);
     }
   }
 
   Future<void> _createNewSession() async {
+    final generation = ++_sessionLoadGeneration;
     try {
       final resp = await _dio.post(AppApi.url('/api/v1/chat/sessions'), data: {
         'title': 'Chat ${DateFormat('dd MMM').format(DateTime.now())}',
       });
       final data = resp.data as Map<String, dynamic>;
-      _sessionId = data['id'] as String;
-      _sessionTitle = data['title'] as String? ?? 'New Chat';
+      if (!mounted || generation != _sessionLoadGeneration) return;
       setState(() {
+        _sessionId = data['id'] as String;
+        _sessionTitle = data['title'] as String? ?? 'New Chat';
         _messages.clear();
         _messages.add(ChatMessage(
           id: 'welcome-new',
@@ -183,7 +189,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         ));
       });
     } catch (e) {
-      _showSnack('ไม่สามารถสร้าง session ใหม่ได้: $e');
+      if (mounted && generation == _sessionLoadGeneration) {
+        _showSnack('ไม่สามารถสร้าง session ใหม่ได้: $e');
+      }
     }
   }
 
@@ -218,7 +226,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty || _isLoading) return;
-    if (_sessionId == null) await _loadTodaySession();
+    await _sessionReady;
+    if (mounted && _sessionId == null) {
+      await _loadTodaySession();
+    }
+    if (!mounted || _sessionId == null || _isHistoryLoading) return;
 
     _controller.clear();
     final userMsg = ChatMessage(
@@ -272,18 +284,20 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       });
       _scrollToBottom();
 
-      // Persist to DB
+      // Persist before considering the turn durable. A persistence failure
+      // keeps the response visible but is reported so it is not silently lost.
       if (_sessionId != null) {
-        () async {
-          try {
-            await _dio
-                .post(AppApi.url('/api/v1/chat/messages/bulk-save'), data: {
-              'session_id': _sessionId,
-              'user_content': text,
-              'assistant_content': reply,
-            });
-          } catch (_) {}
-        }();
+        try {
+          await _dio.post(AppApi.url('/api/v1/chat/messages/bulk-save'), data: {
+            'session_id': _sessionId,
+            'user_content': text,
+            'assistant_content': reply,
+          });
+        } catch (error) {
+          if (mounted) {
+            _showSnack('ได้รับคำตอบแล้ว แต่บันทึกประวัติไม่สำเร็จ: $error');
+          }
+        }
       }
     } catch (e) {
       if (!mounted) return;

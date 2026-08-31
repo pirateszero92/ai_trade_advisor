@@ -56,6 +56,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   String? _errorMessage;
 
   List<Candle> _candles = [];
+  DateTime? _formingCandleOpenTime;
   Map<String, dynamic>? _smcOverlayData;
   List<Map<String, dynamic>> _openPositions = [];
   Timer? _liveTickerTimer;
@@ -336,6 +337,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           return; // Strict guard against 0.0 or corrupted price
         }
 
+        final formingOpenAtResponse = _formingCandleOpenTime;
+        final formingDurationAtResponse =
+            _timeframeDuration(_selectedTimeframe);
+        final formingExpired = formingOpenAtResponse != null &&
+            formingDurationAtResponse != null &&
+            !DateTime.now().toUtc().isBefore(
+                  formingOpenAtResponse.toUtc().add(formingDurationAtResponse),
+                );
+
         setState(() {
           _lastPrice = newPrice;
           _change24h = (d['change_24h'] as num?)?.toDouble() ?? _change24h;
@@ -344,7 +354,16 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           _vol24h = (d['volume_24h'] as num?)?.toDouble() ?? _vol24h;
           _symbolLivePrices[_selectedSymbol] = _lastPrice;
 
-          if (_candles.isNotEmpty) {
+          final formingOpen = _formingCandleOpenTime;
+          final formingDuration = _timeframeDuration(_selectedTimeframe);
+          final formingIsCurrent = formingOpen != null &&
+              formingDuration != null &&
+              DateTime.now().toUtc().isBefore(
+                    formingOpen.toUtc().add(formingDuration),
+                  );
+          if (_candles.isNotEmpty &&
+              formingIsCurrent &&
+              _candles.first.date.toUtc() == formingOpen.toUtc()) {
             final lastCandle = _candles.first;
             if (lastCandle.open > 0.0) {
               _candles[0] = Candle(
@@ -357,7 +376,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               );
             }
           }
+          if (formingExpired) {
+            _formingCandleOpenTime = null;
+          }
         });
+        if (formingExpired && !_isLoading) {
+          unawaited(_fetchChartData());
+        }
       }
     } catch (_) {}
   }
@@ -367,6 +392,25 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       .replaceAll('-', '')
       .replaceAll('_', '')
       .toUpperCase();
+
+  static Duration? _timeframeDuration(String timeframe) {
+    final match = RegExp(r'^(\d+)([mhdw])$', caseSensitive: false)
+        .firstMatch(timeframe.trim());
+    if (match == null) return null;
+    final amount = int.tryParse(match.group(1)!);
+    if (amount == null || amount <= 0) return null;
+    switch (match.group(2)!.toLowerCase()) {
+      case 'm':
+        return Duration(minutes: amount);
+      case 'h':
+        return Duration(hours: amount);
+      case 'd':
+        return Duration(days: amount);
+      case 'w':
+        return Duration(days: amount * 7);
+    }
+    return null;
+  }
 
   bool _isMultiPriceFetching = false;
 
@@ -530,6 +574,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
+      _formingCandleOpenTime = null;
     });
 
     try {
@@ -551,7 +596,17 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       );
 
       final requestedSymbol = _selectedSymbol;
-      final List<dynamic> rawCandles = overlayResp.data['candles'] ?? [];
+      final List<dynamic> rawCandles =
+          List<dynamic>.from(overlayResp.data['candles'] ?? const []);
+      final formingRaw = overlayResp.data['forming_candle'];
+      DateTime? parsedFormingTime;
+      if (formingRaw is Map) {
+        rawCandles.add(formingRaw);
+        final formingTime = formingRaw['t']?.toString();
+        if (formingTime != null) {
+          parsedFormingTime = DateTime.tryParse(formingTime)?.toUtc();
+        }
+      }
       final List<Candle> parsedCandles = [];
 
       for (final c in rawCandles) {
@@ -594,15 +649,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       _fetchLiveTicker();
 
       if (!mounted || _selectedSymbol != requestedSymbol) return;
-      final embeddedMtf = overlayResp.data['mtf'] is Map
-          ? Map<String, dynamic>.from(overlayResp.data['mtf'] as Map)
-          : null;
       setState(() {
         _candles = parsedCandles;
-        _smcOverlayData = (overlayResp.data is Map<String, dynamic>)
-            ? overlayResp.data as Map<String, dynamic>
+        _formingCandleOpenTime = parsedFormingTime;
+        _smcOverlayData = (overlayResp.data is Map)
+            ? Map<String, dynamic>.from(overlayResp.data as Map)
             : null;
-        _mtfMatrixData = embeddedMtf;
+        _mtfMatrixData = null;
         _isLoading = false;
 
         final gate = StrategyGateView.fromPayload(_smcOverlayData);
@@ -662,9 +715,6 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           _bpTp2Ctrl.text = aiTp2 != null && aiTp2 > 0 ? _fmtPrice(aiTp2) : '';
         }
       });
-      if (embeddedMtf == null) {
-        _fetchMtfMatrix(_selectedSymbol);
-      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -674,6 +724,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     }
   }
 
+  // Research-only legacy view. It is intentionally unreachable from trading UI.
+  // ignore: unused_element
   Future<void> _fetchMtfMatrix([String? sym]) async {
     final targetSym = sym ?? _selectedSymbol;
     if (_isMtfLoading) return;
@@ -1036,7 +1088,6 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                                 _buildMarketRegimeBar(),
                               if (_indicatorDecisionData != null)
                                 _buildIndicatorDecisionBar(),
-                              if (_mtfMatrixData != null) _buildMtfMatrixBar(),
                               Expanded(flex: 62, child: _buildChartArea()),
                               const Divider(),
                               Expanded(flex: 38, child: _buildBottomDock()),
@@ -1056,7 +1107,6 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                         if (_marketRegimeData != null) _buildMarketRegimeBar(),
                         if (_indicatorDecisionData != null)
                           _buildIndicatorDecisionBar(),
-                        if (_mtfMatrixData != null) _buildMtfMatrixBar(),
                         Expanded(flex: 50, child: _buildChartArea()),
                         const Divider(),
                         Expanded(flex: 50, child: _buildBottomDock()),
@@ -3307,6 +3357,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     );
   }
 
+  // Research-only legacy view. It is intentionally unreachable from trading UI.
+  // ignore: unused_element
   Widget _buildMtfMatrixBar() {
     final matrix = _mtfMatrixData?['matrix'] as Map<String, dynamic>? ?? {};
     final gradeBadge =
@@ -3778,6 +3830,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           .map((m) => {'role': m['role'], 'content': m['content']})
           .toList();
       final gate = StrategyGateView.fromPayload(_smcOverlayData);
+      final reactionRaw = _smcOverlayData?['reaction'];
+      final reaction = reactionRaw is Map
+          ? Map<String, dynamic>.from(reactionRaw)
+          : <String, dynamic>{};
 
       final resp = await AppApi.dio.post(
         AppApi.url('/api/v1/settings/llm/chat'),
@@ -3802,6 +3858,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             'strategy_direction': gate.action,
             'setup_direction': gate.setupDirection,
             'rejection_reasons': gate.rejectionReasons,
+            'reaction_scenario_id': (reaction['scenario_id'] ?? '').toString(),
+            'reaction_state': (reaction['reaction_state'] ?? '').toString(),
+            'reaction_archetype': (reaction['archetype'] ?? '').toString(),
+            'reaction_evidence': reaction['reaction_evidence'] is Map
+                ? Map<String, dynamic>.from(
+                    reaction['reaction_evidence'] as Map)
+                : <String, dynamic>{},
           }
         },
       );
@@ -4662,9 +4725,6 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             : (_smcOverlayData?['in_premium'] == true
                 ? 'PREMIUM ZONE'
                 : 'EQUILIBRIUM'));
-    final htfTrend = bp?['htf_trend'] as String? ??
-        (setupIsBull ? 'Bullish' : (setupIsBear ? 'Bearish' : 'Neutral'));
-
     // 2. Resolve Price Levels from Active Mode
     final aiEntry = (bp?['entry'] as num?)?.toDouble() ??
         (_smcOverlayData?['entry'] as num?)?.toDouble() ??
@@ -4859,38 +4919,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      _checkChip('HTF Trend', htfTrend, true),
+                      _checkChip('Execution TF', '15M', true),
                       _checkChip('Market Zone', zoneName, true),
                       _checkChip('Liquidity', 'Swept', true),
                     ],
                   ),
-                  if (_mtfMatrixData != null) ...[
-                    const Divider(height: 16, color: Color(0xFF222938)),
-                    InkWell(
-                      onTap: _showMtfModal,
-                      child: Row(
-                        children: [
-                          const Text('4-TF Matrix:',
-                              style: TextStyle(
-                                  fontSize: 11, color: Colors.white54)),
-                          const SizedBox(width: 6),
-                          Text(
-                            _mtfMatrixData!['grade_badge'] ?? '',
-                            style: const TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                                color: Color(0xFF00E5FF)),
-                          ),
-                          const Spacer(),
-                          const Text('ดูรายละเอียด ›',
-                              style: TextStyle(
-                                  fontSize: 10.5,
-                                  color: Color(0xFF93C5FD),
-                                  fontWeight: FontWeight.w600)),
-                        ],
-                      ),
-                    ),
-                  ],
                 ],
               ),
             ),

@@ -32,21 +32,30 @@ class ApiConfig {
       throw const FormatException(
           'API Base URL must be a valid http(s) URL without credentials');
     }
+    final isLocalDevelopmentHost =
+        {'localhost', '127.0.0.1', '10.0.2.2'}.contains(uri.host);
+    if (kReleaseMode && uri.scheme != 'https' && !isLocalDevelopmentHost) {
+      throw const FormatException(
+          'Release builds require HTTPS for non-local API servers');
+    }
   }
-
-  static const _defaultApiKey =
-      'JxMJIPbRqjbXRvSO1K53mGm62EcQBMB_RiTV69sdx1-rE7H_0dlHzXXO8p17e3Jw';
 
   static Future<String?> getApiKey() async {
     try {
       final key = await _storage.read(key: 'api_key');
-      if (key != null && key.isNotEmpty) return key;
+      if (key != null && key.trim().isNotEmpty) return key.trim();
     } catch (_) {}
-    return _defaultApiKey;
+    return null;
   }
 
   static Future<void> setApiKey(String key) async {
-    await _storage.write(key: 'api_key', value: key);
+    final trimmed = key.trim();
+    if (trimmed.isEmpty) {
+      await _storage.delete(key: 'api_key');
+    } else {
+      await _storage.write(key: 'api_key', value: trimmed);
+    }
+    AppApi.clearApiKeyCache();
   }
 
   static Future<String?> getInnovestxKey() async {
@@ -106,14 +115,8 @@ class AppApi {
 
   static void setBaseUrl(String url) {
     final trimmed = url.trim().replaceAll(RegExp(r'/$'), '');
-    final uri = Uri.tryParse(trimmed);
-    if (trimmed.isNotEmpty &&
-        (uri == null ||
-            !uri.hasAuthority ||
-            !{'http', 'https'}.contains(uri.scheme) ||
-            uri.host.isEmpty ||
-            uri.userInfo.isNotEmpty)) {
-      throw const FormatException('Invalid API Base URL');
+    if (trimmed.isNotEmpty) {
+      ApiConfig._validateBaseUrl(trimmed);
     }
     _customBaseUrl = trimmed;
   }

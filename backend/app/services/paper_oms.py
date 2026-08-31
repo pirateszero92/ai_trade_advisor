@@ -486,10 +486,28 @@ class PaperOMS:
         entry = _decimal(payload.get("entry"), name="entry", positive=True)
         stop_loss = _decimal(payload.get("stop_loss"), name="stop_loss", positive=True)
         take_profit = _decimal(payload.get("take_profit"), name="take_profit", positive=True)
+        source = str(payload.get("source", "manual")).strip().lower()
+        risk_assessment = payload.get("risk_assessment")
+        if source == "auto_pilot":
+            if not isinstance(risk_assessment, dict) or risk_assessment.get("approved") is not True:
+                raise PaperOMSValidation("Auto-Pilot order requires an approved RiskAssessment")
+            assessed_size = _decimal(
+                risk_assessment.get("position_size"),
+                name="risk_assessment.position_size",
+                positive=True,
+            )
+            if quantity > assessed_size + EPSILON:
+                raise PaperOMSValidation("Order quantity exceeds approved RiskAssessment size")
         if direction == "long" and not (stop_loss < entry < take_profit):
             raise PaperOMSValidation("LONG requires stop_loss < entry < take_profit")
         if direction == "short" and not (take_profit < entry < stop_loss):
             raise PaperOMSValidation("SHORT requires take_profit < entry < stop_loss")
+
+        # A market order has no meaningful client-selected execution price.
+        # Refuse it unless the hub can provide a fresh executable quote.
+        initial_quote = self._current_quote(symbol, fallback_price=None)
+        if order_type == "market" and not initial_quote:
+            raise PaperOMSError(f"Fresh market quote unavailable for {symbol}")
 
         cfg = get_settings()
         risk_pct = min(
@@ -538,7 +556,28 @@ class PaperOMS:
                 daily_limit = _decimal(account.initial_capital) * _decimal(cfg.max_daily_loss) / Decimal("100")
                 if daily_realized <= -daily_limit:
                     raise PaperOMSConflict("Daily loss limit reached; new orders are disabled")
-                estimated_loss = abs(entry - stop_loss) * quantity
+                fee_rate = _decimal(cfg.paper_oms_fee_bps) / Decimal("10000")
+                half_spread = _decimal(cfg.paper_oms_spread_bps) / Decimal("20000")
+                slippage_rate = _decimal(cfg.paper_oms_slippage_bps) / Decimal("10000")
+                modeled_entry = entry
+                if order_type == "market" and initial_quote:
+                    mid = _decimal(initial_quote.get("price"), name="market price", positive=True)
+                    bid = _decimal(initial_quote.get("bid") or mid * (Decimal("1") - half_spread))
+                    ask = _decimal(initial_quote.get("ask") or mid * (Decimal("1") + half_spread))
+                    modeled_entry = (
+                        ask * (Decimal("1") + slippage_rate)
+                        if direction == "long"
+                        else bid * (Decimal("1") - slippage_rate)
+                    )
+                modeled_stop = (
+                    stop_loss * (Decimal("1") - half_spread - slippage_rate)
+                    if direction == "long"
+                    else stop_loss * (Decimal("1") + half_spread + slippage_rate)
+                )
+                all_in_loss_per_unit = abs(modeled_entry - modeled_stop) + (
+                    abs(modeled_entry) + abs(modeled_stop)
+                ) * fee_rate
+                estimated_loss = all_in_loss_per_unit * quantity
                 allowed_risk = equity * risk_pct / Decimal("100")
                 if estimated_loss > allowed_risk * Decimal("1.001"):
                     raise PaperOMSValidation(
@@ -582,7 +621,13 @@ class PaperOMS:
                     protection_updated_at=None,
                     created_at=now,
                     updated_at=now,
-                    source_payload={"phase": 6, "mode": "paper"},
+                    source_payload={
+                        "phase": 6,
+                        "mode": "paper",
+                        "source": source,
+                        "market_regime": str(payload.get("market_regime", "unknown")),
+                        "risk_assessment": risk_assessment if isinstance(risk_assessment, dict) else None,
+                    },
                 )
                 session.add(position)
                 await session.flush()
@@ -617,7 +662,7 @@ class PaperOMS:
                     payload={"side": order.side, "position_effect": "open"},
                 )
 
-                quote = self._current_quote(symbol, fallback_price=entry)
+                quote = initial_quote
                 should_fill = order_type == "market" or self._is_marketable(order, quote)
                 if should_fill:
                     fill_quantity = quantity if order_type == "market" else self._available_quantity(order, quote)
@@ -748,6 +793,18 @@ class PaperOMS:
                 if close_quantity <= EPSILON:
                     raise PaperOMSValidation("Close quantity is too small")
 
+                if close_price is not None:
+                    quote = self._synthetic_quote(
+                        _decimal(close_price, name="close_price", positive=True),
+                        source="manual_close_price",
+                    )
+                else:
+                    quote = self._current_quote(position.symbol, fallback_price=None)
+                    if not quote:
+                        raise PaperOMSError(
+                            f"Fresh market quote unavailable for {position.symbol}"
+                        )
+
                 order_id = (
                     normalized_client_order_id or f"{position.id}:exit:{uuid.uuid4().hex[:12]}"
                 )[:100]
@@ -771,12 +828,6 @@ class PaperOMS:
                 )
                 session.add(exit_order)
                 await session.flush()
-                quote = self._current_quote(
-                    position.symbol,
-                    fallback_price=_decimal(close_price) if close_price is not None else position.average_entry_price,
-                )
-                if close_price is not None:
-                    quote = self._synthetic_quote(_decimal(close_price), source="manual_close_price")
                 self._apply_fill(
                     session,
                     position,
@@ -982,6 +1033,16 @@ class PaperOMS:
         initial = _decimal(account.initial_capital)
         cash = initial + realized_gross - fees
         net_worth = cash + unrealized
+        today = _utcnow().date()
+        daily_realized_net = sum(
+            (
+                _decimal(p.realized_pnl_net)
+                for p in positions
+                if p.closed_at is not None
+                and p.closed_at.astimezone(timezone.utc).date() == today
+            ),
+            ZERO,
+        )
         return {
             "broker_id": "paper",
             "broker": "Paper Trading Portfolio",
@@ -998,12 +1059,22 @@ class PaperOMS:
             "realized_pnl": round(_float(realized_gross - fees), 2),
             "unrealized_pnl": round(_float(unrealized), 2),
             "total_pnl": round(_float(realized_gross - fees + unrealized), 2),
+            "daily_realized_pnl": round(_float(daily_realized_net), 2),
+            "daily_pnl_pct": round(
+                _float(daily_realized_net / initial * Decimal("100")) if initial > ZERO else 0.0,
+                4,
+            ),
             "fees_total": round(_float(fees), 6),
             "closed_trades_count": sum(1 for p in positions if p.status == "closed"),
             "open_trades_count": open_count,
             "pending_orders_count": pending_count,
             "oms_authority": "postgresql",
         }
+
+    def quote_snapshot(self, symbol: str) -> dict[str, Any]:
+        """Return only a fresh executable quote; callers must fail closed otherwise."""
+        quote = self._current_quote(symbol, fallback_price=None)
+        return dict(quote) if quote else {}
 
     async def reset_account(
         self,
@@ -1067,14 +1138,6 @@ class PaperOMS:
         if price <= ZERO:
             return []
         changed_ids: set[str] = set()
-        candidate_symbols = {
-            raw_symbol,
-            raw_symbol.upper(),
-            raw_symbol.lower(),
-            symbol_key,
-            symbol_key.lower(),
-            symbol_key.upper(),
-        }
         async with self._session_factory() as session:
             try:
                 account = await self._active_account(session, lock=True)
@@ -1085,12 +1148,11 @@ class PaperOMS:
                         PaperOMSOrder.account_id == account.id,
                         PaperOMSOrder.status.in_(ACTIVE_ORDER_STATES),
                         PaperOMSOrder.position_effect == "open",
-                        PaperOMSPosition.symbol.in_(candidate_symbols),
                     )
                 )).all()
                 for order_id, position_id in order_refs:
                     position = await session.get(PaperOMSPosition, position_id, with_for_update=True)
-                    if position is None:
+                    if position is None or _norm_symbol(position.symbol) != symbol_key:
                         continue
                     order = await session.get(PaperOMSOrder, order_id, with_for_update=True)
                     if order is None or order.status not in ACTIVE_ORDER_STATES:
@@ -1127,11 +1189,12 @@ class PaperOMS:
                     .where(
                         PaperOMSPosition.account_id == account.id,
                         PaperOMSPosition.status == "open",
-                        PaperOMSPosition.symbol.in_(candidate_symbols),
                     )
                     .with_for_update()
                 )).scalars().all()
                 for position in positions:
+                    if _norm_symbol(position.symbol) != symbol_key:
+                        continue
                     if _decimal(position.remaining_quantity) <= ZERO:
                         continue
                     bid = _decimal(quote.get("bid", price))
@@ -1192,22 +1255,21 @@ class PaperOMS:
                         close_reason=reason,
                         submitted_at=_utcnow(),
                         updated_at=_utcnow(),
-                        source_payload={"phase": 6, "protective": True, "reduce_only": True},
+                        source_payload={
+                            "phase": 6,
+                            "protective": True,
+                            "reduce_only": True,
+                            "trigger_price": float(trigger_price),
+                        },
                     )
                     session.add(exit_order)
                     await session.flush()
-                    protective_quote = dict(quote)
-                    protective_quote["price"] = float(trigger_price)
-                    if position.direction == "long":
-                        protective_quote["bid"] = float(trigger_price)
-                    else:
-                        protective_quote["ask"] = float(trigger_price)
                     self._apply_fill(
                         session,
                         position,
                         exit_order,
                         _decimal(position.remaining_quantity),
-                        protective_quote,
+                        quote,
                         execution_key=f"protect:{exit_order.id}:{quote.get('sequence') or int(_utcnow().timestamp()*1000)}",
                         liquidity="taker",
                     )
@@ -1256,6 +1318,9 @@ class PaperOMS:
         stage = str(position.protection_stage or "initial")
         note = ""
 
+        source_payload = dict(position.source_payload or {})
+        is_trending_regime = str(source_payload.get("market_regime", "") or "").lower() == "trending"
+
         if position.trailing_stop and r_multiple >= Decimal("2.5"):
             candidate = (
                 extreme - risk * Decimal("0.8")
@@ -1279,11 +1344,9 @@ class PaperOMS:
                 else entry - risk * Decimal("0.6")
             )
             stage = "trailing_1_5r"
-            note = "Trailing tier 1.5R: locked +0.6R"
-        elif position.auto_be and r_multiple >= _decimal(cfg.paper_oms_auto_be_trigger_r):
-            # Entry already includes entry-side spread/slippage. Move the stop
-            # far enough to offset accumulated entry fee plus modeled exit fee
-            # and adverse exit slippage, not merely to the nominal entry.
+            note = "Trailing tier 1.5R: locked +0.6R (Structure-adaptive)"
+        elif position.auto_be and not is_trending_regime and r_multiple >= _decimal(cfg.paper_oms_auto_be_trigger_r):
+            # In ranging/volatile regimes: tight BE at +1.0R
             opened = max(_decimal(position.opened_quantity), EPSILON)
             entry_fee_per_unit = _decimal(position.fees_total) / opened
             fee_rate = _decimal(cfg.paper_oms_fee_bps) / Decimal("10000")

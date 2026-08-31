@@ -8,7 +8,7 @@ from app.core.security import is_valid_api_key, is_securely_configured
 from app.core.config import get_settings, update_runtime_setting, reload_settings
 from app.core.json_store import update_json
 from app.core.live_session import LiveSessionManager
-from app.engines.ai_engine import AIEngine
+from app.engines.ai_engine import AIEngine, CHAT_OUTPUT_TOKEN_BUDGET
 from app.api import ws
 
 
@@ -71,6 +71,61 @@ def test_ai_engine_scrubs_secrets_in_errors():
     ))
     assert res["ok"] is False
     assert custom_secret not in res.get("error", "")
+
+
+def test_ai_engine_recognizes_ollama_when_endpoint_has_v1_suffix():
+    url, native = AIEngine._local_chat_target(
+        "http://host.docker.internal:11434/v1"
+    )
+
+    assert native is True
+    assert url == "http://host.docker.internal:11434/api/chat"
+
+
+def test_ai_engine_normalizes_lm_studio_chat_endpoint():
+    url, native = AIEngine._local_chat_target("http://localhost:1234")
+
+    assert native is False
+    assert url == "http://localhost:1234/v1/chat/completions"
+
+
+@pytest.mark.anyio
+async def test_ai_engine_gives_ollama_enough_visible_output_tokens(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"message": {"content": "complete response"}, "done_reason": "stop"}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, json):
+            captured["url"] = url
+            captured["payload"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("app.engines.ai_engine.httpx.AsyncClient", FakeClient)
+    response = await AIEngine()._call_local_custom(
+        [{"role": "user", "content": "test"}],
+        "http://host.docker.internal:11434/v1",
+        "gpt-oss:120b-cloud",
+    )
+
+    assert response == "complete response"
+    assert captured["url"].endswith("/api/chat")
+    assert captured["payload"]["options"]["num_predict"] == CHAT_OUTPUT_TOKEN_BUDGET
+    assert CHAT_OUTPUT_TOKEN_BUDGET >= 2048
 
 
 def test_ws_remove_client_cleans_all_registries():

@@ -320,47 +320,41 @@ class MarketRegimeEngine:
         efficiency = abs(net_change) / travelled if travelled > 0 else 0.0
         path_direction = "bullish" if net_change > 0 else "bearish" if net_change < 0 else "neutral"
 
-        votes = [path_direction]
-        for value in (getattr(signal, "bias", "neutral"), getattr(signal, "htf_bias", "neutral")):
-            if value in ("bullish", "bearish"):
-                votes.append(value)
-        if getattr(signal, "squeeze_data_valid", False):
-            momentum = float(getattr(signal, "squeeze_momentum", 0.0))
-            if momentum > 0:
-                votes.append("bullish")
-            elif momentum < 0:
-                votes.append("bearish")
-        bullish_votes = votes.count("bullish")
-        bearish_votes = votes.count("bearish")
-        direction = "bullish" if bullish_votes > bearish_votes else "bearish" if bearish_votes > bullish_votes else path_direction
-        directional_votes = max(bullish_votes, bearish_votes)
-        alignment = directional_votes / max(1, bullish_votes + bearish_votes)
+        # Regime is an environment classifier, not a second vote on the trade
+        # signal. Direction and persistence come only from the observed path so
+        # SMC/squeeze evidence is not counted twice downstream.
+        direction = path_direction
+        returns = path.diff().dropna()
+        directional_moves = int((returns != 0).sum())
+        bullish_moves = int((returns > 0).sum())
+        bearish_moves = int((returns < 0).sum())
+        persistence = (
+            max(bullish_moves, bearish_moves) / directional_moves
+            if directional_moves > 0
+            else 0.0
+        )
 
         evidence = [
             f"Path efficiency {efficiency:.2f}",
             f"ATR {current_atr_pct:.2f}% ({atr_ratio:.2f}x baseline)",
             f"Volatility percentile {volatility_percentile:.0f}",
-            f"Directional evidence {direction} ({directional_votes}/{max(1, bullish_votes + bearish_votes)} votes)",
+            f"Price-path direction {direction} with {persistence:.0%} persistence",
         ]
 
-        squeeze_on = (
-            getattr(signal, "squeeze_data_valid", False)
-            and getattr(signal, "squeeze_status", "no_squeeze") == "squeeze_on"
-        )
+        is_compression = atr_ratio <= 0.80 and volatility_percentile <= 30.0
         is_volatile = (
             atr_ratio >= float(params["volatile_atr_ratio"])
             or volatility_percentile >= float(params["volatile_percentile"])
         )
         is_trending = (
             efficiency >= float(params["trend_efficiency_min"])
-            and directional_votes >= 2
-            and alignment >= 0.60
+            and persistence >= 0.60
         )
 
-        if squeeze_on and not is_volatile:
+        if is_compression and not is_volatile:
             regime = "compression"
             confidence = min(99.0, 65.0 + (1.0 - min(atr_ratio, 1.0)) * 25.0)
-            evidence.append("Existing Squeeze layer reports active compression")
+            evidence.append("ATR contraction and low volatility percentile confirm compression")
         elif is_volatile:
             regime = "volatile"
             ratio_score = min(1.0, atr_ratio / float(params["volatile_atr_ratio"]))
@@ -369,11 +363,11 @@ class MarketRegimeEngine:
             evidence.append("Current volatility exceeds the configured expansion boundary")
         elif is_trending:
             regime = "trending"
-            confidence = min(99.0, (efficiency * 0.65 + alignment * 0.35) * 100.0)
-            evidence.append("Price-path efficiency and directional evidence are aligned")
+            confidence = min(99.0, (efficiency * 0.65 + persistence * 0.35) * 100.0)
+            evidence.append("Price-path efficiency and directional persistence are aligned")
         else:
             regime = "ranging"
-            confidence = min(95.0, max(50.0, (1.0 - efficiency) * 80.0 + (1.0 - alignment) * 20.0))
+            confidence = min(95.0, max(50.0, (1.0 - efficiency) * 80.0 + (1.0 - persistence) * 20.0))
             evidence.append("Directional efficiency is below the trend boundary")
 
         metrics = {
@@ -381,7 +375,7 @@ class MarketRegimeEngine:
             "atr_ratio": round(atr_ratio, 4),
             "volatility_percentile": round(volatility_percentile, 1),
             "path_efficiency": round(efficiency, 4),
-            "directional_alignment": round(alignment, 4),
+            "directional_persistence": round(persistence, 4),
         }
         return self._result(active, regime, direction, confidence, True, metrics, evidence)
 

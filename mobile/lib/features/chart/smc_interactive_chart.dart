@@ -5,6 +5,38 @@ import 'package:candlesticks/candlesticks.dart';
 import 'package:intl/intl.dart' hide TextDirection;
 import '../../app/theme.dart';
 
+List<Map<String, dynamic>> selectCleanSmcZones(
+  dynamic rawZones,
+  dynamic fallbackZone,
+  double currentPrice,
+) {
+  final zones = <Map<String, dynamic>>[];
+  if (rawZones is List) {
+    for (final item in rawZones) {
+      if (item is Map && item['mitigated'] != true) {
+        zones.add(Map<String, dynamic>.from(item));
+      }
+    }
+  }
+  if (zones.isEmpty &&
+      fallbackZone is Map &&
+      fallbackZone['mitigated'] != true) {
+    zones.add(Map<String, dynamic>.from(fallbackZone));
+  }
+  double distance(Map<String, dynamic> zone) {
+    final top = (zone['top'] as num?)?.toDouble() ?? double.infinity;
+    final bottom = (zone['bottom'] as num?)?.toDouble() ?? double.infinity;
+    if (!top.isFinite || !bottom.isFinite) return double.infinity;
+    final high = math.max(top, bottom);
+    final low = math.min(top, bottom);
+    if (currentPrice >= low && currentPrice <= high) return 0;
+    return math.min((currentPrice - low).abs(), (currentPrice - high).abs());
+  }
+
+  zones.sort((left, right) => distance(left).compareTo(distance(right)));
+  return zones.take(1).toList(growable: false);
+}
+
 class SMCInteractiveChart extends StatefulWidget {
   final List<Candle> candles;
   final Map<String, dynamic>? smcData;
@@ -316,32 +348,11 @@ class _SMCUnifiedPainter extends CustomPainter {
     double minPrice = visibleCandles.map((c) => c.low).reduce(math.min);
     double maxPrice = visibleCandles.map((c) => c.high).reduce(math.max);
 
-    // Expand price range to include current price and SMC key levels if visible
+    // Auto-fit follows visible candles only. Distant historical SMC zones must
+    // never compress candle bodies just to force an old level onto the screen.
     if (currentPrice > 0) {
       minPrice = math.min(minPrice, currentPrice);
       maxPrice = math.max(maxPrice, currentPrice);
-    }
-
-    if (showOverlay && smcData != null) {
-      final ob = smcData!['order_block'] as Map<String, dynamic>?;
-      if (ob != null) {
-        final obTop = (ob['top'] as num?)?.toDouble();
-        final obBottom = (ob['bottom'] as num?)?.toDouble();
-        if (obTop != null) maxPrice = math.max(maxPrice, obTop);
-        if (obBottom != null) minPrice = math.min(minPrice, obBottom);
-      }
-      final fvg = smcData!['fvg'] as Map<String, dynamic>?;
-      if (fvg != null) {
-        final fvgTop = (fvg['top'] as num?)?.toDouble();
-        final fvgBottom = (fvg['bottom'] as num?)?.toDouble();
-        if (fvgTop != null) maxPrice = math.max(maxPrice, fvgTop);
-        if (fvgBottom != null) minPrice = math.min(minPrice, fvgBottom);
-      }
-      final eq = (smcData!['equilibrium'] as num?)?.toDouble();
-      if (eq != null) {
-        maxPrice = math.max(maxPrice, eq);
-        minPrice = math.min(minPrice, eq);
-      }
     }
 
     // Apply user vertical price scale multiplier & vertical pan offset
@@ -375,6 +386,27 @@ class _SMCUnifiedPainter extends CustomPainter {
     double candleIndexToX(int index) {
       return chartWidth - rightPadding - (index * candleWidth) + scrollOffset;
     }
+
+    final candleIndexByTime = <int, int>{
+      for (int i = 0; i < candles.length; i++)
+        candles[i].date.toUtc().millisecondsSinceEpoch: i,
+    };
+
+    int? candleIndexForTime(dynamic rawTime) {
+      if (rawTime == null) return null;
+      final parsed = DateTime.tryParse(rawTime.toString());
+      if (parsed == null) return null;
+      return candleIndexByTime[parsed.toUtc().millisecondsSinceEpoch];
+    }
+
+    double zoneStartX(dynamic rawTime) {
+      final index = candleIndexForTime(rawTime);
+      if (index == null) return 0.0;
+      return (candleIndexToX(index) - candleWidth * 0.5).clamp(0.0, chartWidth);
+    }
+
+    final latestCandleRight =
+        (candleIndexToX(0) + candleWidth * 0.5).clamp(0.0, chartWidth);
 
     // ------------------------------------------------------------------------
     // A. Draw Grid Lines & Price Axis Labels
@@ -413,83 +445,195 @@ class _SMCUnifiedPainter extends CustomPainter {
     // B. Draw SMC Overlays (Order Blocks, FVGs, EQ 50%) — SYNCHRONIZED TO PRICE
     // ------------------------------------------------------------------------
     if (showOverlay && smcData != null) {
-      // 1. Order Block (OB) Box
-      final ob = smcData!['order_block'] as Map<String, dynamic>?;
-      if (ob != null) {
+      canvas.save();
+      canvas.clipRect(Rect.fromLTWH(0, 0, chartWidth, chartHeight));
+
+      // 1. Draw Order Blocks (OB) - Multi-block support
+      final obList = selectCleanSmcZones(
+          smcData!['order_blocks'], smcData!['order_block'], currentPrice);
+
+      for (final ob in obList) {
         final obTop = (ob['top'] as num?)?.toDouble();
         final obBottom = (ob['bottom'] as num?)?.toDouble();
         final isBullish =
             (ob['direction'] as String? ?? 'bullish') == 'bullish';
+        final isSwing = (ob['source'] as String? ?? 'swing') == 'swing';
 
         if (obTop != null && obBottom != null) {
           final yTop = priceToY(obTop);
           final yBottom = priceToY(obBottom);
           final boxY = math.min(yTop, yBottom);
-          final boxH = (yTop - yBottom).abs().clamp(6.0, chartHeight);
+          final boxH = (yTop - yBottom).abs().clamp(5.0, chartHeight);
 
-          final obColor =
-              isBullish ? const Color(0xFF00C087) : const Color(0xFFFF6B6B);
-          final rect = Rect.fromLTWH(0, boxY, chartWidth, boxH);
+          final obColor = isBullish
+              ? (isSwing ? const Color(0xFF1848CC) : const Color(0xFF3179F5))
+              : (isSwing ? const Color(0xFFB22833) : const Color(0xFFF77C80));
+          final naturalBoxX = zoneStartX(ob['timestamp']);
+          final boxX =
+              math.max(naturalBoxX, latestCandleRight - chartWidth * 0.55);
+          final boxRight = math.max(boxX, latestCandleRight);
+          final rect = Rect.fromLTWH(boxX, boxY, boxRight - boxX, boxH);
 
           canvas.drawRect(
-              rect, Paint()..color = obColor.withValues(alpha: 0.18));
+              rect, Paint()..color = obColor.withValues(alpha: 0.12));
           final obBorder = Paint()
-            ..color = obColor.withValues(alpha: 0.8)
-            ..strokeWidth = 1.2
+            ..color = obColor.withValues(alpha: 0.85)
+            ..strokeWidth = isSwing ? 1.4 : 1.0
             ..style = PaintingStyle.stroke;
-          canvas.drawLine(Offset(0, boxY), Offset(chartWidth, boxY), obBorder);
-          canvas.drawLine(Offset(0, boxY + boxH),
-              Offset(chartWidth, boxY + boxH), obBorder);
+          canvas.drawLine(Offset(boxX, boxY), Offset(boxRight, boxY), obBorder);
+          canvas.drawLine(Offset(boxX, boxY + boxH),
+              Offset(boxRight, boxY + boxH), obBorder);
 
-          _drawPillTag(
-            canvas,
-            text: isBullish
-                ? '🟢 BULLISH OB [${obBottom.toStringAsFixed(1)} - ${obTop.toStringAsFixed(1)}]'
-                : '🔴 BEARISH OB [${obBottom.toStringAsFixed(1)} - ${obTop.toStringAsFixed(1)}]',
-            offset: Offset(8, boxY + 2),
-            bgColor: obColor.withValues(alpha: 0.85),
-            textColor: Colors.black,
-          );
+          // LuxAlgo renders order blocks as zones; repeating a pill on every
+          // active block obscures the candles on compact mobile charts.
         }
       }
 
-      // 2. Fair Value Gap (FVG) Box
-      final fvg = smcData!['fvg'] as Map<String, dynamic>?;
-      if (fvg != null) {
+      // 2. Draw Fair Value Gaps (FVG)
+      final fvgList =
+          selectCleanSmcZones(smcData!['fvgs'], smcData!['fvg'], currentPrice);
+
+      for (final fvg in fvgList) {
         final fvgTop = (fvg['top'] as num?)?.toDouble();
         final fvgBottom = (fvg['bottom'] as num?)?.toDouble();
+        final isBullish =
+            (fvg['direction'] as String? ?? 'bullish') == 'bullish';
 
         if (fvgTop != null && fvgBottom != null) {
           final yTop = priceToY(fvgTop);
           final yBottom = priceToY(fvgBottom);
           final boxY = math.min(yTop, yBottom);
-          final boxH = (yTop - yBottom).abs().clamp(6.0, chartHeight);
+          final boxH = (yTop - yBottom).abs().clamp(5.0, chartHeight);
 
-          const fvgColor = Color(0xFF9B59B6);
-          final rect = Rect.fromLTWH(0, boxY, chartWidth, boxH);
+          final fvgColor =
+              isBullish ? const Color(0xFF00FF68) : const Color(0xFFFF0008);
+          final naturalBoxX = zoneStartX(fvg['timestamp']);
+          final boxX =
+              math.max(naturalBoxX, latestCandleRight - chartWidth * 0.45);
+          final boxRight = math.max(boxX, latestCandleRight);
+          final rect = Rect.fromLTWH(boxX, boxY, boxRight - boxX, boxH);
 
           canvas.drawRect(
-              rect, Paint()..color = fvgColor.withValues(alpha: 0.16));
+              rect, Paint()..color = fvgColor.withValues(alpha: 0.08));
           final fvgBorder = Paint()
-            ..color = fvgColor.withValues(alpha: 0.75)
-            ..strokeWidth = 1.2
+            ..color = fvgColor.withValues(alpha: 0.7)
+            ..strokeWidth = 1.0
             ..style = PaintingStyle.stroke;
-          canvas.drawLine(Offset(0, boxY), Offset(chartWidth, boxY), fvgBorder);
-          canvas.drawLine(Offset(0, boxY + boxH),
-              Offset(chartWidth, boxY + boxH), fvgBorder);
+          canvas.drawLine(
+              Offset(boxX, boxY), Offset(boxRight, boxY), fvgBorder);
+          canvas.drawLine(Offset(boxX, boxY + boxH),
+              Offset(boxRight, boxY + boxH), fvgBorder);
 
-          _drawPillTag(
-            canvas,
-            text:
-                '⚡ FVG IMBALANCE [${fvgBottom.toStringAsFixed(1)} - ${fvgTop.toStringAsFixed(1)}]',
-            offset: Offset(8, boxY + 2),
-            bgColor: fvgColor.withValues(alpha: 0.85),
-            textColor: Colors.white,
-          );
+          // FVG bounds remain readable from the price axis and summary chips;
+          // omit per-zone pills to preserve the candle bodies underneath.
         }
       }
 
-      // 3. Equilibrium Line (EQ 50%)
+      // 3. Draw exactly one latest structure. Swing takes precedence; an
+      // internal structure is a fallback only when no swing event is present.
+      final rawSwingStructs =
+          smcData!['swing_structures'] as List<dynamic>? ?? [];
+      final rawInternalStructs =
+          smcData!['internal_structures'] as List<dynamic>? ?? [];
+      final structureSource =
+          rawSwingStructs.isNotEmpty ? rawSwingStructs : rawInternalStructs;
+      final structures = structureSource
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList()
+        ..sort((left, right) => ((right['break_index'] as num?)?.toInt() ?? -1)
+            .compareTo((left['break_index'] as num?)?.toInt() ?? -1));
+      if (structures.isNotEmpty) {
+        final item = structures.first;
+        final level = (item['level'] as num?)?.toDouble();
+        final tag = item['tag']?.toString() ?? 'BOS';
+        final isBullish =
+            (item['direction']?.toString() ?? 'bullish') == 'bullish';
+        final pivotIndex = candleIndexForTime(item['pivot_time']);
+        final breakIndex = candleIndexForTime(item['break_time']);
+        if (level != null && pivotIndex != null && breakIndex != null) {
+          final y = priceToY(level);
+          if (y >= 0 && y <= chartHeight) {
+            final rawLeft = math.min(
+                candleIndexToX(pivotIndex), candleIndexToX(breakIndex));
+            final rawRight = math.max(
+                candleIndexToX(pivotIndex), candleIndexToX(breakIndex));
+            final lineLeft = rawLeft.clamp(0.0, chartWidth);
+            final lineRight = rawRight.clamp(0.0, chartWidth);
+            if (lineRight > lineLeft) {
+              final color = isBullish ? AppColors.bullish : AppColors.bearish;
+              canvas.drawLine(
+                Offset(lineLeft, y),
+                Offset(lineRight, y),
+                Paint()
+                  ..color = color.withValues(alpha: 0.75)
+                  ..strokeWidth = 1.1,
+              );
+              _drawPillTag(
+                canvas,
+                text: tag,
+                offset: Offset(
+                    (lineRight - 42).clamp(0.0, chartWidth - 44), y - 13),
+                bgColor: const Color(0xFF111722).withValues(alpha: 0.9),
+                textColor: color,
+                borderColor: color.withValues(alpha: 0.65),
+              );
+            }
+          }
+        }
+      }
+
+      // 4. Context rays are short, recent-only guides rather than full-width
+      // lines through every candle.
+      final contextRayLeft =
+          math.max(0.0, latestCandleRight - chartWidth * 0.42);
+      final swHigh = smcData!['strong_weak_high'] as Map<String, dynamic>?;
+      if (swHigh != null) {
+        final price = (swHigh['price'] as num?)?.toDouble();
+        final label = swHigh['label']?.toString() ?? 'High';
+        if (price != null) {
+          final y = priceToY(price);
+          if (y >= 0 && y <= chartHeight) {
+            final p = Paint()
+              ..color = AppColors.bearish.withValues(alpha: 0.5)
+              ..strokeWidth = 0.8;
+            _drawDashedLine(canvas, Offset(contextRayLeft, y),
+                Offset(latestCandleRight, y), p);
+            _drawPillTag(
+              canvas,
+              text: '$label: ${price.toStringAsFixed(1)}',
+              offset: Offset(contextRayLeft + 4, y - 14),
+              bgColor: const Color(0xFF251A1E),
+              textColor: AppColors.bearish,
+            );
+          }
+        }
+      }
+
+      final swLow = smcData!['strong_weak_low'] as Map<String, dynamic>?;
+      if (swLow != null) {
+        final price = (swLow['price'] as num?)?.toDouble();
+        final label = swLow['label']?.toString() ?? 'Low';
+        if (price != null) {
+          final y = priceToY(price);
+          if (y >= 0 && y <= chartHeight) {
+            final p = Paint()
+              ..color = AppColors.bullish.withValues(alpha: 0.5)
+              ..strokeWidth = 0.8;
+            _drawDashedLine(canvas, Offset(contextRayLeft, y),
+                Offset(latestCandleRight, y), p);
+            _drawPillTag(
+              canvas,
+              text: '$label: ${price.toStringAsFixed(1)}',
+              offset: Offset(contextRayLeft + 4, y + 2),
+              bgColor: const Color(0xFF1A251E),
+              textColor: AppColors.bullish,
+            );
+          }
+        }
+      }
+
+      // 5. Equilibrium context ray
       final eq = (smcData!['equilibrium'] as num?)?.toDouble();
       if (eq != null) {
         final y = priceToY(eq);
@@ -498,18 +642,22 @@ class _SMCUnifiedPainter extends CustomPainter {
             ..color = const Color(0xFFFFD700)
             ..strokeWidth = 1.0
             ..style = PaintingStyle.stroke;
-          _drawDashedLine(canvas, Offset(0, y), Offset(chartWidth, y), eqPaint);
+          _drawDashedLine(canvas, Offset(contextRayLeft, y),
+              Offset(latestCandleRight, y), eqPaint);
 
           _drawPillTag(
             canvas,
             text: '⚖️ EQ 50% (${eq.toStringAsFixed(1)})',
-            offset: Offset(chartWidth - 140, y - 16),
+            offset: Offset(
+                (latestCandleRight - 112).clamp(0.0, chartWidth - 112), y - 16),
             bgColor: const Color(0xFF332B00),
             textColor: const Color(0xFFFFD700),
             borderColor: const Color(0xFFFFD700),
           );
         }
       }
+
+      canvas.restore();
     }
 
     // ------------------------------------------------------------------------

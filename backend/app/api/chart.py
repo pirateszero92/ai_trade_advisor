@@ -5,7 +5,7 @@ Returns OHLCV candle data and SMC overlay data for the mobile chart widget.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -14,7 +14,7 @@ from app.engines.market_data import MarketDataEngine
 from app.engines.smc_engine import SMCEngine
 from app.engines.strategy_engine import StrategyEngine
 from app.services.analysis_snapshot import analysis_snapshots
-from app.services.mtf_analysis import mtf_analyses
+from app.services.execution_analysis import execution_analyses
 
 router = APIRouter()
 _market = MarketDataEngine()
@@ -23,6 +23,65 @@ _strategy = StrategyEngine()
 
 Timeframe = Literal["1m", "2m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"]
 Exchange = Literal["binance", "bybit", "innovestx", "mt5", "alpaca", "yfinance"]
+
+
+def _serialize_candle(idx, row) -> dict:
+    candle = {
+        "t": idx.isoformat(),
+        "o": float(row["open"]),
+        "h": float(row["high"]),
+        "l": float(row["low"]),
+        "c": float(row["close"]),
+        "v": float(row["volume"]),
+    }
+    for field in ("buy_volume", "sell_volume", "volume_delta", "cvd"):
+        if field in row and row[field] is not None:
+            candle[field] = float(row[field])
+    if "flow_source" in row and isinstance(row["flow_source"], str):
+        candle["flow_source"] = row["flow_source"]
+    return candle
+
+
+def _clean_smc_overlay(signal: Any) -> dict[str, Any]:
+    """Build a deliberately sparse chart overlay from the full SMC state.
+
+    Decision logic keeps the complete structure history. The mobile chart gets
+    only the primary active zones and newest structure event so analysis does
+    not turn into dozens of overlapping horizontal lines.
+    """
+    payload = signal.to_dict()
+
+    primary_ob = payload.get("order_block")
+    payload["order_blocks"] = (
+        [primary_ob]
+        if isinstance(primary_ob, dict) and not primary_ob.get("mitigated", False)
+        else []
+    )
+
+    primary_fvg = payload.get("fvg")
+    payload["fvgs"] = (
+        [primary_fvg]
+        if isinstance(primary_fvg, dict) and not primary_fvg.get("mitigated", False)
+        else []
+    )
+
+    swing = payload.get("swing_structures") or []
+    internal = payload.get("internal_structures") or []
+    candidates = [item for item in swing if isinstance(item, dict)]
+    if not candidates:
+        candidates = [item for item in internal if isinstance(item, dict)]
+    candidates.sort(key=lambda item: int(item.get("break_index", -1)), reverse=True)
+    payload["swing_structures"] = candidates[:1]
+    payload["internal_structures"] = []
+    payload["equal_highs"] = list(payload.get("equal_highs") or [])[-1:]
+    payload["equal_lows"] = list(payload.get("equal_lows") or [])[-1:]
+    payload["overlay_policy"] = "clean_v1"
+    payload["overlay_counts"] = {
+        "order_blocks": len(payload["order_blocks"]),
+        "fvgs": len(payload["fvgs"]),
+        "structures": len(payload["swing_structures"]),
+    }
+    return payload
 
 
 @router.get("/ticker")
@@ -56,22 +115,7 @@ async def get_ohlcv(
     if df.empty:
         raise HTTPException(status_code=502, detail="No market data available")
 
-    candles = []
-    for idx, row in df.iterrows():
-        candle = {
-            "t": idx.isoformat(),
-            "o": float(row["open"]),
-            "h": float(row["high"]),
-            "l": float(row["low"]),
-            "c": float(row["close"]),
-            "v": float(row["volume"]),
-        }
-        for field in ("buy_volume", "sell_volume", "volume_delta", "cvd"):
-            if field in row and row[field] is not None:
-                candle[field] = float(row[field])
-        if "flow_source" in row and isinstance(row["flow_source"], str):
-            candle["flow_source"] = row["flow_source"]
-        candles.append(candle)
+    candles = [_serialize_candle(idx, row) for idx, row in df.iterrows()]
     return {"symbol": symbol, "timeframe": timeframe, "candles": candles}
 
 
@@ -109,23 +153,53 @@ async def get_smc_overlay(
         effective_entry_mode = _get_cached_runtime_settings().get("entry_mode", "limit")
     else:
         effective_entry_mode = entry_mode
-    effective_htf_bias = snapshot.htf_bias if htf_bias == "neutral" else htf_bias
+    # HTF is display-only and cannot influence chart scoring or direction.
+    effective_htf_bias = "neutral"
+
+    # Analysis remains closed-candle-only, while the chart receives the
+    # exchange's distinct forming candle. Never merge a same-timestamp row
+    # into the snapshot: that would repaint a bar already used by SMC.
+    forming_candle = None
+    try:
+        chart_tail = await _market.get_ohlcv(
+            symbol=symbol,
+            timeframe=timeframe,
+            market_type=market_type,
+            exchange=exchange,
+            limit=5,
+            include_forming=True,
+        )
+        if not chart_tail.empty:
+            newer = chart_tail.loc[chart_tail.index > snapshot.ltf.index[-1]]
+            if not newer.empty:
+                forming_candle = _serialize_candle(newer.index[-1], newer.iloc[-1])
+    except (ValueError, OSError):
+        # A forming candle is presentation-only; its absence must not make a
+        # valid closed-candle analysis unavailable.
+        forming_candle = None
+
     overlay_signal = _smc.analyze(
         snapshot.ltf.copy(), symbol, timeframe, effective_htf_bias,
         entry_mode=effective_entry_mode,
     )
     try:
-        mtf = await mtf_analyses.get(
+        execution = await execution_analyses.get(
             symbol=symbol,
             market_type=market_type,
             exchange=exchange,
             entry_mode=effective_entry_mode,
         )
     except (ValueError, OSError) as exc:
-        raise HTTPException(status_code=502, detail=f"MTF analysis unavailable: {exc}") from exc
-    execution_signal = mtf.trigger_signal
-    strategy = mtf.strategy
-    direction = strategy.direction if mtf.actionable else "wait"
+        raise HTTPException(status_code=502, detail=f"Execution analysis unavailable: {exc}") from exc
+    execution_signal = execution.signal
+    if timeframe == execution.timeframe:
+        # The rendered 15m structures must be the exact structures evaluated
+        # by the execution decision, not a second engine with default lengths.
+        overlay_signal = execution_signal
+    strategy = execution.strategy
+    is_actionable = strategy.approved
+    direction = strategy.direction if is_actionable else "wait"
+
     entry = float(execution_signal.entry or execution_signal.current_price or 0.0)
     sl = float(execution_signal.stop_loss or 0.0)
     tp = float(execution_signal.take_profit or 0.0)
@@ -139,33 +213,19 @@ async def get_smc_overlay(
         for sp in overlay_signal.swing_lows
     ]
 
-    candles = []
-    for idx, row in snapshot.ltf.iterrows():
-        candle = {
-            "t": idx.isoformat(),
-            "o": float(row["open"]),
-            "h": float(row["high"]),
-            "l": float(row["low"]),
-            "c": float(row["close"]),
-            "v": float(row["volume"]),
-        }
-        for field in ("buy_volume", "sell_volume", "volume_delta", "cvd"):
-            if field in row and row[field] is not None:
-                candle[field] = float(row[field])
-        if "flow_source" in row and isinstance(row["flow_source"], str):
-            candle["flow_source"] = row["flow_source"]
-        candles.append(candle)
+    candles = [_serialize_candle(idx, row) for idx, row in snapshot.ltf.iterrows()]
+    clean_overlay = _clean_smc_overlay(overlay_signal)
 
     return {
         "symbol": symbol,
         "timeframe": timeframe,
         "htf_timeframe": snapshot.htf_timeframe,
         "analysis_snapshot": snapshot.metadata(),
-        "mtf_analysis_snapshot": mtf.metadata(),
-        "mtf": mtf.to_dict(),
+        "decision_authority": "execution_timeframe_only",
         "candles": candles,
+        "forming_candle": forming_candle,
         "bias": overlay_signal.bias,
-        "htf_bias": mtf.stages["bias"].signal.bias,
+        "htf_bias": "neutral",
         "confluence": execution_signal.confluence_score,
         "indicator_decision": execution_signal.indicator_decision,
         "market_regime": execution_signal.market_regime,
@@ -175,10 +235,18 @@ async def get_smc_overlay(
         "choch": overlay_signal.choch,
         "swing_highs": swing_highs,
         "swing_lows": swing_lows,
-        "order_block": overlay_signal.to_dict()["order_block"],
-        "fvg": overlay_signal.to_dict()["fvg"],
-        "equal_highs": overlay_signal.equal_highs,
-        "equal_lows": overlay_signal.equal_lows,
+        "order_block": clean_overlay["order_block"],
+        "fvg": clean_overlay["fvg"],
+        "order_blocks": clean_overlay["order_blocks"],
+        "fvgs": clean_overlay["fvgs"],
+        "swing_structures": clean_overlay["swing_structures"],
+        "internal_structures": clean_overlay["internal_structures"],
+        "strong_weak_high": overlay_signal.strong_weak_high,
+        "strong_weak_low": overlay_signal.strong_weak_low,
+        "equal_highs": clean_overlay["equal_highs"],
+        "equal_lows": clean_overlay["equal_lows"],
+        "overlay_policy": clean_overlay["overlay_policy"],
+        "overlay_counts": clean_overlay["overlay_counts"],
         "in_discount": overlay_signal.in_discount,
         "in_premium": overlay_signal.in_premium,
         "equilibrium": overlay_signal.equilibrium,
@@ -189,8 +257,8 @@ async def get_smc_overlay(
         "direction": direction,
         "setup_direction": strategy.setup_direction,
         "strategy": strategy.to_dict(),
-        "actionable": mtf.actionable,
-        "execution_timeframe": mtf.stages["trigger"].timeframe,
+        "actionable": is_actionable,
+        "execution_timeframe": execution.timeframe,
         "entry": round(entry, 2),
         "stop_loss": round(sl, 2),
         "take_profit": round(tp, 2),

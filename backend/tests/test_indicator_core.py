@@ -12,7 +12,7 @@ from app.engines.indicator_core import (
     validate_indicator_core_config,
 )
 from app.engines.indicators import AdvancedIndicatorsEngine
-from app.engines.smc_engine import SMCSignal, Zone
+from app.engines.smc_engine import SMCSignal, StructureBreak, Zone
 from app.engines.strategy_engine import DEFAULT_STRATEGY, StrategyEngine
 
 
@@ -28,9 +28,21 @@ def _strong_long_signal() -> SMCSignal:
     signal.sweep_direction = "low"
     signal.in_discount = True
     signal.bos = True
+    signal.swing_structures = [
+        StructureBreak(
+            tag="BOS",
+            kind="swing",
+            direction="bullish",
+            level=99.0,
+            pivot_index=1,
+            break_index=2,
+        )
+    ]
     signal.risk_reward = 3.0
 
     signal.volume_data_valid = True
+    signal.volume_quality = "exchange_aggressor"
+    signal.delta_source = "exchange_aggressor"
     signal.volume_delta = 1000.0
     signal.delta_ratio = 0.4
     signal.delta_absorption = True
@@ -186,3 +198,24 @@ def test_volume_delta_parameters_are_validated():
         AdvancedIndicatorsEngine.compute_volume_delta(
             frame, absorption_lookback=2
         )
+
+
+def test_opposing_structure_event_never_adds_smc_points():
+    aligned = _strong_long_signal()
+    opposing = deepcopy(aligned)
+    opposing.swing_structures = [
+        StructureBreak(
+            tag="CHoCH",
+            kind="swing",
+            direction="bearish",
+            level=99.0,
+            pivot_index=1,
+            break_index=3,
+        )
+    ]
+
+    aligned_layer = IndicatorDecisionCore().evaluate(aligned)["layers"][0]
+    opposing_layer = IndicatorDecisionCore().evaluate(opposing)["layers"][0]
+
+    assert aligned_layer["weighted_points"] == opposing_layer["weighted_points"] + 3
+    assert any("opposes" in item for item in opposing_layer["evidence"])

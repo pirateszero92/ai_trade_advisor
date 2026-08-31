@@ -8,6 +8,7 @@ void main() {
   test('application state starts in paper mode', () {
     const settings = SettingsState();
     expect(settings.isPaperMode, isTrue);
+    expect(settings.autoTradeEnabled, isFalse);
     expect(AppApi.hasActiveLiveSession, isFalse);
   });
 

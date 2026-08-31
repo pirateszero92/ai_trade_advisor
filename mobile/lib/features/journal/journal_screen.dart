@@ -1270,7 +1270,10 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
             <String>[];
     final stopRaw = t['initial_stop_loss'] ?? t['stop_loss'];
     final stopLoss = (stopRaw as num?)?.toDouble() ?? 0.0;
+    final currentStopLoss = (t['stop_loss'] as num?)?.toDouble() ?? stopLoss;
     final takeProfit = (t['take_profit'] as num?)?.toDouble() ?? 0.0;
+    final protectionStage =
+        (t['protection_stage']?.toString() ?? 'initial').toLowerCase();
     final riskDistance = (entry - stopLoss).abs();
     final plannedRr =
         riskDistance > 0 ? (takeProfit - entry).abs() / riskDistance : 0.0;
@@ -1291,6 +1294,8 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
       rr: plannedRr,
       date: date,
       currSym: currSym,
+      stopLoss: currentStopLoss,
+      protectionStage: protectionStage,
       aiReview: aiReview,
       executionRating: executionRating,
       lessons: lessons,
@@ -2614,7 +2619,9 @@ class _TradeCard extends StatelessWidget {
   final List<String> tags;
   final bool isClosing;
   final double entry, livePrice, closePrice, size, pnl, pnlUsd, rr;
+  final double stopLoss;
   final String currSym;
+  final String protectionStage;
   final VoidCallback onClose;
   final VoidCallback? onAudit;
 
@@ -2633,6 +2640,8 @@ class _TradeCard extends StatelessWidget {
     required this.status,
     required this.rr,
     required this.date,
+    required this.stopLoss,
+    this.protectionStage = 'initial',
     this.currSym = '\$',
     this.aiReview = '',
     this.executionRating = 0,
@@ -2792,6 +2801,71 @@ class _TradeCard extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  // Trailing Stop Status Badge (only for open positions with active protection)
+                  if (isOpen && stopLoss > 0) ...[
+                    const SizedBox(width: 6),
+                    Builder(builder: (ctx) {
+                      // Map protection_stage → badge label + color
+                      final stage = protectionStage;
+                      String stageLabel;
+                      Color stageColor;
+                      IconData stageIcon;
+                      if (stage == 'breakeven' || stage == 'be') {
+                        stageLabel = 'BE';
+                        stageColor = const Color(0xFF00E5FF);
+                        stageIcon = Icons.lock_outline;
+                      } else if (stage == 'trail_1' ||
+                          stage == 'trailing_1' ||
+                          stage == 'locked_0_6r') {
+                        stageLabel = 'TS +0.6R';
+                        stageColor = const Color(0xFF4CAF50);
+                        stageIcon = Icons.trending_up;
+                      } else if (stage == 'trail_2' ||
+                          stage == 'trailing_2' ||
+                          stage == 'locked_1_2r') {
+                        stageLabel = 'TS +1.2R';
+                        stageColor = const Color(0xFF8BC34A);
+                        stageIcon = Icons.trending_up;
+                      } else if (stage == 'trail_3' ||
+                          stage == 'trailing_3' ||
+                          stage == 'dynamic') {
+                        stageLabel = 'TS DYN';
+                        stageColor = const Color(0xFFCDDC39);
+                        stageIcon = Icons.auto_graph;
+                      } else {
+                        stageLabel = 'SL';
+                        stageColor = Colors.white38;
+                        stageIcon = Icons.shield_outlined;
+                      }
+                      final slStr = _formatPrice(stopLoss, symbol);
+                      return Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 5, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: stageColor.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(
+                              color: stageColor.withValues(alpha: 0.5),
+                              width: 0.7),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(stageIcon, size: 9, color: stageColor),
+                            const SizedBox(width: 3),
+                            Text(
+                              '$stageLabel \$$slStr',
+                              style: TextStyle(
+                                  fontSize: 9,
+                                  color: stageColor,
+                                  fontWeight: FontWeight.bold,
+                                  fontFamily: 'monospace'),
+                            ),
+                          ],
+                        ),
+                      );
+                    }),
+                  ],
                   const SizedBox(width: 8),
                   Text(date,
                       style:

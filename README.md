@@ -1,232 +1,385 @@
-# 🦅 AI Trade Advisor (Apex AI)
-### Institutional-Grade Smart Money Concepts (SMC) & Multi-Provider AI Trading Suite
+# AI Trade Advisor — Apex AI
 
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?style=flat&logo=FastAPI&logoColor=white)](https://fastapi.tiangolo.com)
-[![Flutter](https://img.shields.io/badge/Flutter-3.4+-02569B.svg?style=flat&logo=Flutter&logoColor=white)](https://flutter.dev)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?style=flat&logo=Docker&logoColor=white)](https://www.docker.com)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+ระบบวิเคราะห์และจำลองการเทรดแบบ full-stack สำหรับ Crypto, Forex, Gold และหุ้น พัฒนาด้วย FastAPI, Flutter, PostgreSQL, Redis และ Docker โดยใช้ Smart Money Concepts (SMC), Volume Delta/CVD และ Squeeze Momentum เป็นแกนตัดสินใจแบบ deterministic พร้อม Scenario Engine, Risk Engine, Paper OMS, AI Advisor, Evidence Replay และ Backtest Release Gate
 
-An advanced, full-stack trading intelligence platform designed for Crypto, Forex, Gold, and Thai/Global Equities. It combines a deterministic three-indicator decision core—**SMC Structure**, **Volume Delta/CVD**, and **Squeeze Momentum**—with adaptive market-regime policy, multi-provider AI analysis, isolated Paper execution, and a guarded Live gateway. Binance Spot market data and backend-to-client updates use WebSocket push; Forex, Gold and equities remain explicitly labelled polling fallbacks until a broker-native stream is configured.
+> สถานะล่าสุด: ระบบตัดสินใจใช้เฉพาะแท่งปิดของ **Execution Timeframe 15 นาที** (`execution_timeframe_only`) เท่านั้น ข้อมูล MTF/HTF ห้ามนำมาคำนวณคะแนน ยืนยัน setup กำหนดขนาดสถานะ หรือออกคำแนะนำเทรด
 
-> 📚 **Detailed User Guide Available**: See [`USER_MANUAL.md`](file:///c:/Users/arthit.n/git/ai_trade_advisor/USER_MANUAL.md) for full screen-by-screen walkthroughs, indicator interpretations, and risk management guidelines in Thai.
+> ระบบนี้เป็นเครื่องมือวิเคราะห์และ Paper Trading ไม่รับประกันผลกำไร Auto-Pilot ปิดเป็นค่าเริ่มต้น และ Live Trading ยังถูกป้องกันด้วย safety gate
 
-> 🛡️ **Current hardening roadmap**: [Phase 0 — Paper/Live Boundary](PHASE_0_PAPER_LIVE_BOUNDARY.md) ✅ · [Phase 1 — Indicator Decision Core](PHASE_1_INDICATOR_DECISION_CORE.md) ✅ · [Phase 2 — Market Regime & Adaptive Policy](PHASE_2_MARKET_REGIME_POLICY.md) ✅ · [Phase 3 — Evidence, Replay & Backtesting](PHASE_3_EVIDENCE_REPLAY_BACKTEST.md) 🧪 · [Phase 4 — True Real-Time Data](PHASE_4_TRUE_REALTIME_DATA.md) ✅ · [Phase 5 — Ordered MTF Hierarchy](PHASE_5_MTF_HIERARCHY.md) 🧪 · [Phase 6 — Paper OMS](PHASE_6_PAPER_OMS.md) ✅
+## Technology Stack
 
-## 🗺️ Production Hardening Roadmap
+| Layer | Technology |
+| --- | --- |
+| Client | Flutter 3 / Dart, Riverpod, Dio, GoRouter, WebSocket |
+| API | Python 3.12, FastAPI, Pydantic, SQLAlchemy Async |
+| Data | PostgreSQL 16, Redis 7, SQLite สำหรับประวัติแชต |
+| Market data | Binance WebSocket + REST recovery, CCXT, Yahoo Finance/ผู้ให้บริการ fallback |
+| AI | Ollama/LM Studio/OpenAI-compatible → Gemini → OpenRouter |
+| Deployment | Docker Compose, Nginx, Android APK/Web build |
 
-The hardening phases below supersede the older build-number feature milestones. “Completed” means the documented safety/core milestone is implemented; it does not mean the strategy is proven profitable or that Live order placement is enabled.
+## Features ล่าสุด
 
-| Phase | Scope | Status |
-| :---: | :--- | :---: |
-| 0 | Strict Paper/Live boundary, ephemeral Live Session, fail-closed Live gateway and kill switch | ✅ Complete |
-| 1 | Modular, explainable and configurable three-indicator decision core | ✅ Complete |
-| 2 | Market-regime classifier and deterministic adaptive entry/risk policy | ✅ Complete |
-| 3 | PostgreSQL evidence/ledger records, batch replay, execution-aware OOS backtesting and deterministic release gates | 🚧 Core implemented; validation in progress |
-| 4 | Binance WebSocket market data, true aggressor-trade CVD, sequence-gap recovery and freshness monitoring | ✅ Core deployed and runtime validated |
-| 5 | Ordered 4H Bias → 1H Setup → 15m Trigger profiles, shared closed-candle matrix, replay and MTF backtest parity | 🧪 Core implemented; parameter/Paper validation in progress |
-| 6 | Production-grade Paper OMS: partial fills, partial TP, fees, slippage and restart recovery | ✅ Complete and deployed |
-| 7 | Verified global-news intelligence and deterministic News Risk Gate, Paper first | ⏳ Planned |
-| 8 | Portfolio risk: aggregate exposure, correlation clusters, drawdown locks and margin buffers | ⏳ Planned |
-| 9 | Single-broker Live OMS, reconciliation, protective broker orders, shadow mode and canary rollout | 🔒 Blocked by evidence/safety gates |
-| 10 | AI post-trade review, Thai briefing and governed continuous improvement | ⏳ Planned |
+### Chart และ Market Intelligence
 
-Phase 3 strategy validation continues while the Phase 4 Binance pipeline is operational. Strategy changes must pass replay, out-of-sample evaluation and Paper validation before they can become a versioned production release. AI cannot enable Live mode, override the Risk Engine, or promote parameters directly to production.
+- กราฟแท่งเทียนพร้อมราคาสดและข้อมูล OHLCV
+- Clean SMC overlay: Order Block, FVG, BOS, CHoCH, EQ 50%, Equal High/Low, Swing High/Low และ Liquidity Sweep
+- แสดง Market Regime, คะแนน 3-Indicator Core, Strategy Gate, Scenario และ Execution Blueprint
+- หน้า Chart มี Apex AI Chat, AI Blueprint และรายการ Position
+- รองรับ watchlist แยก Crypto, Forex/Gold และ Stocks
+- Binance ใช้ WebSocket และมี sequence-gap recovery/freshness monitoring
+- ตลาดที่ยังไม่มี broker-native stream ถูกระบุเป็น polling fallback อย่างชัดเจน
 
-Phase 3 mirrors isolated execution snapshots into normalized PostgreSQL
-`trade_ledger_records`, `order_ledger_records` and append-only
-`fill_ledger_records` for analysis/replay. Phase 6 now makes the dedicated
-PostgreSQL Paper OMS authoritative for account, position, order, fill and
-transition state. `paper_trades_store.json` is a compatibility projection only;
-production fails closed if the OMS is unavailable. The deployed restart test
-recovered the same open state with no duplicate import.
+### Deterministic Trading Intelligence
 
-Chart Overlay and Proactive Scanner now consume the same canonical Phase 5
-decision: 4H Market Bias, 1H SMC Setup and 15m Entry Trigger, completed candles
-only, role-specific profiles and one composite `snapshot_id`. These are ordered
-gates rather than averaged scores, so a 15m trigger cannot bypass an opposite
-4H/1H structure.
+- Canonical decision pipeline เดียวกันสำหรับ Chart, Signals, Scanner และ Backtest
+- วิเคราะห์เฉพาะแท่ง 15 นาทีที่ปิดแล้ว ป้องกัน repaint จากแท่งที่ยังวิ่ง
+- 3-Indicator Core ที่อธิบายคะแนนและ evidence ได้
+- Market Regime เป็น policy gate ไม่ใช่ indicator ตัวที่สี่และไม่เพิ่มคะแนนซ้ำ
+- Scenario Matrix จัดกลุ่มสถานการณ์ตาม causal trigger แบบเรียงลำดับความสำคัญ
+- Strategy Gate ปฏิเสธ setup ที่ observation-only, ข้อมูลไม่พร้อม, R:R ไม่ถึง หรือผิด policy
+- TP ต้องมาจาก liquidity/structure จริง ระบบไม่สร้างเป้า 2R/3R เพื่อทำให้ setup ดูผ่าน
 
-Long/Short parity is a system invariant for every supported market, especially
-Forex: Long is buy-to-open/sell-to-close, while Short is
-sell-to-open/buy-to-cover. Order intent must explicitly distinguish opening a
-Short from reducing a Long, and future Live broker adapters must fail closed
-when position-side or reduce-only behavior is ambiguous.
+### Risk และ Execution
 
----
+- คำนวณ position size จาก risk budget และระยะ Entry–SL แบบรวมค่าธรรมเนียม spread และ slippage
+- ตรวจ daily loss, drawdown, จำนวน position, correlated asset cluster, leverage และ quantity step
+- ตรวจ tick size, lot size และ minimum notional ตาม instrument/exchange
+- PostgreSQL Paper OMS เป็น source of truth สำหรับ Order, Position, Fill และ Event
+- รองรับ market/limit order, partial fill, partial TP, Auto-BE, trailing stop, fee/slippage model และ restart recovery
+- Auto-Pilot ต้องใช้ราคาสดที่ executable และ `approved RiskAssessment`; ข้อมูล stale หรือ metadata ไม่ครบจะ fail closed
+- Live mode ใช้ short-lived session, kill switch และ guarded gateway; AI ไม่สามารถเปิด Live หรือข้าม Risk Engine ได้
 
-## 🏛️ Current System Architecture
+### AI, Journal และ Evidence
+
+- Apex AI Chat ใช้บริบทจาก execution timeframe และ Strategy Gate
+- AI อธิบายตลาดได้ แต่ไม่มีสิทธิ์อนุมัติคำสั่งแทน deterministic engines
+- AI ปฏิเสธการใช้ MTF/HTF เพื่อคำนวณหรือยืนยันคำแนะนำ
+- Provider fallback: Local/Ollama/LM Studio → Gemini → OpenRouter
+- Ollama native adapter รองรับโมเดล reasoning และ output budget 2,048 tokens เพื่อป้องกันประโยคถูกตัด
+- ประวัติแชตแยก session และจัดเก็บใน SQLite
+- Trading Journal, discipline scorecard และ rule-based post-trade review
+- Immutable decision evidence, deduplication, single-event replay และ batch replay
+- Execution-aware anchored out-of-sample backtest และ deterministic release gate
+
+## System Architecture
 
 ```mermaid
 flowchart TB
-    subgraph MarketDataLayer ["📡 Market Data Feeds"]
-        direction LR
-        CCXT[Binance Spot WebSocket + REST Recovery]
-        INVX[InnovestX OpenAPI]
-        MT5[MT5 Broker Stream - Provider Integration Pending]
-        YF[Yahoo Finance Polling Fallback]
-    end
+    FEED[Market feeds] --> HUB[Price Hub + Market Data Engine]
+    HUB --> CLOSED[Closed 15m candles]
+    CLOSED --> EXEC[ExecutionAnalysisService]
+    EXEC --> SMC[SMC Engine]
+    SMC --> CORE[3-Indicator Core]
+    SMC --> REGIME[Market Regime Policy]
+    CORE --> SCENARIO[Scenario Matrix]
+    REGIME --> SCENARIO
+    SCENARIO --> STRATEGY[Strategy Gate]
 
-    subgraph PriceHubLayer ["⚡ Central In-Memory Price Hub (price_hub.py)"]
-        direction LR
-        PH[(Sub-millisecond Shared Memory Cache)]
-    end
+    STRATEGY -->|WAIT / rejected| UI[Chart + Signals + AI explanation]
+    STRATEGY -->|approved| RISK[Risk Engine]
+    RISK -->|rejected| UI
+    RISK -->|approved| QUOTE[Fresh bid/ask + Instrument Rules]
+    QUOTE --> OMS[PostgreSQL Paper OMS]
 
-    subgraph BackendCore ["⚡ Backend Core Engines (FastAPI)"]
-        direction TB
-        MD[MarketDataEngine] --> SMC[SMCEngine: OB, FVG, BOS, CHoCH, Sweeps, CVD]
-        SMC --> Risk[RiskEngine: Dynamic Risk % & Exposure]
-        Risk --> AI[AIEngine: Local LLM ➔ Gemini ➔ OpenRouter]
-        AI --> Strategy[StrategyEngine: MTF Confluence Matrix]
-        Strategy --> Exec[PaperExecutionEngine]
-        Strategy --> Live[Guarded Live Gateway]
-        VB[BriefingEngine: Proactive AI Morning Voice Briefing]
-    end
+    EXEC --> EVIDENCE[Immutable Evidence]
+    EXEC --> BACKTEST[Backtest / Replay]
+    BACKTEST --> RELEASE[Release Gate]
+    RELEASE -->|passed + human approval| AUTOGATE[Auto-Pilot eligibility]
 
-    subgraph PushHub ["🌐 Full-Duplex WebSocket Push Hub (/ws/stream)"]
-        WS[Channel Subscriptions: tickers, trades, signals]
-    end
-
-    subgraph ClientLayer ["📱 Mobile Client (Flutter Build 27)"]
-        direction LR
-        Chart[Interactive SMC Chart Screen]
-        Signals[Proactive Signals Screen]
-        Journal[Discipline Scorecard & Journal]
-        ApexAI[Apex AI Chat & Blueprint Suite]
-    end
-
-    MarketDataLayer --> PH
-    PH <--> BackendCore
-    PH --> WS
-    BackendCore --> WS
-    WS <==>|Authenticated WebSocket Push| ClientLayer
-    Exec -->|Paper ledger only| Paper[(Paper Order Ledger)]
-    Live -.->|New exposure disabled until Phase 9| INVX
+    HUB --> WS[Authenticated WebSocket]
+    WS --> UI
 ```
 
----
+## Canonical System Flow
 
-## 💎 Existing Product Features
+1. `PriceHub` รับราคาและ trade stream พร้อมตรวจ freshness และ sequence gap
+2. `MarketDataEngine` สร้าง OHLCV และส่งเฉพาะแท่ง 15 นาทีที่ปิดแล้ว
+3. `ExecutionAnalysisService` snapshot ข้อมูลและ config พร้อมสร้าง `snapshot_id`
+4. `SMCEngine` หาโครงสร้าง Swing/Internal, BOS, CHoCH, OB, FVG, EQ และ liquidity
+5. `IndicatorCore` ประเมิน SMC Structure, Volume Delta/CVD และ Squeeze Momentum
+6. `RegimeEngine` จำแนก Trending, Ranging, Volatile, Compression หรือ Unknown จาก price path/volatility โดยไม่ใช้คะแนน SMC ซ้ำ
+7. `ScenarioMatrixEngine` เลือก Primary Scenario ตาม priority และสร้าง structural Entry/SL/TP เฉพาะเมื่อมีหลักฐานครบ พร้อมคำนวณ Support/Resistance Reaction เป็น secondary observation อิสระซึ่งไม่ถูก Primary Scenario บัง
+8. `StrategyEngine` ตรวจ actionable status, readiness, confluence, regime policy, direction, zone, OB และ achievable R:R
+9. หากไม่ผ่าน ระบบคืน `WAIT` พร้อม rejection reasons; AI และ Auto-Pilot ห้ามเปลี่ยนผลนี้
+10. หากผ่าน `RiskEngine` ตรวจ portfolio guardrails และคำนวณขนาดสถานะจาก all-in risk
+11. ก่อนส่งคำสั่ง ระบบตรวจ bid/ask สด, cooldown และ exchange instrument rules
+12. `PaperOMS` จำลอง fill, fee, spread, slippage, SL/TP, Auto-BE และ trailing แบบ transactional
+13. Evidence, order, fill และ transition ถูกจัดเก็บเพื่อ replay, backtest และ audit
 
-The headings in this section are legacy feature milestones and are not the production-hardening phase numbers above. Some features remain prototypes until their corresponding hardening phase passes its evidence criteria.
+Chart, Signals, Scanner และ Backtest เรียก pure decision function เดียวกัน (`analyze_execution_frame`) เพื่อลดความคลาดเคลื่อนระหว่างผลย้อนหลังกับ runtime
 
-### 🎯 Phase 1: Smart Execution & Dynamic Risk Suite (Build 24 ✅)
-* **Dynamic Risk Position Sizer**: Automatically calculates exact units/lots based on percentage account risk (0.5%, 1.0%, 2.0%, 3.0%) and physical distance between Entry and Stop Loss:
-  $$\text{Position Size} = \frac{\text{Account Capital} \times \text{Risk \%}}{\left|\text{Entry} - \text{Stop Loss}\right|}$$
-* **Auto-Breakeven (Auto-BE)**: At $+1.0\text{R}$ the event-driven Paper OMS moves Stop Loss beyond nominal entry far enough to cover modeled fees and exit slippage. Market gaps can still exceed the model.
-* **Multi-Tier Trailing Stop**: At $+1.5\text{R}$ lock $+0.6\text{R}$, at $+2.0\text{R}$ lock $+1.2\text{R}$, and from $+2.5\text{R}$ trail the favorable extreme by $0.8\text{R}$ for both Long and Short.
+## Decision Logic
 
----
+### 1. Execution timeframe authority
 
-### 📊 Feature Milestone: Signal & Confluence Edge — MTF Alignment Matrix (Build 25, hardened in Phase 5)
-* **Ordered Multi-Timeframe authority**: `4H Bias → 1H Setup → 15m Trigger` is shared by Chart, Scanner, evidence replay and MTF-aware OOS backtesting. Optional 1D macro context and regime hysteresis remain future evidence-driven extensions.
-* **Institutional Grade Badging**:
-  * `🌟 SUPREME GRADE A+` (4/4 TF Aligned — Highest Probability)
-  * `💎 GRADE A` (3/4 TF Aligned)
-  * `⚖️ GRADE B` (2/4 TF Aligned)
-  * `⏳ WAIT / CONFLICTED` (< 2/4 Aligned — Cash Preservation)
-* **Volume Delta & Cumulative Volume Delta (CVD) Absorption**: Detects institutional limit order absorption and liquidity exhaustion (`🐳 CVD Absorption`).
+- Timeframe ที่ใช้ตัดสินใจ: `15m`
+- ใช้ completed candle เท่านั้น
+- Live quote ใช้แสดงราคาและจำลอง execution ไม่ถูกนำไปเพิ่มเป็นแท่งวิเคราะห์ที่ยังไม่ปิด
+- `htf_bias` ถูกตั้งเป็น neutral ใน canonical execution path
+- endpoint MTF เดิมมีไว้สำหรับ research/compatibility เท่านั้น
+- MTF ห้ามมีส่วนใน confluence, Strategy Gate, RiskAssessment, position sizing, Auto-Pilot และ AI trade advice
 
----
+### 2. Three-Indicator Core
 
-### 🧠 Feature Milestone: Cognitive Loop & Post-Trade Intelligence (Build 26, partial)
-* **Discipline Scorecard (0–100)**: Quantitative behavioral score calculated from Plan Adherence % and Average Star Ratings (⭐⭐⭐⭐⭐):
-  $$\text{Discipline Score} = \operatorname{clamp}((\text{Plan Adherence \%} \times 0.6) + (\text{Avg Star Rating} \times 8.0), 0, 100)$$
-* **Rule-based trade audit**: Generates transparent post-trade breakdowns. Evidence-backed AI review using MFE/MAE is planned for Phase 10.
-* **Interactive AI Audit Modal Sheet**: Bottom sheet with star ratings, parameter tables, and `🔄 Re-Audit Trade with AI` button.
+Execution profile ปัจจุบันให้น้ำหนัก:
 
----
+| Layer | Weight | หน้าที่ |
+| --- | ---: | --- |
+| SMC Structure | 35 | Structure direction, BOS/CHoCH, zone, OB/FVG และ liquidity event |
+| Volume Delta/CVD | 30 | Buyer/seller pressure, volume expansion และ absorption |
+| Squeeze Momentum | 35 | Compression/release และ momentum ที่สอดคล้องกับทิศทาง |
 
-### ⚡ Feature Milestone: Push Infrastructure & Voice Intelligence (Build 27, partial)
-* **Full-Duplex WebSocket Push Hub (`/ws/stream`)**: Authenticated channel push for prices, trades and signals with heartbeat and reconnect support.
-* **Central In-Memory Price Hub (`price_hub.py`)**: Event-driven shared process-local quote, freshness, closed-candle and aggressor-CVD cache. Binance Spot uses WebSocket; other markets are visibly labelled fallbacks.
-* **Proactive AI Daily Voice Briefing (`/api/v1/briefing/morning`)**: Institutional morning voice script and audio speech synthesis in Thai summarizing Market Regime, Key SMC Levels, and Focus Setups.
+ข้อมูลต้องมี coverage อย่างน้อย 70% และ required layer ต้องพร้อม มิฉะนั้น Strategy Gate จะปฏิเสธ
 
----
+### 3. Market Regime policy
 
-## 📊 Complete Indicator & SMC Structure Suite
+| Regime | Entry | Min confluence | Min net R:R | Risk multiplier | เงื่อนไขเพิ่มเติม |
+| --- | :---: | ---: | ---: | ---: | --- |
+| Trending | Yes | 65 | 2.0 | 1.00 | Direction ต้องสอดคล้อง |
+| Ranging | Selective | 75 | 2.0 | 0.65 | ต้องมี liquidity sweep |
+| Volatile | Selective | 82 | 2.5 | 0.40 | Direction + volume + squeeze fire |
+| Compression | No | 85 | 2.0 | 0.00 | WAIT จนกว่าจะเกิด trigger ใหม่ |
+| Unknown | No | 100 | 3.0 | 0.00 | Fail closed |
 
-| Indicator / SMC Structure | Visual Representation | Quantitative Rule & Interpretation |
-| :--- | :---: | :--- |
-| **Bullish Order Block (OB)** | 🟢 Green Zone Box | Last bearish candle before aggressive expansion. Acts as high-probability demand zone. |
-| **Bearish Order Block (OB)** | 🔴 Red Zone Box | Last bullish candle before aggressive selloff. Acts as institutional supply zone. |
-| **Fair Value Gap (FVG)** | 🟣 Purple Imbalance | 3-candle price imbalance. Price tends to retrace and fill before trend continuation. |
-| **Break of Structure (BOS)** | 📈 Solid Break Line | Candle body closing beyond previous swing high/low confirming trend continuation. |
-| **Change of Character (CHoCH)**| 🔄 Reversal Tag | First structural break in opposite direction signaling potential trend reversal. |
-| **Equilibrium 50% (EQ)** | ⚖️ Yellow Dashed Line| Dynamic 50% range midpoint. Longs strictly in Discount (<50%), Shorts in Premium (>50%). |
-| **Liquidity Sweep (EQH/EQL)** | 🧹 Sweep Marker | High/Low wick penetration hunting retail stop losses followed by immediate rejection. |
-| **CVD Volume Absorption** | 🐳 Absorption Badge | Price making lower lows while Cumulative Volume Delta rises (limit buy absorption). |
-| **Multi-Timeframe Matrix** | 📊 Ordered 3-Role Gate | 4H authorizes direction, 1H validates setup and 15m confirms execution; upstream conflicts fail closed. |
+Regime เป็นตัวปรับ policy/risk เท่านั้น ไม่เพิ่มคะแนน confluence และไม่ใช้ SMC bias หรือ squeeze เป็น vote ซ้ำ
 
----
+### 4. Strategy Gate
 
-## 📸 Screenshots & Verification (Build 27)
+Setup จะออกจาก `WAIT` ได้เมื่อทุกเงื่อนไขที่เกี่ยวข้องผ่าน:
 
-| Feature | Screenshot |
-| :--- | :--- |
-| **AI Daily Voice Briefing** | ![AI Daily Voice Briefing](file:///C:/Users/arthit.n/.gemini/antigravity/brain/0dda9f92-e850-48be-88e0-38818e657c35/b27_voice_briefing.png) |
-| **Full-Duplex WS Chart** | ![Full-Duplex WS Chart](file:///C:/Users/arthit.n/.gemini/antigravity/brain/0dda9f92-e850-48be-88e0-38818e657c35/b27_chart_ws.png) |
-| **Real-time Signals Screen** | ![Real-time Signals Screen](file:///C:/Users/arthit.n/.gemini/antigravity/brain/0dda9f92-e850-48be-88e0-38818e657c35/b27_signals_ws.png) |
-| **Live Journal & Scorecard** | ![Live Journal & Scorecard](file:///C:/Users/arthit.n/.gemini/antigravity/brain/0dda9f92-e850-48be-88e0-38818e657c35/b27_journal_ws.png) |
+- Scenario ต้อง `actionable=true`
+- Direction ต้องเป็น long/short ที่อนุญาต
+- Indicator data/readiness ต้องครบ
+- Confluence ต้องผ่าน global และ regime threshold
+- Long ห้ามเริ่มจาก Premium; Short ห้ามเริ่มจาก Discount ยกเว้น qualified sweep pattern
+- OB/structure/trigger ที่ policy กำหนดต้องมีจริง
+- Entry, SL และ TP ต้องมี geometry ถูกต้อง
+- TP ต้องเป็น opposing liquidity/structure ที่ตรวจพบจริง
+- Net R:R หลัง execution cost ต้องผ่าน threshold
 
----
+## Scenario Matrix
 
-## 🚀 Quick Start
+Scenario ถูกประเมินตามลำดับ priority ด้านล่าง เมื่อเจอ pattern ที่ยังยืนยันไม่ครบ ระบบจะคืน WATCH/WAIT ทันทีแทนการไหลไปสร้างสัญญาณจากเงื่อนไขที่อ่อนกว่า
 
-### 1. Backend Setup
-```bash
+| Priority | Scenario | เงื่อนไขหลัก | ผลลัพธ์ |
+| ---: | --- | --- | --- |
+| 1 | `S1_BULL_BREAKOUT` / `S1_BEAR_BREAKDOWN` | BOS/CHoCH ที่มี registered event level, squeeze fire ทิศเดียวกัน, candle/volume preflight ผ่าน, ราคาไม่ยืดเกิน 1.25 ATR, มี structural target และ R:R ≥ 1.5 | Grade S, market candidate |
+| 2 | `S2_BULL_OB_RETEST` / `S2_BEAR_OB_RETEST` | แตะ OB ใน Discount/Premium ที่ถูกฝั่ง พร้อม rejection close และ aligned delta/absorption; มี target จริงและ R:R ≥ 1.5 | Grade A/S, limit-at-OB candidate |
+| 3 | `S3_BEAR_TOP_SWEEP` / `S3_BULL_BOTTOM_SWEEP` | Sweep ต้องตรง registered EQH/EQL หรือ swing liquidity, อยู่ใน location ที่เหมาะสม, order flow ยืนยัน และไม่สวน squeeze/regime รุนแรง | Grade S, reversal candidate |
+| 4 | `S4_BEAR_BREAKER_FLIP` / `S4_BULL_BREAKER_FLIP` | CHoCH พร้อม delta ทิศเดียวกัน มี opposing structural target และ R:R ≥ 1.5 | Grade A, breaker candidate |
+| 5 | `S8_SUPPORT_*` / `S9_RESISTANCE_*` | แท่ง 15m ที่ปิดแล้วแตะ OB, EQH/EQL, Swing หรือ Strong/Weak level; แยก Touch, Bounce/Rejection, Breakdown/Breakout และ False Break จากตำแหน่งปิด, body และ Delta/absorption | WATCH แบบ observation-only; รอ S1/S2/S3/S4 ยืนยันก่อนเข้าเทรด |
+| 6 | `S6_DIVERGENCE_EXHAUSTION` | Momentum/Delta อ่อนแรงใน Premium หรือ Discount | WAIT; กระชับ SL/เฝ้ารอ ไม่เปิดสถานะใหม่ |
+| 7 | `S5_MID_RANGE_COMPRESSION` | Squeeze-on หรือ regime compression บริเวณ equilibrium | WAIT; เฝ้ารอ close ยืนยันออกจากกรอบ |
+| Fallback | `NEUTRAL_NO_EDGE` | ไม่มี causal trigger ที่ผ่านเกณฑ์บนแท่งปิด | WAIT |
+
+ข้อสำคัญ: Grade S/A จาก Scenario ไม่ใช่คำสั่งเทรด จนกว่า Strategy Gate และ Risk Engine จะอนุมัติครบ
+
+`S8_SUPPORT_*` และ `S9_RESISTANCE_*` ไม่ทำนายว่าแท่งถัดไปต้องขึ้นหรือลง และไม่ใช้ MTF ในการคำนวณหรือให้คะแนน ผลลัพธ์ถูกส่งแยกใน `signal.reaction` แม้ Primary Scenario จะเป็น S1-S6 พร้อมหลักฐาน `reaction_evidence` เพื่อให้ UI, AI และ audit อธิบายตรงกัน ป้ายทิศทางของ setup ที่ Strategy Gate ยังไม่อนุมัติจะแสดง `LONG/SHORT BIAS · NOT ENTRY` แทนคำที่อาจเข้าใจว่าเป็นคำสั่งเทรด
+
+## Risk Engine และ Position Sizing
+
+Risk Engine คำนวณจากระยะขาดทุนแบบ all-in:
+
+```text
+all_in_risk_per_unit = abs(entry - stop_loss) + execution_cost_per_unit
+risk_budget = account_balance × effective_risk_percent
+position_size = floor_to_step(risk_budget / all_in_risk_per_unit)
+net_RR = (gross_reward - execution_cost) / (stop_distance + execution_cost)
+```
+
+Guardrails หลัก:
+
+- Daily loss circuit breaker
+- Maximum open positions
+- Maximum 2 positions ทิศเดียวกันใน correlated asset cluster
+- Position ที่สองใน cluster เดียวกันลด risk เหลือ 50%
+- Drawdown 5%/10% ลด risk budget ตามลำดับ
+- SL distance สูงสุดตาม global/runtime constraint
+- Leverage/notional cap และ quantity-step rounding
+- Tick size, lot size และ minimum notional
+- Reject ค่า NaN/Infinity, ราคาไม่เป็นบวก และ geometry ผิดทิศ
+
+## Auto-Pilot Safety Flow
+
+Auto-Pilot ปิดเป็นค่าเริ่มต้นใน `backend/config/runtime_settings.json`
+
+การเปิดใช้งานต้องมี release gate ล่าสุดที่:
+
+- เป็น timeframe 15 นาที
+- ใช้ `anchored_out_of_sample_replay`
+- มี completed trades อย่างน้อย 100 รายการ
+- มีอย่างน้อย 20 trades ต่อ scenario ที่ถูกทดสอบ
+- ผ่าน expectancy, profit factor, drawdown, fill-rate และ regime coverage
+- ยังต้องผ่าน Paper validation และ human approval
+
+ทุก Auto-Pilot order ต้องมี approved `RiskAssessment`, fresh executable quote, instrument rules และ durable cooldown ระบบจะไม่สร้าง TP สำรองหรือเพิ่มขนาดเกิน RiskAssessment
+
+Release gate ปัจจุบันไม่ได้ promote strategy หรือเปิด Production อัตโนมัติ
+
+## Paper OMS Lifecycle
+
+```text
+Order:    submitted → partially_filled → filled / cancelled
+Position: pending → open → managed / partial close → closed
+```
+
+- PostgreSQL เป็น authoritative state
+- JSON stores เป็น compatibility projection/migration source เท่านั้น
+- Bid/ask, spread, slippage และ fee ถูกใช้ใน fill/risk model
+- Market order ต้องมี fresh quote
+- Auto-BE ไม่ทำให้ SL แย่ลง
+- Trailing protection: 1.5R, 2.0R และ dynamic หลัง 2.5R
+- Recovery หลัง restart โหลด pending/open state โดยไม่ duplicate import
+
+## AI Advisor Boundary
+
+AI มีหน้าที่อธิบาย context, rejection reason, scenario และ risk เป็นภาษาไทย โดยมีข้อจำกัดดังนี้:
+
+- ห้ามข้าม Strategy Gate หรือ Risk Engine
+- หาก deterministic result เป็น rejected คำตัดสินสุดท้ายต้องเป็น `WAIT`
+- ห้ามใช้หรือกล่าวอ้าง MTF/HTF เพื่อยืนยัน ปฏิเสธ ให้คะแนน หรือกำหนดขนาดเทรด
+- Market context ถูกส่งเป็น untrusted data ไม่ใช่ system instruction
+- Provider ล้มเหลวจะ fallback ตาม chain และแสดงสถานะ unavailable อย่างตรงไปตรงมา
+- API key ต้องมาจาก environment/secret storage ห้าม commit ลง repository
+
+## Evidence, Backtest และ Release Validation
+
+- Evidence ผูก market-data hash, config hash, decision hash และ timestamp
+- Duplicate scanner decisions ถูก deduplicate โดยไม่เขียน payload ซ้ำ
+- Replay ใช้ snapshot/config เดิมเพื่อตรวจ reproducibility
+- Backtest ใช้ canonical 15m decision function เดียวกับ runtime
+- Execution simulation รวม spread, slippage, fee, volume capacity, partial fills และ conservative same-bar SL/TP ordering
+- Evaluation mode เป็น anchored out-of-sample replay ไม่อ้างว่าเป็น walk-forward หากไม่ได้ทำจริง
+
+Default release criteria:
+
+| Metric | Threshold |
+| --- | ---: |
+| Completed trades | ≥ 100 |
+| Trades per scenario | ≥ 20 |
+| Expectancy | ≥ 0.05R |
+| Profit factor | ≥ 1.15 |
+| Max drawdown | ≤ 12% |
+| Fill rate | ≥ 70% |
+| Regimes tested | ≥ 2 |
+
+## Client Screens
+
+| Screen | หน้าที่ |
+| --- | --- |
+| Chart | Candlestick, clean SMC overlay, Strategy Gate, Scenario, AI Chat/Blueprint และ Positions |
+| Signals | Watchlist scanner, live prices, grade/rejection diagnostics และ manual scan |
+| Journal | Trade history, statistics, discipline scorecard และ post-trade review |
+| Apex AI | Chat sessions, persistent history และ market-aware explanations |
+| Settings | API connection, LLM providers, risk, Auto-Pilot gate, brokers, watchlist, prompts และ kill switch |
+
+## Key API Endpoints
+
+ทุก protected endpoint ใช้ header `X-API-Key`
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/health`, `/ready` | Liveness และ dependency readiness |
+| `GET` | `/api/v1/chart/ohlcv` | Historical candles |
+| `GET` | `/api/v1/chart/overlay` | Canonical 15m SMC/strategy overlay |
+| `POST` | `/api/v1/signals/analyse` | Deterministic analysis + evidence |
+| `POST` | `/api/v1/signals/scan` | Scan watchlist |
+| `GET` | `/api/v1/signals/mtf-matrix` | Research/compatibility only; ไม่มี decision authority |
+| `POST` | `/api/v1/settings/llm/chat` | Apex AI Chat |
+| `GET/POST` | `/api/v1/paper/orders` | Paper OMS orders |
+| `GET` | `/api/v1/paper/account` | Paper account snapshot |
+| `GET` | `/api/v1/evidence/events` | Query immutable evidence |
+| `POST` | `/api/v1/evidence/events/{id}/replay` | Deterministic replay |
+| `POST` | `/api/v1/backtests/runs` | Anchored OOS backtest |
+| `POST` | `/api/v1/backtests/runs/{id}/release-gate` | Evaluate release criteria |
+| `POST` | `/api/v1/live/session` | Open guarded short-lived Live session |
+| `POST` | `/api/v1/live/kill-switch` | Disable Live capability |
+| `WS` | `/ws/stream` | Authenticated price/trade/signal push |
+
+## Quick Start
+
+### Docker Compose (แนะนำ)
+
+สร้างไฟล์ environment ก่อน:
+
+```powershell
+Copy-Item backend/.env.example backend/.env
+Copy-Item .env.example .env
+```
+
+กำหนด `APP_SECRET_KEY`, `POSTGRES_PASSWORD`, `DATABASE_URL` และ provider credentials ที่ต้องการ จากนั้นรันจาก project root:
+
+```powershell
+docker compose up -d --build
+docker compose ps
+Invoke-RestMethod http://localhost:8000/ready
+```
+
+- Web: `http://localhost:3000`
+- API: `http://localhost:8000`
+- OpenAPI: `http://localhost:8000/docs`
+
+### Backend แบบ local
+
+```powershell
 cd backend
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 2. Docker Deployment
-```bash
-cd backend
-docker compose up -d --build
-```
+### Flutter
 
-### 3. Mobile Setup (Flutter)
-```bash
+```powershell
 cd mobile
 flutter pub get
 flutter run
-# Build Release APK
-flutter build apk --release
+flutter build apk --debug
 ```
 
----
+Debug APK: `mobile/build/app/outputs/flutter-apk/app-debug.apk`
 
-## 📡 Key API Endpoints Reference
+## Verification
 
-| Method | Path | Description |
-| :--- | :--- | :--- |
-| `WS` | `/ws/stream` | Full-Duplex real-time streaming hub (tickers, trades, signals) |
-| `GET` | `/api/v1/briefing/morning` | Proactive daily voice briefing script and focus setups in Thai |
-| `POST` | `/api/v1/signals/analyse` | Run deterministic signal, strategy and risk analysis and record Phase 3 evidence |
-| `GET` | `/api/v1/signals/mtf-matrix` | Read the canonical ordered 4H/1H/15m decision matrix |
-| `GET/PUT` | `/api/v1/settings/timeframe-profiles` | Read or atomically update validated Phase 5 role profiles |
-| `GET` | `/api/v1/evidence/events` | Query immutable decision-evidence events |
-| `POST` | `/api/v1/evidence/events/{id}/replay` | Replay a recorded decision with its original data and configuration |
-| `POST` | `/api/v1/evidence/batch-replay` | Replay up to 500 immutable decisions and persist reproducibility metrics |
-| `GET` | `/api/v1/backtests/ledger/status` | Inspect JSON migration and normalized PostgreSQL trade/order/fill counts |
-| `POST` | `/api/v1/backtests/runs` | Run and persist an execution-aware out-of-sample backtest |
-| `GET` | `/api/v1/backtests/runs/{id}` | Read immutable metrics, simulated fills and Release Gate result |
-| `POST` | `/api/v1/backtests/runs/{id}/release-gate` | Re-evaluate deterministic thresholds without promoting Production |
-| `GET` | `/api/v1/market-data/status` | Inspect Phase 4 provider connectivity, freshness, gaps and CVD integrity |
-| `GET` | `/api/v1/market-data/order-flow` | Read live aggressor CVD and closed-candle volume delta |
-| `GET` | `/api/v1/journal/scorecard` | Discipline Score (0–100), plan adherence %, and win rate |
-| `POST` | `/api/v1/journal/entries/{id}/ai-review` | On-demand AI cognitive trade re-audit |
-| `POST` | `/api/v1/paper/orders` | Place an isolated Paper order |
-| `POST` | `/api/v1/paper/orders/{id}/close`| Close an active Paper trade |
-| `POST` | `/api/v1/live/session` | Explicitly open a short-lived guarded Live Session |
-| `POST` | `/api/v1/live/orders/innovestx` | Canonical Live route; new exposure remains disabled until protective OMS is ready |
-| `GET` | `/api/v1/chart/ohlcv` | Historical candlestick data across Crypto, Forex, Stocks |
-| `GET` | `/api/v1/chart/overlay` | Quantitative SMC overlays (OB, FVG, BOS, CHoCH, EQ) |
+คำสั่งตรวจสอบหลัก:
 
----
+```powershell
+.\.backend-test-venv\Scripts\python.exe -m pytest backend/tests -q
+cd mobile
+dart analyze
+flutter test
+```
 
-## 📄 License
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+สถานะชุดทดสอบล่าสุด ณ 2026-08-31:
+
+- Backend: 186 passed, 2 skipped
+- Flutter: 13 passed
+- Dart analyzer: no issues found
+
+## Security Notes
+
+- ห้าม commit `.env`, API keys, broker secrets หรือ token ลง Git
+- Production ต้องใช้ `APP_SECRET_KEY` ที่สุ่มและยาวอย่างน้อย 32 ตัวอักษร
+- Services ถูก bind ที่ localhost โดยค่าเริ่มต้น; ใช้ TLS reverse proxy หากต้องเปิดภายนอก
+- Broker credential และ Live permission ไม่เท่ากับการอนุญาต Auto-Pilot
+- Live authorization เป็น capability ชั่วคราวและไม่ถูกกู้คืนจาก persisted config
+
+## Project Status
+
+| Area | Status |
+| --- | --- |
+| Single-timeframe 15m decision core | Deployed |
+| Clean SMC + Scenario Matrix | Deployed |
+| Independent Support/Resistance Reaction | Deployed; observation-only |
+| AI Reaction Context + Strategy Gate Guard | Deployed |
+| Real-time Binance data | Deployed |
+| PostgreSQL Paper OMS | Deployed |
+| Evidence/replay/backtest core | Implemented; collecting validation samples |
+| Auto-Pilot | Locked OFF pending release evidence |
+| Live OMS | Guarded; new exposure not production-approved |
+| News risk intelligence | Planned |
+
+## License
+
+Repository ปัจจุบันยังไม่มีไฟล์ `LICENSE` จึงไม่ควรถือว่าได้รับอนุญาตภายใต้ MIT หรือ license อื่นจนกว่าเจ้าของโครงการจะเพิ่มเงื่อนไขการใช้งานอย่างเป็นทางการ

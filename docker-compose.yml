@@ -6,8 +6,10 @@ services:
       dockerfile: nginx/Dockerfile
     container_name: ai_trade_web
     ports:
-      - "3000:80"
-      - "8080:80"
+      # The bundled Nginx listener is HTTP-only and is intentionally local.
+      # Put a TLS reverse proxy in front before exposing this deployment.
+      - "127.0.0.1:3000:80"
+      - "127.0.0.1:8080:80"
     volumes:
       - ./web_dist:/usr/share/nginx/html:ro
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
@@ -23,7 +25,8 @@ services:
       dockerfile: Dockerfile
     container_name: ai_trade_backend
     ports:
-      - "8000:8000"
+      # Keep direct API access local; web reaches it over the Docker network.
+      - "127.0.0.1:8000:8000"
     env_file:
       - ./backend/.env
     environment:
