@@ -1,4 +1,4 @@
-﻿"""API integration tests for FastAPI backend."""
+"""API integration tests for FastAPI backend."""
 
 import pytest
 from httpx import AsyncClient, ASGITransport
@@ -284,6 +284,30 @@ async def test_market_order_idempotency_does_not_duplicate_trade():
     assert first.status_code == second.status_code == 200
     assert first.json()["id"] == second.json()["id"]
     assert len(trades_api.get_all_trades()) == 1
+
+
+@pytest.mark.anyio
+async def test_market_order_fallback_idempotency_does_not_duplicate_trade(monkeypatch):
+    monkeypatch.setattr(trades_api, "_paper_oms_available", lambda: False)
+    cfg = get_settings()
+    headers = {"X-API-Key": cfg.app_secret_key}
+    request = {
+        "symbol": "BTC/USDT",
+        "direction": "long",
+        "order_type": "market",
+        "entry": 50000.0,
+        "stop_loss": 49500.0,
+        "take_profit": 51500.0,
+        "size": 0.1,
+        "mode": "paper",
+        "idempotency_key": "fallback-idempotent-999",
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post("/api/v1/trades/place", json=request, headers=headers)
+        second = await client.post("/api/v1/trades/place", json=request, headers=headers)
+    assert first.status_code == second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+    assert first.json()["idempotency_key"] == "fallback-idempotent-999"
 
 
 @pytest.mark.anyio

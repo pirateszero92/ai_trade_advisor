@@ -56,10 +56,12 @@ DEFAULT_TIMEFRAME_PROFILES: dict[str, Any] = {
             "smc": {
                 "swing_length": 7,
                 "internal_swing_length": 4,
-                "eql_tolerance": 0.002,
+                "eql_tolerance": 0.1,
                 "order_block_lookback": 60,
                 "fvg_lookback": 40,
-                "atr_length": 14,
+                "atr_length": 200,
+                "internal_confluence_filter": False,
+                "structure_event_ttl_bars": 0,
             },
             "indicator_overrides": {
                 "smc_structure": {"weight": 60.0},
@@ -80,10 +82,12 @@ DEFAULT_TIMEFRAME_PROFILES: dict[str, Any] = {
             "smc": {
                 "swing_length": 5,
                 "internal_swing_length": 3,
-                "eql_tolerance": 0.002,
+                "eql_tolerance": 0.1,
                 "order_block_lookback": 50,
                 "fvg_lookback": 30,
-                "atr_length": 14,
+                "atr_length": 200,
+                "internal_confluence_filter": False,
+                "structure_event_ttl_bars": 0,
             },
             "indicator_overrides": {
                 "smc_structure": {"weight": 50.0},
@@ -104,10 +108,12 @@ DEFAULT_TIMEFRAME_PROFILES: dict[str, Any] = {
             "smc": {
                 "swing_length": 3,
                 "internal_swing_length": 2,
-                "eql_tolerance": 0.0015,
+                "eql_tolerance": 0.1,
                 "order_block_lookback": 48,
                 "fvg_lookback": 36,
-                "atr_length": 14,
+                "atr_length": 200,
+                "internal_confluence_filter": False,
+                "structure_event_ttl_bars": 3,
             },
             "indicator_overrides": {
                 "smc_structure": {"weight": 35.0},
@@ -242,7 +248,7 @@ def validate_timeframe_profiles(raw: Any) -> dict[str, Any]:
             ),
             "eql_tolerance": _number(
                 smc_values["eql_tolerance"], name=f"{role}.eql_tolerance",
-                minimum=0.0001, maximum=0.05,
+                minimum=0.0, maximum=0.5,
             ),
             "order_block_lookback": _number(
                 smc_values["order_block_lookback"], name=f"{role}.order_block_lookback",
@@ -254,9 +260,21 @@ def validate_timeframe_profiles(raw: Any) -> dict[str, Any]:
             ),
             "atr_length": _number(
                 smc_values["atr_length"], name=f"{role}.atr_length",
-                minimum=5, maximum=100, integer=True,
+                minimum=5, maximum=500, integer=True,
+            ),
+            "internal_confluence_filter": smc_values["internal_confluence_filter"],
+            "structure_event_ttl_bars": _number(
+                smc_values["structure_event_ttl_bars"],
+                name=f"{role}.structure_event_ttl_bars",
+                minimum=0,
+                maximum=5,
+                integer=True,
             ),
         }
+        if not isinstance(smc["internal_confluence_filter"], bool):
+            raise ValueError(
+                f"{role}.internal_confluence_filter must be boolean"
+            )
         if smc["internal_swing_length"] >= smc["swing_length"]:
             raise ValueError(f"{role}.internal_swing_length must be below swing_length")
 
@@ -308,6 +326,11 @@ def validate_timeframe_profiles(raw: Any) -> dict[str, Any]:
     ]
     if not role_seconds[0] > role_seconds[1] > role_seconds[2]:
         raise ValueError("Timeframe hierarchy must be bias > setup > trigger")
+    trigger_tf = canonical["roles"]["trigger"]["timeframe"]
+    if trigger_tf != "15m":
+        raise ValueError(
+            f"Execution trigger timeframe is strictly locked to '15m'. Got: '{trigger_tf}'"
+        )
     return canonical
 
 

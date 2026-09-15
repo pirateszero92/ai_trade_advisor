@@ -13,7 +13,7 @@ import pandas as pd
 
 @dataclass
 class HMMRegimeState:
-    dominant_state: str  # "bullish_trend", "bearish_volatile", "ranging_chop"
+    dominant_state: str  # "bullish_trend", "bearish_trend", "ranging_chop"
     state_probabilities: dict[str, float]
     log_likelihood: float
     volatility_state: str
@@ -23,7 +23,7 @@ class HMMRegimeState:
 class GaussianHMMRegimeEngine:
     """3-State Hidden Markov Model for market regime probability estimation."""
 
-    STATES = ["bullish_trend", "bearish_volatile", "ranging_chop"]
+    STATES = ["bullish_trend", "bearish_trend", "ranging_chop"]
 
     def __init__(self, n_states: int = 3, n_iter: int = 20):
         if n_states != 3:
@@ -38,7 +38,7 @@ class GaussianHMMRegimeEngine:
         if df is None or len(df) < 30:
             return HMMRegimeState(
                 dominant_state="ranging_chop",
-                state_probabilities={"bullish_trend": 0.33, "bearish_volatile": 0.33, "ranging_chop": 0.34},
+                state_probabilities={"bullish_trend": 0.33, "bearish_trend": 0.33, "ranging_chop": 0.34},
                 log_likelihood=0.0,
                 volatility_state="medium",
                 trend_state="neutral",
@@ -64,7 +64,7 @@ class GaussianHMMRegimeEngine:
         if float(np.max(np.std(X, axis=0))) < 1e-10:
             return HMMRegimeState(
                 dominant_state="ranging_chop",
-                state_probabilities={"bullish_trend": 0.0, "bearish_volatile": 0.0, "ranging_chop": 1.0},
+                state_probabilities={"bullish_trend": 0.0, "bearish_trend": 0.0, "ranging_chop": 1.0},
                 log_likelihood=0.0,
                 volatility_state="low",
                 trend_state="neutral",
@@ -176,11 +176,14 @@ class GaussianHMMRegimeEngine:
 
         probs_dict = {
             "bullish_trend": round(float(current_probs[0]), 4),
-            "bearish_volatile": round(float(current_probs[1]), 4),
+            "bearish_trend": round(float(current_probs[1]), 4),
             "ranging_chop": round(float(current_probs[2]), 4),
         }
 
-        vol_state = "high" if current_probs[1] > 0.40 else "low" if current_probs[0] > 0.50 else "medium"
+        # Volatility is an independent observed dimension, not bearishness.
+        expected_range = float(np.dot(gamma[-1], means[:, 1]))
+        low_range, high_range = np.quantile(X[:, 1], [0.25, 0.75])
+        vol_state = "high" if expected_range > high_range else "low" if expected_range < low_range else "medium"
         trend_state = "bullish" if current_probs[0] > 0.45 else "bearish" if current_probs[1] > 0.45 else "neutral"
 
         return HMMRegimeState(

@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY requirements.txt requirements.lock ./
 RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
 
 FROM python:3.12-slim AS runtime
@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && adduser --system --ingroup app --home /app app
 
 COPY --from=builder /wheels /wheels
-COPY requirements.txt .
+COPY requirements.txt requirements.lock ./
 RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.txt \
     && rm -rf /wheels
 

@@ -57,6 +57,27 @@ async def test_chart_and_scanner_snapshot_reuses_canonical_closed_window(monkeyp
 
     assert scanner is chart
     assert scanner.snapshot_id == chart.snapshot_id
-    assert calls == [("1h", 300, True), ("4h", 120, True)]
+    assert calls == [("1h", 600, True), ("4h", 120, True)]
     assert scanner.metadata()["candle_policy"] == "closed_only"
-    assert scanner.metadata()["lookback"] == 300
+    assert scanner.metadata()["lookback"] == 600
+
+
+def test_frame_digest_changes_when_flow_data_changes():
+    from app.services.analysis_snapshot import _frame_digest
+
+    frame_a = _frame(20, "1h")
+    frame_a["volume_delta"] = [10.0] * 20
+    frame_a["buy_volume"] = [60.0] * 20
+    frame_a["sell_volume"] = [40.0] * 20
+    frame_a["cvd"] = [float(i * 10) for i in range(20)]
+    frame_a["flow_source"] = "binance_taker_volume"
+
+    frame_b = frame_a.copy(deep=True)
+    # Identical OHLCV, but exchange modified aggressor delta
+    frame_b["volume_delta"] = [50.0] * 20
+
+    digest_a = _frame_digest(frame_a)
+    digest_b = _frame_digest(frame_b)
+
+    assert digest_a != digest_b
+

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import threading
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 import pandas as pd
 import yfinance as yf
 import httpx
@@ -36,6 +36,13 @@ async def close_shared_http_client() -> None:
         if _HTTP_CLIENT is not None and not _HTTP_CLIENT.is_closed:
             await _HTTP_CLIENT.aclose()
             _HTTP_CLIENT = None
+
+
+def shutdown_executors() -> None:
+    """Explicit shutdown of background thread pools upon application termination."""
+    global _YF_EXECUTOR
+    if _YF_EXECUTOR is not None:
+        _YF_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 CCXT_TF_MAP = {
@@ -186,6 +193,84 @@ class MarketDataEngine:
 
     async def get_usd_thb_rate(self) -> float:
         return await _get_usd_thb_rate_cached()
+
+    async def get_crypto_history(
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        limit: int,
+    ) -> pd.DataFrame:
+        """Page Binance klines for empirical 15M replay/calibration datasets."""
+        if not 200 <= limit <= 40_000:
+            raise ValueError("Historical crypto limit must be between 200 and 40000")
+        clean_symbol = symbol.replace("/", "").replace("-", "").replace("_", "").upper()
+        tf = canonical_timeframe(timeframe)
+        hosts = [
+            "https://api.binance.com",
+            "https://api1.binance.com",
+            "https://api2.binance.com",
+            "https://data-api.binance.vision",
+        ]
+        client = get_shared_http_client()
+        rows: list[list[Any]] = []
+        end_time: int | None = None
+        while len(rows) < limit:
+            page_size = min(1000, limit - len(rows))
+            page: list[list[Any]] = []
+            for host in hosts:
+                try:
+                    params: dict[str, Any] = {
+                        "symbol": clean_symbol,
+                        "interval": tf,
+                        "limit": page_size,
+                    }
+                    if end_time is not None:
+                        params["endTime"] = end_time
+                    response = await client.get(
+                        f"{host}/api/v3/klines", params=params, timeout=10.0
+                    )
+                    if response.status_code == 200:
+                        payload = response.json()
+                        if isinstance(payload, list):
+                            page = payload
+                            break
+                except Exception as exc:
+                    logger.debug(f"[MarketData] Historical host {host} failed: {exc}")
+            if not page:
+                break
+            previous_earliest = int(rows[0][0]) if rows else None
+            rows = page + rows
+            earliest = int(page[0][0])
+            if previous_earliest is not None and earliest >= previous_earliest:
+                break
+            end_time = earliest - 1
+            if len(page) < page_size:
+                break
+        if not rows:
+            return pd.DataFrame()
+        frame = pd.DataFrame(
+            rows[-limit:],
+            columns=[
+                "timestamp", "open", "high", "low", "close", "volume",
+                "close_time", "qav", "trades", "tb_base", "tb_quote", "ignore",
+            ],
+        )
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
+        frame.set_index("timestamp", inplace=True)
+        for column in ("open", "high", "low", "close", "volume", "tb_base"):
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame["buy_volume"] = frame["tb_base"].clip(lower=0)
+        frame["sell_volume"] = (frame["volume"] - frame["buy_volume"]).clip(lower=0)
+        frame["volume_delta"] = frame["buy_volume"] - frame["sell_volume"]
+        frame["cvd"] = frame["volume_delta"].cumsum()
+        frame["flow_source"] = "binance_taker_volume"
+        frame = frame[[
+            "open", "high", "low", "close", "volume", "buy_volume",
+            "sell_volume", "volume_delta", "cvd", "flow_source",
+        ]].dropna(subset=["open", "high", "low", "close", "volume"])
+        frame = frame[~frame.index.duplicated(keep="last")].sort_index()
+        return closed_candle_frame(frame, tf, limit=limit)
 
     async def get_ohlcv(
         self,

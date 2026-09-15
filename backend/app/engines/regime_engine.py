@@ -377,6 +377,25 @@ class MarketRegimeEngine:
             "path_efficiency": round(efficiency, 4),
             "directional_persistence": round(persistence, 4),
         }
+
+        # Gaussian HMM dynamic regime estimation
+        try:
+            from app.engines.hmm_regime_engine import GaussianHMMRegimeEngine
+            if len(df) >= 30 and {"high", "low", "close", "volume"}.issubset(set(df.columns)):
+                hmm = GaussianHMMRegimeEngine(n_states=3, n_iter=10)
+                hmm_state = hmm.fit_predict(df)
+                metrics["hmm_dominant_state"] = hmm_state.dominant_state
+                metrics["hmm_probabilities"] = hmm_state.state_probabilities
+                prob = hmm_state.state_probabilities.get(hmm_state.dominant_state, 0.0)
+                evidence.append(f"HMM dynamic regime: {hmm_state.dominant_state} ({prob:.0%})")
+            else:
+                metrics["hmm_dominant_state"] = "unknown"
+                metrics["hmm_probabilities"] = {}
+        except Exception as exc:
+            logger.debug(f"[RegimeEngine] HMM estimation skipped: {exc}")
+            metrics["hmm_dominant_state"] = "unknown"
+            metrics["hmm_probabilities"] = {}
+
         return self._result(active, regime, direction, confidence, True, metrics, evidence)
 
     @staticmethod

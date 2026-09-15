@@ -45,6 +45,11 @@ class ScenarioResult:
     actionable: bool = False
     reaction_state: str | None = None
     reaction_evidence: dict[str, Any] = field(default_factory=dict)
+    entry_status: str | None = None
+    entry_block_reason: str | None = None
+    reaction_id: str | None = None
+    zone_id: str | None = None
+    pressure_warning: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +77,11 @@ class ScenarioResult:
             "actionable": self.actionable,
             "reaction_state": self.reaction_state,
             "reaction_evidence": dict(self.reaction_evidence),
+            "entry_status": self.entry_status,
+            "entry_block_reason": self.entry_block_reason,
+            "reaction_id": self.reaction_id,
+            "zone_id": self.zone_id,
+            "pressure_warning": dict(self.pressure_warning),
         }
 
 
@@ -139,8 +149,14 @@ class ScenarioMatrixEngine:
         if result.archetype not in {"support_reaction", "resistance_reaction"}:
             return None
         # Defence in depth: this secondary layer can never authorize execution.
+        was_actionable = result.actionable
         result.actionable = False
-        result.suggested_action = "wait_confirmation"
+        if was_actionable:
+            result.suggested_action = "wait_strategy_gate"
+            result.entry_status = "CONFIRMED_WATCH"
+            result.entry_block_reason = (
+                "secondary reaction evidence cannot authorize execution"
+            )
         result.entry_style = "wait"
         result.stop_loss = None
         result.take_profit_1 = None
@@ -170,7 +186,6 @@ class ScenarioMatrixEngine:
         has_bear_ob = bool(ob and getattr(ob, "direction", "") == "bearish")
         ob_top = float(getattr(ob, "top", 0.0)) if ob else 0.0
         ob_bottom = float(getattr(ob, "bottom", 0.0)) if ob else 0.0
-        ob_mid = float(getattr(ob, "mid", 0.0)) if ob else 0.0
 
         # Liquidity Sweeps
         swept = bool(getattr(signal, "liquidity_swept", False))
@@ -288,6 +303,114 @@ class ScenarioMatrixEngine:
                 ),
                 key_drivers=[reason],
             )
+
+        def reaction_entry(
+            *,
+            side: Literal["long", "short"],
+            scenario_id: str,
+            name_th: str,
+            name_en: str,
+            zone_bottom: float,
+            zone_top: float,
+            reaction_age_bars: int,
+            evidence: dict[str, Any],
+            trigger_reason: str,
+        ) -> tuple[ScenarioResult | None, str | None]:
+            """Promote a confirmed 15M reaction inside a short-lived entry window.
+
+            A touch alone never reaches this helper.  The caller must first
+            verify a closed rejection candle and aligned order flow.  The
+            window prevents the scanner from waiting for a second scenario
+            until price has already travelled to opposing liquidity.
+            """
+            entry_window_bars = 3
+            if reaction_age_bars < 0 or reaction_age_bars >= entry_window_bars:
+                return None, "entry window expired; do not chase"
+
+            if side == "long":
+                extension = max(0.0, price - zone_top)
+                sl = round(zone_bottom - atr * 0.30, 4)
+                target = structural_target("long", price)
+                geometry_ok = sl < price and target is not None and target > price
+                rr = (float(target) - price) / max(price - sl, 1e-6) if geometry_ok else 0.0
+                action = "buy_market"
+                invalidated = last_close < zone_bottom - atr * 0.15
+            else:
+                extension = max(0.0, zone_bottom - price)
+                sl = round(zone_top + atr * 0.30, 4)
+                target = structural_target("short", price)
+                geometry_ok = sl > price and target is not None and 0 < target < price
+                rr = (price - float(target)) / max(sl - price, 1e-6) if geometry_ok else 0.0
+                action = "sell_market"
+                invalidated = last_close > zone_top + atr * 0.15
+
+            # Do not chase a reaction after it has expanded away from the zone,
+            # and never manufacture a target to rescue R:R.
+            if invalidated:
+                return None, "reaction invalidated by the latest closed 15M candle"
+            if extension > atr * 1.25:
+                return (
+                    None,
+                    f"price extended {extension / max(atr, 1e-9):.2f} ATR from the reaction zone; do not chase",
+                )
+            if target is None:
+                target_side = "above" if side == "long" else "below"
+                return None, f"no opposing 15M liquidity target {target_side} price"
+            if not geometry_ok:
+                return None, "invalid entry/stop/target geometry"
+            if rr < 1.5:
+                return None, f"structural R:R {rr:.2f} < 1.50; do not chase"
+
+            enriched_evidence = {
+                **evidence,
+                "reaction_age_bars": reaction_age_bars,
+                "entry_window_bars": entry_window_bars,
+                "entry_window_remaining_bars": entry_window_bars - reaction_age_bars - 1,
+                "extension_atr": round(extension / max(atr, 1e-9), 4),
+            }
+            target_value = round(float(target), 4)
+            return ScenarioResult(
+                scenario_id=scenario_id,
+                name_th=name_th,
+                name_en=name_en,
+                archetype=(
+                    "support_reaction" if side == "long" else "resistance_reaction"
+                ),
+                suggested_action=action,
+                setup_grade="GRADE_A",
+                base_score=78,
+                entry_style="market",
+                entry_price=round(price, 4),
+                stop_loss=sl,
+                take_profit_1=target_value,
+                take_profit_2=target_value,
+                risk_reward=round(rr, 2),
+                actionable=True,
+                reaction_state="ENTRY_WINDOW_OPEN",
+                reaction_evidence=enriched_evidence,
+                entry_status="ENTRY_WINDOW_OPEN",
+                reaction_id=str(evidence.get("reaction_id") or "") or None,
+                zone_id=str(evidence.get("zone_id") or "") or None,
+                contingency_plan=ContingencyPlan(
+                    plan_a=(
+                        f"พิจารณา {'LONG' if side == 'long' else 'SHORT'} ภายในหน้าต่างยืนยัน "
+                        f"{entry_window_bars} แท่ง 15M ที่ {_fmt(price, sym)}; "
+                        f"SL {_fmt(sl, sym)} TP {_fmt(target_value, sym)}"
+                    ),
+                    plan_b=(
+                        "ยกเลิกทันทีเมื่อแท่ง 15M ปิด invalidate โซน "
+                        "หรือราคายืดเกิน 1.25 ATR จากจุด reaction"
+                    ),
+                    trigger_condition=trigger_reason,
+                    target_zone=f"Opposing 15M liquidity ({_fmt(target_value, sym)})",
+                    invalidation_level=sl,
+                ),
+                key_drivers=[
+                    trigger_reason,
+                    f"15M reaction age {reaction_age_bars} bar(s)",
+                    f"Structural R:R {rr:.2f}",
+                ],
+            ), None
 
         # =========================================================================
         # Scenario Classification Hierarchy (Priority Ordered)
@@ -451,11 +574,47 @@ class ScenarioMatrixEngine:
         # -------------------------------------------------------------------------
         # Priority 2: Institutional Pullback & Order Block Retests
         # -------------------------------------------------------------------------
-        bull_ob_touched = has_bull_ob and ob_bottom - atr * 0.20 <= price <= ob_top + atr * 0.20
+        # Use the same active OB collection as the reaction layer.  The old
+        # implementation inspected only ``signal.order_block``; consequently
+        # the reaction detector could see a valid demand/supply touch while S2
+        # looked at a different primary block and rejected the setup.
+        active_obs = list(getattr(signal, "order_blocks", []) or [])
+        if ob is not None and ob not in active_obs:
+            active_obs.append(ob)
+
+        def touched_ob(direction: str) -> Any | None:
+            candidates = []
+            for candidate in active_obs:
+                if str(getattr(candidate, "direction", "")).lower() != direction:
+                    continue
+                bottom, top = sorted((
+                    float(getattr(candidate, "bottom", 0.0)),
+                    float(getattr(candidate, "top", 0.0)),
+                ))
+                if bottom <= 0 or top <= 0:
+                    continue
+                price_inside = bottom - atr * 0.20 <= price <= top + atr * 0.20
+                candle_intersects = (
+                    last_low <= top + atr * 0.20
+                    and last_high >= bottom - atr * 0.20
+                )
+                if price_inside or candle_intersects:
+                    candidates.append(candidate)
+            return min(
+                candidates,
+                key=lambda candidate: abs(float(getattr(candidate, "mid", price)) - price),
+                default=None,
+            )
+
+        bull_retest_ob = touched_ob("bullish")
+        bull_top = float(getattr(bull_retest_ob, "top", 0.0)) if bull_retest_ob else 0.0
+        bull_bottom = float(getattr(bull_retest_ob, "bottom", 0.0)) if bull_retest_ob else 0.0
+        bull_mid = float(getattr(bull_retest_ob, "mid", 0.0)) if bull_retest_ob else 0.0
+        bull_ob_touched = bull_retest_ob is not None
         if bull_ob_touched and in_discount and bias != "bearish":
             bull_rejection = (
-                last_low <= ob_top + atr * 0.20
-                and last_close > max(ob_mid, last_open)
+                last_low <= bull_top + atr * 0.20
+                and last_close > max(bull_mid, last_open)
                 and (is_bull_absorp or delta_ratio >= 0.08)
             )
             if not bull_rejection:
@@ -467,10 +626,10 @@ class ScenarioMatrixEngine:
                     "ราคาแตะ Bullish OB แต่ยังไม่มี rejection close และ order-flow ฝั่งซื้อ",
                 )
             # S2-BULL: Bullish OB Retest (Dip Buy ใน Discount Zone)
-            entry = round(ob_mid if ob_mid > 0 else (ob_top + ob_bottom) / 2, 4)
+            entry = round(bull_mid if bull_mid > 0 else (bull_top + bull_bottom) / 2, 4)
             if entry <= 0:
                 entry = price
-            sl = round(ob_bottom - atr * 0.3, 4)
+            sl = round(bull_bottom - atr * 0.3, 4)
             sl_dist = max(entry - sl, atr * 0.5)
             structural_tp = structural_target("long", entry)
             if structural_tp is None:
@@ -516,18 +675,22 @@ class ScenarioMatrixEngine:
                 contingency_plan=ContingencyPlan(
                     plan_a=f"ตั้ง Limit Buy ที่ขอบ/กึ่งกลาง Bullish OB {_fmt(entry, sym)} (SL แคบใต้กล่อง {_fmt(sl, sym)}, TP {_fmt(tp1, sym)})",
                     plan_b=f"⚠️ หากราคาเนื้อเทียนปิดหลุดใต้ {_fmt(sl, sym)} แสดงว่า OB แตก ให้ยกเลิกแผน Long และกลับหน้าเตรียม Short ตามน้ำ",
-                    trigger_condition=f"ราคาย่อตัวแตะกล่อง Bullish OB [{_fmt(ob_bottom, sym)} - {_fmt(ob_top, sym)}] ในโซน Discount",
+                    trigger_condition=f"ราคาย่อตัวแตะกล่อง Bullish OB [{_fmt(bull_bottom, sym)} - {_fmt(bull_top, sym)}] ในโซน Discount",
                     target_zone=f"Swing High / Premium Zone ({_fmt(tp1, sym)})",
                     invalidation_level=sl,
                 ),
                 key_drivers=drivers,
             )
 
-        bear_ob_touched = has_bear_ob and ob_bottom - atr * 0.20 <= price <= ob_top + atr * 0.20
+        bear_retest_ob = touched_ob("bearish")
+        bear_top = float(getattr(bear_retest_ob, "top", 0.0)) if bear_retest_ob else 0.0
+        bear_bottom = float(getattr(bear_retest_ob, "bottom", 0.0)) if bear_retest_ob else 0.0
+        bear_mid = float(getattr(bear_retest_ob, "mid", 0.0)) if bear_retest_ob else 0.0
+        bear_ob_touched = bear_retest_ob is not None
         if bear_ob_touched and in_premium and bias != "bullish":
             bear_rejection = (
-                last_high >= ob_bottom - atr * 0.20
-                and last_close < min(ob_mid, last_open)
+                last_high >= bear_bottom - atr * 0.20
+                and last_close < min(bear_mid, last_open)
                 and (is_bear_absorp or delta_ratio <= -0.08)
             )
             if not bear_rejection:
@@ -539,10 +702,10 @@ class ScenarioMatrixEngine:
                     "ราคาแตะ Bearish OB แต่ยังไม่มี rejection close และ order-flow ฝั่งขาย",
                 )
             # S2-BEAR: Bearish OB Retest (Sell on Rally ใน Premium Zone)
-            entry = round(ob_mid if ob_mid > 0 else (ob_top + ob_bottom) / 2, 4)
+            entry = round(bear_mid if bear_mid > 0 else (bear_top + bear_bottom) / 2, 4)
             if entry <= 0:
                 entry = price
-            sl = round(ob_top + atr * 0.3, 4)
+            sl = round(bear_top + atr * 0.3, 4)
             sl_dist = max(sl - entry, atr * 0.5)
             structural_tp = structural_target("short", entry)
             if structural_tp is None:
@@ -588,7 +751,7 @@ class ScenarioMatrixEngine:
                 contingency_plan=ContingencyPlan(
                     plan_a=f"ตั้ง Limit Short ที่ขอบ/กึ่งกลาง Bearish OB {_fmt(entry, sym)} (SL แคบเหนือก้นกล่อง {_fmt(sl, sym)}, TP {_fmt(tp1, sym)})",
                     plan_b=f"⚠️ หากราคาเนื้อเทียนปิดทะลุเหนือ {_fmt(sl, sym)} แสดงว่าแนวต้านแตก ให้ยกเลิกแผน Short และกลับหน้าเตรียม Buy ตามน้ำ",
-                    trigger_condition=f"ราคาดีดแตะกล่อง Bearish OB [{_fmt(ob_bottom, sym)} - {_fmt(ob_top, sym)}] ในโซน Premium",
+                    trigger_condition=f"ราคาดีดแตะกล่อง Bearish OB [{_fmt(bear_bottom, sym)} - {_fmt(bear_top, sym)}] ในโซน Premium",
                     target_zone=f"Swing Low / Discount Zone ({_fmt(tp1, sym)})",
                     invalidation_level=sl,
                 ),
@@ -610,7 +773,7 @@ class ScenarioMatrixEngine:
         allow_top_sweep = (
             swept and sweep_dir == "high" and
             registered_top_sweep and
-            (in_premium or price >= eq) and
+            in_premium and
             not (sqz_status == "squeeze_fire" and sqz_mom > 0) and
             (is_bear_absorp or delta_ratio <= -0.08) and
             regime_dir != "bullish"
@@ -660,7 +823,7 @@ class ScenarioMatrixEngine:
         allow_bottom_sweep = (
             swept and sweep_dir == "low" and
             registered_bottom_sweep and
-            (in_discount or price <= eq) and
+            in_discount and
             not (sqz_status == "squeeze_fire" and sqz_mom < 0) and
             (is_bull_absorp or delta_ratio >= 0.08) and
             regime_dir != "bearish"
@@ -797,74 +960,221 @@ class ScenarioMatrixEngine:
             support_tolerance = max(atr * 0.15, price * 0.0005)
             support_zones: list[dict[str, Any]] = []
 
-            def add_support(bottom: float, top: float, source: str) -> None:
+            def add_support(
+                bottom: float,
+                top: float,
+                source: str,
+                *,
+                zone: Any | None = None,
+            ) -> None:
                 bottom, top = sorted((float(bottom), float(top)))
                 if bottom <= 0 or top <= 0:
                     return
-                if last_low <= top + support_tolerance and last_high >= bottom - support_tolerance:
-                    support_zones.append({"bottom": bottom, "top": top, "source": source})
+                if isinstance(zone, dict):
+                    confirmed_index = int(zone.get("confirmed_index", 0) or 0)
+                    zone_id = str(
+                        zone.get("zone_id") or zone.get("level_id") or ""
+                    )
+                else:
+                    confirmed_index = int(getattr(zone, "confirmed_index", 0) or 0)
+                    zone_id = str(
+                        getattr(zone, "zone_id", "")
+                        or getattr(zone, "level_id", "")
+                        or ""
+                    )
+                if not zone_id:
+                    zone_id = f"level:support:{source}:{bottom:.8f}:{top:.8f}"
+                if any(item["zone_id"] == zone_id for item in support_zones):
+                    return
+                support_zones.append({
+                    "bottom": bottom,
+                    "top": top,
+                    "source": source,
+                    "zone_id": zone_id,
+                    "confirmed_index": confirmed_index,
+                })
 
             # Active bullish order blocks are support areas. Include the selected
             # OB and the complete active-zone list because the selected OB may be
             # a supply zone while price is interacting with demand.
             if has_bull_ob:
-                add_support(ob_bottom, ob_top, "bullish_order_block")
+                add_support(ob_bottom, ob_top, "bullish_order_block", zone=ob)
             for active_ob in getattr(signal, "order_blocks", []) or []:
                 if str(getattr(active_ob, "direction", "")).lower() == "bullish":
                     add_support(
                         float(getattr(active_ob, "bottom", 0.0)),
                         float(getattr(active_ob, "top", 0.0)),
                         "bullish_order_block",
+                        zone=active_ob,
                     )
 
             # Registered equal/swing lows and the SMC strong/weak low are line
             # supports. They deliberately use only this signal's 15M structure;
             # no higher-timeframe field participates in classification or score.
-            for level in getattr(signal, "equal_lows", []) or []:
-                add_support(float(level), float(level), "equal_low")
+            equal_low_metadata = getattr(signal, "equal_low_levels", []) or []
+            if equal_low_metadata:
+                for level in equal_low_metadata:
+                    add_support(
+                        float(level.get("price", 0.0)),
+                        float(level.get("price", 0.0)),
+                        "equal_low",
+                        zone=level,
+                    )
+            else:
+                for level in getattr(signal, "equal_lows", []) or []:
+                    add_support(float(level), float(level), "equal_low")
             for swing in getattr(signal, "swing_lows", []) or []:
-                add_support(float(getattr(swing, "price", 0.0)), float(getattr(swing, "price", 0.0)), "swing_low")
+                add_support(
+                    float(getattr(swing, "price", 0.0)),
+                    float(getattr(swing, "price", 0.0)),
+                    "swing_low",
+                    zone=swing,
+                )
             strong_weak_low = getattr(signal, "strong_weak_low", None)
             if isinstance(strong_weak_low, dict):
                 add_support(
                     float(strong_weak_low.get("price", 0.0)),
                     float(strong_weak_low.get("price", 0.0)),
                     str(strong_weak_low.get("label", "smc_low")).lower().replace(" ", "_"),
+                    zone=strong_weak_low,
                 )
 
+            # Search the just-closed candle and the two preceding 15M candles.
+            # This is a local execution-timeframe latch, not MTF confirmation.
+            support_interactions: list[dict[str, Any]] = []
+            for zone in support_zones:
+                touched_ages: list[int] = []
+                for age in range(min(3, len(df))):
+                    candle_index = len(df) - 1 - age
+                    # A zone discovered by this candle (or later) did not exist
+                    # when the reaction occurred and must not explain it in
+                    # hindsight. Legacy/manual line levels use index 0.
+                    if int(zone.get("confirmed_index", 0)) >= candle_index:
+                        continue
+                    candle = df.iloc[-1 - age]
+                    candle_low = float(candle["low"])
+                    candle_high = float(candle["high"])
+                    if (
+                        candle_low <= zone["top"] + support_tolerance
+                        and candle_high >= zone["bottom"] - support_tolerance
+                    ):
+                        touched_ages.append(age)
+                if touched_ages:
+                    touch_age = max(touched_ages)
+                    window = df.iloc[-1 - touch_age:]
+                    confirmation_age = 0
+                    for candidate_age in range(touch_age + 1):
+                        candidate = df.iloc[-1 - candidate_age]
+                        candidate_open = float(candidate["open"])
+                        candidate_high = float(candidate["high"])
+                        candidate_low = float(candidate["low"])
+                        candidate_close = float(candidate["close"])
+                        candidate_range = max(candidate_high - candidate_low, 1e-6)
+                        candidate_body = abs(candidate_close - candidate_open) / candidate_range
+                        candidate_location = (candidate_close - candidate_low) / candidate_range
+                        bullish_confirm = (
+                            candidate_close > zone["top"] + support_tolerance
+                            and candidate_close > candidate_open
+                            and candidate_body >= 0.35
+                            and candidate_location >= 0.60
+                        )
+                        bearish_confirm = (
+                            candidate_close < zone["bottom"] - support_tolerance
+                            and candidate_close < candidate_open
+                            and candidate_body >= 0.35
+                            and candidate_location <= 0.40
+                        )
+                        if bullish_confirm or bearish_confirm:
+                            confirmation_age = candidate_age
+                            break
+                    confirmation = df.iloc[-1 - confirmation_age]
+                    support_interactions.append({
+                        **zone,
+                        "reaction_age_bars": touch_age,
+                        "touch_candle_index": len(df) - 1 - touch_age,
+                        "reaction_candle_index": len(df) - 1 - confirmation_age,
+                        "confirmation_age_bars": confirmation_age,
+                        "window_low": float(window["low"].min()),
+                        "window_high": float(window["high"].max()),
+                        "candle_open": float(confirmation["open"]),
+                        "candle_high": float(confirmation["high"]),
+                        "candle_low": float(confirmation["low"]),
+                        "candle_close": float(confirmation["close"]),
+                    })
+            support_zones = support_interactions
+
             if support_zones:
-                # A candle can traverse several historical levels. Classify the
-                # support nearest its close so a stale distant line cannot win.
+                # Preserve the oldest still-valid interaction inside the reaction
+                # window. A newly confirmed nearby zone must not reset a pending
+                # confirmation. Distance breaks ties; expired zones were filtered.
                 def distance_to_close(zone: dict[str, Any]) -> float:
                     if zone["bottom"] <= last_close <= zone["top"]:
                         return 0.0
                     return min(abs(last_close - zone["bottom"]), abs(last_close - zone["top"]))
 
-                support = min(support_zones, key=distance_to_close)
+                support = min(
+                    support_zones,
+                    key=lambda zone: (
+                        -zone["reaction_age_bars"],
+                        int(zone.get("confirmed_index", 0)),
+                        distance_to_close(zone),
+                    ),
+                )
                 support_bottom = float(support["bottom"])
                 support_top = float(support["top"])
                 support_mid = (support_bottom + support_top) / 2.0
-                candle_range = max(last_high - last_low, 1e-6)
-                close_location = (last_close - last_low) / candle_range
-                bullish_body = last_close > last_open and body_ratio >= 0.35
-                bearish_body = last_close < last_open and body_ratio >= 0.35
-                bullish_flow = is_bull_absorp or delta_ratio >= 0.08
-                bearish_flow = is_bear_absorp or delta_ratio <= -0.08
-                closed_above = last_close > support_top + support_tolerance
-                closed_below = last_close < support_bottom - support_tolerance
-                swept_below = last_low < support_bottom - support_tolerance
+                reaction_age = int(support["reaction_age_bars"])
+                confirmation_age = int(support.get("confirmation_age_bars", 0))
+                reaction_open = float(support["candle_open"])
+                reaction_high = float(support["candle_high"])
+                reaction_low = float(support["candle_low"])
+                reaction_close = float(support["candle_close"])
+                reaction_id = (
+                    f"{sym}:{timeframe}:support:{support['zone_id']}:"
+                    f"{int(support['touch_candle_index'])}"
+                )
+                candle_range = max(reaction_high - reaction_low, 1e-6)
+                reaction_body_ratio = abs(reaction_close - reaction_open) / candle_range
+                close_location = (reaction_close - reaction_low) / candle_range
+                bullish_body = reaction_close > reaction_open and reaction_body_ratio >= 0.35
+                bearish_body = reaction_close < reaction_open and reaction_body_ratio >= 0.35
+                bullish_flow = (
+                    is_bull_absorp
+                    or delta_ratio >= 0.08
+                    or ((bos or choch) and bias == "bullish")
+                    or (sqz_status == "squeeze_fire" and sqz_mom > 0)
+                )
+                bearish_flow = (
+                    is_bear_absorp
+                    or delta_ratio <= -0.08
+                    or ((bos or choch) and bias == "bearish")
+                    or (sqz_status == "squeeze_fire" and sqz_mom < 0)
+                )
+                closed_above = reaction_close > support_top + support_tolerance
+                closed_below = reaction_close < support_bottom - support_tolerance
+                swept_below = float(support["window_low"]) < support_bottom - support_tolerance
+                current_holds_above = last_close > support_bottom - support_tolerance
 
                 evidence = {
                     "timeframe": "15m",
                     "candle_policy": "closed_only",
                     "support_source": support["source"],
+                    "zone_id": support["zone_id"],
+                    "zone_confirmed_index": int(support.get("confirmed_index", 0)),
+                    "reaction_id": reaction_id,
+                    "reaction_candle_index": int(support["reaction_candle_index"]),
+                    "touch_candle_index": int(support["touch_candle_index"]),
+                    "window_low": round(float(support["window_low"]), 8),
+                    "window_high": round(float(support["window_high"]), 8),
                     "support_bottom": round(support_bottom, 8),
                     "support_top": round(support_top, 8),
-                    "candle_open": round(last_open, 8),
-                    "candle_high": round(last_high, 8),
-                    "candle_low": round(last_low, 8),
-                    "candle_close": round(last_close, 8),
-                    "body_ratio": round(body_ratio, 4),
+                    "reaction_age_bars": reaction_age,
+                    "confirmation_age_bars": confirmation_age,
+                    "candle_open": round(reaction_open, 8),
+                    "candle_high": round(reaction_high, 8),
+                    "candle_low": round(reaction_low, 8),
+                    "candle_close": round(reaction_close, 8),
+                    "body_ratio": round(reaction_body_ratio, 4),
                     "close_location": round(close_location, 4),
                     "delta_ratio": round(delta_ratio, 4),
                     "bullish_flow": bullish_flow,
@@ -880,22 +1190,45 @@ class ScenarioMatrixEngine:
                     plan_a: str,
                     plan_b: str,
                     base_score: int,
+                    *,
+                    entry_status: str = "AWAITING_CONFIRMATION",
+                    entry_block_reason: str | None = None,
+                    pressure_warning: dict[str, Any] | None = None,
                 ) -> ScenarioResult:
+                    confirmed_no_entry = entry_status == "CONFIRMED_NO_ENTRY"
+                    pressure_only = entry_status == "PRESSURE_WARNING"
                     return ScenarioResult(
                         scenario_id=scenario_id,
                         name_th=name_th,
                         name_en=name_en,
                         archetype="support_reaction",
-                        suggested_action="wait_confirmation",
-                        setup_grade="WATCH",
+                        suggested_action=(
+                            "do_not_chase" if confirmed_no_entry
+                            else "monitor_breakdown" if pressure_only
+                            else "wait_confirmation"
+                        ),
+                        setup_grade=(
+                            "CONFIRMED" if confirmed_no_entry
+                            else "PRESSURE" if pressure_only
+                            else "WATCH"
+                        ),
                         base_score=base_score,
                         entry_style="wait",
                         entry_price=price,
                         actionable=False,
                         reaction_state=state,
                         reaction_evidence=evidence,
+                        entry_status=entry_status,
+                        entry_block_reason=entry_block_reason,
+                        reaction_id=reaction_id,
+                        zone_id=support["zone_id"],
+                        pressure_warning=pressure_warning or {},
                         contingency_plan=ContingencyPlan(
-                            plan_a=plan_a,
+                            plan_a=(
+                                f"ยืนยันปฏิกิริยาแล้ว แต่ไม่เปิดสถานะ: {entry_block_reason}; ห้ามไล่ราคา"
+                                if confirmed_no_entry
+                                else plan_a
+                            ),
                             plan_b=plan_b,
                             trigger_condition=reason,
                             target_zone=f"15M support {_fmt(support_bottom, sym)} - {_fmt(support_top, sym)}",
@@ -908,7 +1241,23 @@ class ScenarioMatrixEngine:
                         ],
                     )
 
-                if swept_below and closed_above and bullish_body and bullish_flow and close_location >= 0.60:
+                if (
+                    swept_below and closed_above and bullish_body and bullish_flow
+                    and close_location >= 0.60 and current_holds_above
+                ):
+                    promoted, block_reason = reaction_entry(
+                        side="long",
+                        scenario_id="S8_SUPPORT_FALSE_BREAK_ENTRY",
+                        name_th="🟢 False Break Reclaim — เปิดหน้าต่าง Long 15M",
+                        name_en="15M Support False-Break Entry Window",
+                        zone_bottom=support_bottom,
+                        zone_top=support_top,
+                        reaction_age_bars=reaction_age,
+                        evidence=evidence,
+                        trigger_reason="False break reclaim พร้อมแรงซื้อและราคายังยืนเหนือแนวรับ",
+                    )
+                    if promoted is not None:
+                        return promoted
                     return support_observation(
                         "FALSE_BREAK_RECLAIM",
                         "S8_SUPPORT_FALSE_BREAK_RECLAIM",
@@ -918,9 +1267,27 @@ class ScenarioMatrixEngine:
                         "รอแท่งถัดไปยืนเหนือโซนหรือ retest ไม่หลุดก่อนพิจารณา Long",
                         "ถ้าปิดกลับใต้แนวรับ ให้ยกเลิกมุมมองเด้งและเปลี่ยนเป็น Breakdown Watch",
                         68,
+                        entry_status="CONFIRMED_NO_ENTRY",
+                        entry_block_reason=block_reason,
                     )
 
-                if closed_above and bullish_body and bullish_flow and close_location >= 0.60:
+                if (
+                    closed_above and bullish_body and bullish_flow
+                    and close_location >= 0.60 and current_holds_above
+                ):
+                    promoted, block_reason = reaction_entry(
+                        side="long",
+                        scenario_id="S8_SUPPORT_BOUNCE_ENTRY",
+                        name_th="🟢 Support Bounce — เปิดหน้าต่าง Long 15M",
+                        name_en="15M Support Bounce Entry Window",
+                        zone_bottom=support_bottom,
+                        zone_top=support_top,
+                        reaction_age_bars=reaction_age,
+                        evidence=evidence,
+                        trigger_reason="แท่งปิดปฏิเสธแนวรับพร้อมแรงซื้อและ R:R เชิงโครงสร้างผ่าน",
+                    )
+                    if promoted is not None:
+                        return promoted
                     return support_observation(
                         "BOUNCE_CONFIRMED",
                         "S8_SUPPORT_BOUNCE_CONFIRMED",
@@ -930,6 +1297,8 @@ class ScenarioMatrixEngine:
                         "เฝ้ารอ retest ที่ยืนเหนือแนวรับหรือ S2/S3 ยืนยันครบก่อนเข้า Long",
                         "ถ้าแท่งถัดไปปิดใต้แนวรับ การเด้งล้มเหลวและต้องกลับเป็น Breakdown Watch",
                         65,
+                        entry_status="CONFIRMED_NO_ENTRY",
+                        entry_block_reason=block_reason,
                     )
 
                 if closed_below and bearish_body and bearish_flow and close_location <= 0.40:
@@ -942,6 +1311,50 @@ class ScenarioMatrixEngine:
                         "ห้ามรับมีด; รอ retest ใต้แนวรับและ S4/BOS ยืนยันก่อนพิจารณา Short",
                         "ถ้าราคาปิด reclaim กลับเหนือโซน ให้ยกเลิกมุมมอง Breakdown",
                         65,
+                        entry_status="CONFIRMED_WATCH",
+                    )
+
+                pressure_factors = {
+                    "bearish_body_ge_60": bearish_body and reaction_body_ratio >= 0.60,
+                    "close_in_bottom_20": close_location <= 0.20,
+                    "seller_delta_le_minus_20": delta_ratio <= -0.20,
+                    "momentum_accelerating_down": mom_dir == "accelerating_down",
+                    "volume_expansion": vol_spike,
+                }
+                pressure_score = (
+                    25 * int(pressure_factors["bearish_body_ge_60"])
+                    + 25 * int(pressure_factors["close_in_bottom_20"])
+                    + 25 * int(pressure_factors["seller_delta_le_minus_20"])
+                    + 15 * int(pressure_factors["momentum_accelerating_down"])
+                    + 10 * int(pressure_factors["volume_expansion"])
+                )
+                if (
+                    confirmation_age == 0
+                    and not closed_below
+                    and bearish_body
+                    and bearish_flow
+                    and pressure_score >= 70
+                ):
+                    pressure = {
+                        "side": "bearish",
+                        "level": "HIGH" if pressure_score >= 85 else "ELEVATED",
+                        "score": pressure_score,
+                        "factors": pressure_factors,
+                        "confirmation_trigger": round(support_bottom, 8),
+                        "invalidation_reclaim": round(support_mid, 8),
+                        "execution_authorized": False,
+                    }
+                    return support_observation(
+                        "SUPPORT_FAILURE_PRESSURE",
+                        "S8_SUPPORT_FAILURE_PRESSURE",
+                        "🔶 Bearish Pressure — แนวรับเสี่ยง Breakdown",
+                        "15M Support Failure Pressure Warning",
+                        "แรงขายกดแนวรับรุนแรง แต่แท่งยังไม่ปิดหลุดขอบล่าง",
+                        f"เตือนล่วงหน้า: เฝ้ารอแท่ง 15M ปิดต่ำกว่า {_fmt(support_bottom, sym)} เพื่อยืนยัน Breakdown",
+                        f"ยกเลิกแรงกดดันเมื่อราคาปิด reclaim เหนือ {_fmt(support_mid, sym)}",
+                        62,
+                        entry_status="PRESSURE_WARNING",
+                        pressure_warning=pressure,
                     )
 
                 missing: list[str] = []
@@ -973,30 +1386,69 @@ class ScenarioMatrixEngine:
             resistance_tolerance = max(atr * 0.15, price * 0.0005)
             resistance_zones: list[dict[str, Any]] = []
 
-            def add_resistance(bottom: float, top: float, source: str) -> None:
+            def add_resistance(
+                bottom: float,
+                top: float,
+                source: str,
+                *,
+                zone: Any | None = None,
+            ) -> None:
                 bottom, top = sorted((float(bottom), float(top)))
                 if bottom <= 0 or top <= 0:
                     return
-                if last_low <= top + resistance_tolerance and last_high >= bottom - resistance_tolerance:
-                    resistance_zones.append({"bottom": bottom, "top": top, "source": source})
+                if isinstance(zone, dict):
+                    confirmed_index = int(zone.get("confirmed_index", 0) or 0)
+                    zone_id = str(
+                        zone.get("zone_id") or zone.get("level_id") or ""
+                    )
+                else:
+                    confirmed_index = int(getattr(zone, "confirmed_index", 0) or 0)
+                    zone_id = str(
+                        getattr(zone, "zone_id", "")
+                        or getattr(zone, "level_id", "")
+                        or ""
+                    )
+                if not zone_id:
+                    zone_id = f"level:resistance:{source}:{bottom:.8f}:{top:.8f}"
+                if any(item["zone_id"] == zone_id for item in resistance_zones):
+                    return
+                resistance_zones.append({
+                    "bottom": bottom,
+                    "top": top,
+                    "source": source,
+                    "zone_id": zone_id,
+                    "confirmed_index": confirmed_index,
+                })
 
             if has_bear_ob:
-                add_resistance(ob_bottom, ob_top, "bearish_order_block")
+                add_resistance(ob_bottom, ob_top, "bearish_order_block", zone=ob)
             for active_ob in getattr(signal, "order_blocks", []) or []:
                 if str(getattr(active_ob, "direction", "")).lower() == "bearish":
                     add_resistance(
                         float(getattr(active_ob, "bottom", 0.0)),
                         float(getattr(active_ob, "top", 0.0)),
                         "bearish_order_block",
+                        zone=active_ob,
                     )
 
-            for level in getattr(signal, "equal_highs", []) or []:
-                add_resistance(float(level), float(level), "equal_high")
+            equal_high_metadata = getattr(signal, "equal_high_levels", []) or []
+            if equal_high_metadata:
+                for level in equal_high_metadata:
+                    add_resistance(
+                        float(level.get("price", 0.0)),
+                        float(level.get("price", 0.0)),
+                        "equal_high",
+                        zone=level,
+                    )
+            else:
+                for level in getattr(signal, "equal_highs", []) or []:
+                    add_resistance(float(level), float(level), "equal_high")
             for swing in getattr(signal, "swing_highs", []) or []:
                 add_resistance(
                     float(getattr(swing, "price", 0.0)),
                     float(getattr(swing, "price", 0.0)),
                     "swing_high",
+                    zone=swing,
                 )
             strong_weak_high = getattr(signal, "strong_weak_high", None)
             if isinstance(strong_weak_high, dict):
@@ -1004,39 +1456,139 @@ class ScenarioMatrixEngine:
                     float(strong_weak_high.get("price", 0.0)),
                     float(strong_weak_high.get("price", 0.0)),
                     str(strong_weak_high.get("label", "smc_high")).lower().replace(" ", "_"),
+                    zone=strong_weak_high,
                 )
 
+            resistance_interactions: list[dict[str, Any]] = []
+            for zone in resistance_zones:
+                touched_ages: list[int] = []
+                for age in range(min(3, len(df))):
+                    candle_index = len(df) - 1 - age
+                    if int(zone.get("confirmed_index", 0)) >= candle_index:
+                        continue
+                    candle = df.iloc[-1 - age]
+                    candle_low = float(candle["low"])
+                    candle_high = float(candle["high"])
+                    if (
+                        candle_low <= zone["top"] + resistance_tolerance
+                        and candle_high >= zone["bottom"] - resistance_tolerance
+                    ):
+                        touched_ages.append(age)
+                if touched_ages:
+                    touch_age = max(touched_ages)
+                    window = df.iloc[-1 - touch_age:]
+                    confirmation_age = 0
+                    for candidate_age in range(touch_age + 1):
+                        candidate = df.iloc[-1 - candidate_age]
+                        candidate_open = float(candidate["open"])
+                        candidate_high = float(candidate["high"])
+                        candidate_low = float(candidate["low"])
+                        candidate_close = float(candidate["close"])
+                        candidate_range = max(candidate_high - candidate_low, 1e-6)
+                        candidate_body = abs(candidate_close - candidate_open) / candidate_range
+                        candidate_location = (candidate_close - candidate_low) / candidate_range
+                        bearish_confirm = (
+                            candidate_close < zone["bottom"] - resistance_tolerance
+                            and candidate_close < candidate_open
+                            and candidate_body >= 0.35
+                            and candidate_location <= 0.40
+                        )
+                        bullish_confirm = (
+                            candidate_close > zone["top"] + resistance_tolerance
+                            and candidate_close > candidate_open
+                            and candidate_body >= 0.35
+                            and candidate_location >= 0.60
+                        )
+                        if bearish_confirm or bullish_confirm:
+                            confirmation_age = candidate_age
+                            break
+                    confirmation = df.iloc[-1 - confirmation_age]
+                    resistance_interactions.append({
+                        **zone,
+                        "reaction_age_bars": touch_age,
+                        "touch_candle_index": len(df) - 1 - touch_age,
+                        "reaction_candle_index": len(df) - 1 - confirmation_age,
+                        "confirmation_age_bars": confirmation_age,
+                        "window_low": float(window["low"].min()),
+                        "window_high": float(window["high"].max()),
+                        "candle_open": float(confirmation["open"]),
+                        "candle_high": float(confirmation["high"]),
+                        "candle_low": float(confirmation["low"]),
+                        "candle_close": float(confirmation["close"]),
+                    })
+            resistance_zones = resistance_interactions
+
             if resistance_zones:
+                # Same latch policy as support: preserve the pending interaction
+                # until it expires or invalidates, rather than chase newer zones.
                 def distance_to_close(zone: dict[str, Any]) -> float:
                     if zone["bottom"] <= last_close <= zone["top"]:
                         return 0.0
                     return min(abs(last_close - zone["bottom"]), abs(last_close - zone["top"]))
 
-                resistance = min(resistance_zones, key=distance_to_close)
+                resistance = min(
+                    resistance_zones,
+                    key=lambda zone: (
+                        -zone["reaction_age_bars"],
+                        int(zone.get("confirmed_index", 0)),
+                        distance_to_close(zone),
+                    ),
+                )
                 resistance_bottom = float(resistance["bottom"])
                 resistance_top = float(resistance["top"])
                 resistance_mid = (resistance_bottom + resistance_top) / 2.0
-                candle_range = max(last_high - last_low, 1e-6)
-                close_location = (last_close - last_low) / candle_range
-                bullish_body = last_close > last_open and body_ratio >= 0.35
-                bearish_body = last_close < last_open and body_ratio >= 0.35
-                bullish_flow = is_bull_absorp or delta_ratio >= 0.08
-                bearish_flow = is_bear_absorp or delta_ratio <= -0.08
-                closed_above = last_close > resistance_top + resistance_tolerance
-                closed_below = last_close < resistance_bottom - resistance_tolerance
-                swept_above = last_high > resistance_top + resistance_tolerance
+                reaction_age = int(resistance["reaction_age_bars"])
+                confirmation_age = int(resistance.get("confirmation_age_bars", 0))
+                reaction_open = float(resistance["candle_open"])
+                reaction_high = float(resistance["candle_high"])
+                reaction_low = float(resistance["candle_low"])
+                reaction_close = float(resistance["candle_close"])
+                reaction_id = (
+                    f"{sym}:{timeframe}:resistance:{resistance['zone_id']}:"
+                    f"{int(resistance['touch_candle_index'])}"
+                )
+                candle_range = max(reaction_high - reaction_low, 1e-6)
+                reaction_body_ratio = abs(reaction_close - reaction_open) / candle_range
+                close_location = (reaction_close - reaction_low) / candle_range
+                bullish_body = reaction_close > reaction_open and reaction_body_ratio >= 0.35
+                bearish_body = reaction_close < reaction_open and reaction_body_ratio >= 0.35
+                bullish_flow = (
+                    is_bull_absorp
+                    or delta_ratio >= 0.08
+                    or ((bos or choch) and bias == "bullish")
+                    or (sqz_status == "squeeze_fire" and sqz_mom > 0)
+                )
+                bearish_flow = (
+                    is_bear_absorp
+                    or delta_ratio <= -0.08
+                    or ((bos or choch) and bias == "bearish")
+                    or (sqz_status == "squeeze_fire" and sqz_mom < 0)
+                )
+                closed_above = reaction_close > resistance_top + resistance_tolerance
+                closed_below = reaction_close < resistance_bottom - resistance_tolerance
+                swept_above = float(resistance["window_high"]) > resistance_top + resistance_tolerance
+                current_holds_below = last_close < resistance_top + resistance_tolerance
 
                 evidence = {
                     "timeframe": "15m",
                     "candle_policy": "closed_only",
                     "resistance_source": resistance["source"],
+                    "zone_id": resistance["zone_id"],
+                    "zone_confirmed_index": int(resistance.get("confirmed_index", 0)),
+                    "reaction_id": reaction_id,
+                    "reaction_candle_index": int(resistance["reaction_candle_index"]),
+                    "touch_candle_index": int(resistance["touch_candle_index"]),
+                    "window_low": round(float(resistance["window_low"]), 8),
+                    "window_high": round(float(resistance["window_high"]), 8),
                     "resistance_bottom": round(resistance_bottom, 8),
                     "resistance_top": round(resistance_top, 8),
-                    "candle_open": round(last_open, 8),
-                    "candle_high": round(last_high, 8),
-                    "candle_low": round(last_low, 8),
-                    "candle_close": round(last_close, 8),
-                    "body_ratio": round(body_ratio, 4),
+                    "reaction_age_bars": reaction_age,
+                    "confirmation_age_bars": confirmation_age,
+                    "candle_open": round(reaction_open, 8),
+                    "candle_high": round(reaction_high, 8),
+                    "candle_low": round(reaction_low, 8),
+                    "candle_close": round(reaction_close, 8),
+                    "body_ratio": round(reaction_body_ratio, 4),
                     "close_location": round(close_location, 4),
                     "delta_ratio": round(delta_ratio, 4),
                     "bullish_flow": bullish_flow,
@@ -1052,22 +1604,45 @@ class ScenarioMatrixEngine:
                     plan_a: str,
                     plan_b: str,
                     base_score: int,
+                    *,
+                    entry_status: str = "AWAITING_CONFIRMATION",
+                    entry_block_reason: str | None = None,
+                    pressure_warning: dict[str, Any] | None = None,
                 ) -> ScenarioResult:
+                    confirmed_no_entry = entry_status == "CONFIRMED_NO_ENTRY"
+                    pressure_only = entry_status == "PRESSURE_WARNING"
                     return ScenarioResult(
                         scenario_id=scenario_id,
                         name_th=name_th,
                         name_en=name_en,
                         archetype="resistance_reaction",
-                        suggested_action="wait_confirmation",
-                        setup_grade="WATCH",
+                        suggested_action=(
+                            "do_not_chase" if confirmed_no_entry
+                            else "monitor_breakout" if pressure_only
+                            else "wait_confirmation"
+                        ),
+                        setup_grade=(
+                            "CONFIRMED" if confirmed_no_entry
+                            else "PRESSURE" if pressure_only
+                            else "WATCH"
+                        ),
                         base_score=base_score,
                         entry_style="wait",
                         entry_price=price,
                         actionable=False,
                         reaction_state=state,
                         reaction_evidence=evidence,
+                        entry_status=entry_status,
+                        entry_block_reason=entry_block_reason,
+                        reaction_id=reaction_id,
+                        zone_id=resistance["zone_id"],
+                        pressure_warning=pressure_warning or {},
                         contingency_plan=ContingencyPlan(
-                            plan_a=plan_a,
+                            plan_a=(
+                                f"ยืนยันปฏิกิริยาแล้ว แต่ไม่เปิดสถานะ: {entry_block_reason}; ห้ามไล่ราคา"
+                                if confirmed_no_entry
+                                else plan_a
+                            ),
                             plan_b=plan_b,
                             trigger_condition=reason,
                             target_zone=(
@@ -1083,7 +1658,23 @@ class ScenarioMatrixEngine:
                         ],
                     )
 
-                if swept_above and closed_below and bearish_body and bearish_flow and close_location <= 0.40:
+                if (
+                    swept_above and closed_below and bearish_body and bearish_flow
+                    and close_location <= 0.40 and current_holds_below
+                ):
+                    promoted, block_reason = reaction_entry(
+                        side="short",
+                        scenario_id="S9_RESISTANCE_FALSE_BREAK_ENTRY",
+                        name_th="🔴 False Break Rejection — เปิดหน้าต่าง Short 15M",
+                        name_en="15M Resistance False-Break Entry Window",
+                        zone_bottom=resistance_bottom,
+                        zone_top=resistance_top,
+                        reaction_age_bars=reaction_age,
+                        evidence=evidence,
+                        trigger_reason="False break เหนือแนวต้าน ปิดกลับพร้อมแรงขายและราคายังอยู่ใต้โซน",
+                    )
+                    if promoted is not None:
+                        return promoted
                     return resistance_observation(
                         "FALSE_BREAK_REJECTION",
                         "S9_RESISTANCE_FALSE_BREAK_REJECTION",
@@ -1093,9 +1684,27 @@ class ScenarioMatrixEngine:
                         "รอแท่งถัดไปยืนใต้โซนหรือ retest ไม่ผ่านก่อนพิจารณา Short",
                         "ถ้าปิด reclaim เหนือแนวต้าน ให้ยกเลิกมุมมอง rejection",
                         68,
+                        entry_status="CONFIRMED_NO_ENTRY",
+                        entry_block_reason=block_reason,
                     )
 
-                if closed_below and bearish_body and bearish_flow and close_location <= 0.40:
+                if (
+                    closed_below and bearish_body and bearish_flow
+                    and close_location <= 0.40 and current_holds_below
+                ):
+                    promoted, block_reason = reaction_entry(
+                        side="short",
+                        scenario_id="S9_RESISTANCE_REJECTION_ENTRY",
+                        name_th="🔴 Resistance Rejection — เปิดหน้าต่าง Short 15M",
+                        name_en="15M Resistance Rejection Entry Window",
+                        zone_bottom=resistance_bottom,
+                        zone_top=resistance_top,
+                        reaction_age_bars=reaction_age,
+                        evidence=evidence,
+                        trigger_reason="แท่งปิดปฏิเสธแนวต้านพร้อมแรงขายและ R:R เชิงโครงสร้างผ่าน",
+                    )
+                    if promoted is not None:
+                        return promoted
                     return resistance_observation(
                         "REJECTION_CONFIRMED",
                         "S9_RESISTANCE_REJECTION_CONFIRMED",
@@ -1105,6 +1714,8 @@ class ScenarioMatrixEngine:
                         "เฝ้ารอ retest ที่ไม่ผ่านแนวต้านหรือ S2/S3 ยืนยันครบก่อนเข้า Short",
                         "ถ้าแท่งถัดไปปิดเหนือแนวต้าน การ rejection ล้มเหลวและต้องกลับเป็น Breakout Watch",
                         65,
+                        entry_status="CONFIRMED_NO_ENTRY",
+                        entry_block_reason=block_reason,
                     )
 
                 if closed_above and bullish_body and bullish_flow and close_location >= 0.60:
@@ -1117,6 +1728,50 @@ class ScenarioMatrixEngine:
                         "ห้ามไล่ราคา; รอ retest เหนือแนวต้านและ S1/S4 ยืนยันก่อนพิจารณา Long",
                         "ถ้าราคาปิดกลับใต้โซน ให้ยกเลิกมุมมอง Breakout",
                         65,
+                        entry_status="CONFIRMED_WATCH",
+                    )
+
+                pressure_factors = {
+                    "bullish_body_ge_60": bullish_body and reaction_body_ratio >= 0.60,
+                    "close_in_top_20": close_location >= 0.80,
+                    "buyer_delta_ge_20": delta_ratio >= 0.20,
+                    "momentum_accelerating_up": mom_dir == "accelerating_up",
+                    "volume_expansion": vol_spike,
+                }
+                pressure_score = (
+                    25 * int(pressure_factors["bullish_body_ge_60"])
+                    + 25 * int(pressure_factors["close_in_top_20"])
+                    + 25 * int(pressure_factors["buyer_delta_ge_20"])
+                    + 15 * int(pressure_factors["momentum_accelerating_up"])
+                    + 10 * int(pressure_factors["volume_expansion"])
+                )
+                if (
+                    confirmation_age == 0
+                    and not closed_above
+                    and bullish_body
+                    and bullish_flow
+                    and pressure_score >= 70
+                ):
+                    pressure = {
+                        "side": "bullish",
+                        "level": "HIGH" if pressure_score >= 85 else "ELEVATED",
+                        "score": pressure_score,
+                        "factors": pressure_factors,
+                        "confirmation_trigger": round(resistance_top, 8),
+                        "invalidation_reclaim": round(resistance_mid, 8),
+                        "execution_authorized": False,
+                    }
+                    return resistance_observation(
+                        "RESISTANCE_BREAKOUT_PRESSURE",
+                        "S9_RESISTANCE_BREAKOUT_PRESSURE",
+                        "🔷 Bullish Pressure — แนวต้านเสี่ยง Breakout",
+                        "15M Resistance Breakout Pressure Warning",
+                        "แรงซื้อกดแนวต้านรุนแรง แต่แท่งยังไม่ปิดผ่านขอบบน",
+                        f"เตือนล่วงหน้า: เฝ้ารอแท่ง 15M ปิดเหนือ {_fmt(resistance_top, sym)} เพื่อยืนยัน Breakout",
+                        f"ยกเลิกแรงกดดันเมื่อราคาปิดกลับต่ำกว่า {_fmt(resistance_mid, sym)}",
+                        62,
+                        entry_status="PRESSURE_WARNING",
+                        pressure_warning=pressure,
                     )
 
                 missing: list[str] = []

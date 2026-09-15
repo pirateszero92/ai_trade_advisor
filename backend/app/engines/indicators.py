@@ -37,6 +37,13 @@ class VolumeDeltaResult:
     description: str
     cvd_zscore: float = 0.0
     source: Literal["exchange_aggressor", "estimated_candle_anatomy", "unavailable"] = "estimated_candle_anatomy"
+    flow_source: str = "unavailable"
+    divergence: Literal["bullish", "bearish", "none"] = "none"
+    divergence_evidence: dict = None
+    absorption_evidence: dict = None
+    cvd_tail: list[float] = None
+    cvd_values: list[float] = None
+    delta_values: list[float] = None
 
 
 class AdvancedIndicatorsEngine:
@@ -226,18 +233,42 @@ class AdvancedIndicatorsEngine:
             raise ValueError("OHLCV data contains NaN or infinite values")
         open_p, high, low, close, vol = (
             numeric["open"], numeric["high"], numeric["low"],
-            numeric["close"], numeric["volume"].clip(lower=0),
+            numeric["close"], numeric["volume"],
         )
+        if bool((vol < 0).any()):
+            raise ValueError("OHLCV volume cannot be negative")
+        if bool(((high < low) | (high < open_p) | (high < close) |
+                 (low > open_p) | (low > close)).any()):
+            raise ValueError("OHLCV data contains impossible candle geometry")
 
         hl_range = high - low
         hl_range = hl_range.replace(0, 1e-8)
 
-        if {"buy_volume", "sell_volume"}.issubset(df.columns):
+        trusted_flow_sources = {"binance_taker_volume"}
+        normalized_sources = (
+            df["flow_source"].astype("string").str.strip().str.lower()
+            if "flow_source" in df.columns else pd.Series(dtype="string")
+        )
+        flow_sources = set(normalized_sources.dropna())
+        trusted_aggressor = (
+            len(normalized_sources) == len(df)
+            and bool(flow_sources)
+            and not normalized_sources.isna().any()
+            and bool(normalized_sources.isin(trusted_flow_sources).all())
+        )
+
+        if {"buy_volume", "sell_volume"}.issubset(df.columns) and trusted_aggressor:
             aggressor = df[["buy_volume", "sell_volume"]].apply(pd.to_numeric, errors="coerce")
             if not np.isfinite(aggressor.to_numpy()).all():
                 raise ValueError("Aggressor volume contains NaN or infinite values")
-            buy_vol = aggressor["buy_volume"].clip(lower=0)
-            sell_vol = aggressor["sell_volume"].clip(lower=0)
+            if bool((aggressor < 0).any().any()):
+                raise ValueError("Aggressor volume cannot be negative")
+            buy_vol = aggressor["buy_volume"]
+            sell_vol = aggressor["sell_volume"]
+            reported_total = buy_vol + sell_vol
+            tolerance = np.maximum(vol.abs() * 0.01, 1e-8)
+            if bool(((reported_total - vol).abs() > tolerance).any()):
+                raise ValueError("Aggressor buy/sell volume does not reconcile with total volume")
             delta_series = buy_vol - sell_vol
             delta_source = "exchange_aggressor"
         else:
@@ -280,21 +311,95 @@ class AdvancedIndicatorsEngine:
 
         is_absorption = False
         absorption_type = None
+        divergence = "none"
+        divergence_evidence = {}
 
-        if (
-            close.iloc[-1] <= recent_lows.quantile(bullish_absorption_quantile)
-            and curr_delta > 0
-        ):
+        # Immediate, causal divergence at a closed reclaim candle. Require both
+        # a meaningful price excursion and net CVD efficiency so tiny floating
+        # point/noise differences cannot become Grade-S evidence.
+        pivot_end = len(df) - 2
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            ((high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()),
+            axis=1,
+        ).max(axis=1)
+        atr_length = 14
+        seed_length = min(atr_length, len(tr))
+        atr14 = float(tr.iloc[:seed_length].mean())
+        for current_tr in tr.iloc[seed_length:]:
+            atr14 += (float(current_tr) - atr14) / float(atr_length)
+        if delta_source == "exchange_aggressor" and pivot_end >= 5:
+            lows = []
+            highs = []
+            for i in range(2, pivot_end):
+                if low.iloc[i] < low.iloc[i-2:i].min() and low.iloc[i] < low.iloc[i+1:i+3].min():
+                    lows.append(i)
+                if high.iloc[i] > high.iloc[i-2:i].max() and high.iloc[i] > high.iloc[i+1:i+3].max():
+                    highs.append(i)
+            if lows:
+                ref = lows[-1]
+                price_excursion = float(low.iloc[ref] - low.iloc[-1])
+                cvd_change = float(cvd_series.iloc[-1] - cvd_series.iloc[ref])
+                gross_flow = float(delta_series.iloc[ref + 1:].abs().sum())
+                price_excursion_atr = price_excursion / atr14 if atr14 > 0 else 0.0
+                cvd_efficiency = cvd_change / gross_flow if gross_flow > 0 else 0.0
+                if (low.iloc[-1] < low.iloc[ref] and close.iloc[-1] > low.iloc[ref]
+                        and cvd_change > 0 and price_excursion_atr >= 0.10
+                        and cvd_efficiency >= 0.05):
+                    divergence = "bullish"
+                    divergence_evidence = {
+                        "reference_index": ref,
+                        "reference_extreme_price": float(low.iloc[ref]),
+                        "reference_price": float(low.iloc[ref]),
+                        "reference_cvd": float(cvd_series.iloc[ref]),
+                        "sweep_extreme_price": float(low.iloc[-1]),
+                        "current_low_price": float(low.iloc[-1]),
+                        "reclaim_close_price": float(close.iloc[-1]),
+                        "current_cvd": curr_cvd,
+                        "cvd_change": cvd_change,
+                        "cvd_efficiency": round(cvd_efficiency, 4),
+                        "price_excursion_atr": round(price_excursion_atr, 4),
+                    }
+            if divergence == "none" and highs:
+                ref = highs[-1]
+                price_excursion = float(high.iloc[-1] - high.iloc[ref])
+                cvd_change = float(cvd_series.iloc[-1] - cvd_series.iloc[ref])
+                gross_flow = float(delta_series.iloc[ref + 1:].abs().sum())
+                price_excursion_atr = price_excursion / atr14 if atr14 > 0 else 0.0
+                cvd_efficiency = -cvd_change / gross_flow if gross_flow > 0 else 0.0
+                if (high.iloc[-1] > high.iloc[ref] and close.iloc[-1] < high.iloc[ref]
+                        and cvd_change < 0 and price_excursion_atr >= 0.10
+                        and cvd_efficiency >= 0.05):
+                    divergence = "bearish"
+                    divergence_evidence = {
+                        "reference_index": ref,
+                        "reference_extreme_price": float(high.iloc[ref]),
+                        "reference_price": float(high.iloc[ref]),
+                        "reference_cvd": float(cvd_series.iloc[ref]),
+                        "sweep_extreme_price": float(high.iloc[-1]),
+                        "current_high_price": float(high.iloc[-1]),
+                        "reclaim_close_price": float(close.iloc[-1]),
+                        "current_cvd": curr_cvd,
+                        "cvd_change": cvd_change,
+                        "cvd_efficiency": round(cvd_efficiency, 4),
+                        "price_excursion_atr": round(price_excursion_atr, 4),
+                    }
+
+        candle_range = max(float(high.iloc[-1] - low.iloc[-1]), 1e-8)
+        close_location = float((close.iloc[-1] - low.iloc[-1]) / candle_range)
+        absorption_evidence: dict = {}
+        if (delta_source == "exchange_aggressor"
+                and low.iloc[-1] <= recent_lows.quantile(bullish_absorption_quantile)
+                and delta_ratio <= -pressure_threshold and close_location >= 0.60):
             is_absorption = True
             absorption_type = "bullish_absorption"
-            desc = "Bullish Absorption: Smart money absorbing sell stops at low zone"
-        elif (
-            close.iloc[-1] >= recent_highs.quantile(bearish_absorption_quantile)
-            and curr_delta < 0
-        ):
+            desc = "Bullish Absorption: aggressive selling failed to hold price near the candle low"
+        elif (delta_source == "exchange_aggressor"
+                and high.iloc[-1] >= recent_highs.quantile(bearish_absorption_quantile)
+                and delta_ratio >= pressure_threshold and close_location <= 0.40):
             is_absorption = True
             absorption_type = "bearish_absorption"
-            desc = "Bearish Absorption: Smart money absorbing buy orders at high zone"
+            desc = "Bearish Absorption: aggressive buying failed to hold price near the candle high"
         else:
             if delta_ratio > pressure_threshold:
                 desc = f"Net Buying Pressure (+{delta_ratio*100:.1f}%)"
@@ -302,6 +407,21 @@ class AdvancedIndicatorsEngine:
                 desc = f"Net Selling Pressure ({delta_ratio*100:.1f}%)"
             else:
                 desc = "Neutral Volume Delta"
+
+        if is_absorption and delta_source == "exchange_aggressor":
+            candle_time = df.index[-1]
+            absorption_evidence = {
+                "candle_index": len(df) - 1,
+                "candle_time": (
+                    candle_time.isoformat()
+                    if hasattr(candle_time, "isoformat") else str(candle_time)
+                ),
+                "close_price": float(close.iloc[-1]),
+                "delta": curr_delta,
+                "delta_ratio": delta_ratio,
+                "current_cvd": curr_cvd,
+                "flow_source": next(iter(flow_sources)),
+            }
 
         return VolumeDeltaResult(
             delta=round(curr_delta, 2),
@@ -313,4 +433,11 @@ class AdvancedIndicatorsEngine:
             volume_spike=volume_spike,
             description=(desc if delta_source == "exchange_aggressor" else f"Estimated candle-volume proxy: {desc}"),
             source=delta_source,
+            flow_source=(next(iter(flow_sources)) if trusted_aggressor else "unavailable"),
+            divergence=divergence,
+            divergence_evidence=divergence_evidence,
+            absorption_evidence=absorption_evidence,
+            cvd_tail=[round(float(v), 2) for v in cvd_series.tail(20)],
+            cvd_values=[float(v) for v in cvd_series],
+            delta_values=[float(v) for v in delta_series],
         )

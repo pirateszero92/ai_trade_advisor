@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import pytest
 from app.engines.indicators import AdvancedIndicatorsEngine
 from app.engines.smc_engine import SMCEngine
 
@@ -75,6 +76,71 @@ def test_volume_delta_calculation():
     assert isinstance(vd.cvd, float)
     assert -1.0 <= vd.delta_ratio <= 1.0
     print(f"Volume Delta: delta={vd.delta}, ratio={vd.delta_ratio}, cvd={vd.cvd}, desc={vd.description}")
+
+
+def _absorption_frame(side: str) -> pd.DataFrame:
+    rows = []
+    for index in range(12):
+        rows.append({
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.0,
+            "volume": 1000.0,
+            "buy_volume": 500.0,
+            "sell_volume": 500.0,
+            "flow_source": "binance_taker_volume",
+        })
+    if side == "bullish":
+        rows[-1].update({"high": 100.2, "low": 98.5, "close": 100.0,
+                         "buy_volume": 300.0, "sell_volume": 700.0})
+    else:
+        rows[-1].update({"high": 101.5, "low": 99.8, "close": 100.0,
+                         "buy_volume": 700.0, "sell_volume": 300.0})
+    return pd.DataFrame(rows)
+
+
+def test_absorption_requires_failed_aggressive_flow_with_correct_sign():
+    bullish = AdvancedIndicatorsEngine.compute_volume_delta(_absorption_frame("bullish"))
+    bearish = AdvancedIndicatorsEngine.compute_volume_delta(_absorption_frame("bearish"))
+    assert bullish.absorption_type == "bullish_absorption"
+    assert bullish.delta < 0
+    assert bearish.absorption_type == "bearish_absorption"
+    assert bearish.delta > 0
+
+    wrong_sign = _absorption_frame("bullish")
+    wrong_sign.loc[wrong_sign.index[-1], ["buy_volume", "sell_volume"]] = [700.0, 300.0]
+    assert AdvancedIndicatorsEngine.compute_volume_delta(wrong_sign).is_absorption is False
+
+
+def test_aggressor_components_must_reconcile_with_total_volume():
+    frame = _absorption_frame("bullish")
+    frame.loc[frame.index[-1], "buy_volume"] = 900.0
+    with pytest.raises(ValueError, match="reconcile"):
+        AdvancedIndicatorsEngine.compute_volume_delta(frame)
+
+
+def test_untrusted_aggressor_columns_are_never_promoted_to_true_cvd():
+    frame = _absorption_frame("bullish")
+    frame["flow_source"] = "unknown_adapter"
+    result = AdvancedIndicatorsEngine.compute_volume_delta(frame)
+    assert result.source == "estimated_candle_anatomy"
+    assert result.is_absorption is False
+
+    mixed = _absorption_frame("bullish")
+    mixed.loc[mixed.index[0], "flow_source"] = None
+    mixed_result = AdvancedIndicatorsEngine.compute_volume_delta(mixed)
+    assert mixed_result.source == "estimated_candle_anatomy"
+    assert mixed_result.flow_source == "unavailable"
+
+
+def test_absorption_contains_causal_candle_and_provenance_metadata():
+    frame = _absorption_frame("bullish")
+    result = AdvancedIndicatorsEngine.compute_volume_delta(frame)
+    assert result.absorption_evidence["candle_index"] == len(frame) - 1
+    assert result.absorption_evidence["close_price"] == frame["close"].iloc[-1]
+    assert result.absorption_evidence["flow_source"] == "binance_taker_volume"
+    assert result.flow_source == "binance_taker_volume"
 
 
 def test_smc_confluence_integration():

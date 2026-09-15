@@ -7,6 +7,7 @@ import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/ws_client.dart';
 import '../../core/trading/strategy_gate_view.dart';
+import '../../core/trading/ai_review_panel.dart';
 import '../settings/settings_screen.dart';
 import 'signal_sort.dart';
 
@@ -59,15 +60,16 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
     setState(() {
       for (var entry in ticks.entries) {
         final val = entry.value;
-        if (val is Map<String, dynamic>) {
-          final p = (val['price'] as num?)?.toDouble();
+        if (val is Map) {
+          final map = Map<String, dynamic>.from(val);
+          final p = (map['price'] as num?)?.toDouble();
           if (p != null && p > 0) {
             final norm = _normalizeSym(entry.key);
             for (var s in _signals) {
               if (_normalizeSym(s['symbol']?.toString() ?? '') == norm) {
                 s['live_price'] = p;
-                if (val['change_24h'] != null) {
-                  s['change_24h'] = (val['change_24h'] as num).toDouble();
+                if (map['change_24h'] != null) {
+                  s['change_24h'] = (map['change_24h'] as num).toDouble();
                 }
               }
             }
@@ -78,15 +80,9 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
   }
 
   void _onWsSignalAlert(Map<String, dynamic> msg) {
-    if (!mounted) return;
-    final payload = msg['data'] as Map<String, dynamic>? ?? msg;
-    final sym = payload['symbol']?.toString();
-    if (sym != null && sym.isNotEmpty) {
-      setState(() {
-        _signals.removeWhere((s) => s['symbol'] == sym);
-        _signals.insert(0, payload);
-      });
-    }
+    if (!mounted || _isLoading) return;
+    // Use the authenticated HTTP projection, which enforces watchlist and mode.
+    unawaited(_fetchSignals());
   }
 
   @override
@@ -197,19 +193,25 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
   }
 
   Set<String> _activeWatchlistNorm = {};
+  int _signalsRequest = 0;
+  int _positionsRequest = 0;
 
   Future<void> _fetchSignals({String? mode}) async {
+    final request = ++_signalsRequest;
+    final effMode = mode ?? _activeMode;
     setState(() {
       _isLoading = true;
       _errorMessage = null;
     });
     try {
       final dio = AppApi.dio;
-      final effMode = mode ?? _activeMode;
 
       // 1. Sync active Watchlist in parallel
       try {
         final wlResp = await dio.get(AppApi.url('/api/v1/settings/watchlist'));
+        if (!mounted || request != _signalsRequest || effMode != _activeMode) {
+          return;
+        }
         final List<dynamic> wlList = wlResp.data['watchlist'] ?? [];
         _activeWatchlistNorm = wlList
             .map((e) => _normalizeSym((e['symbol'] ?? '').toString()))
@@ -221,9 +223,10 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
       final resp = await dio.get(AppApi.url('/api/v1/signals/'),
           queryParameters: {'mode': effMode});
       final List<dynamic> list = resp.data['signals'] ?? [];
-      if (!mounted) return;
+      if (!mounted || request != _signalsRequest || effMode != _activeMode) {
+        return;
+      }
       setState(() {
-        if (mode != null) _activeMode = mode;
         final rawList = list.map((e) {
           final m = Map<String, dynamic>.from(e as Map);
           final rawSym = m['symbol']?.toString() ?? '';
@@ -246,7 +249,7 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
       });
       _fetchLivePrices();
     } catch (e) {
-      if (mounted) {
+      if (mounted && request == _signalsRequest && effMode == _activeMode) {
         setState(() {
           _isLoading = false;
           _errorMessage =
@@ -257,6 +260,7 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
   }
 
   Future<void> _fetchPositions({String? mode}) async {
+    final request = ++_positionsRequest;
     try {
       final dio = AppApi.dio;
       final effMode = mode ?? _activeMode;
@@ -267,7 +271,7 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
         'status': 'open'
       });
       final List<dynamic> list = resp.data['trades'] ?? [];
-      if (mounted) {
+      if (mounted && request == _positionsRequest && effMode == _activeMode) {
         setState(() {
           _positions = list
               .map((e) {
@@ -292,6 +296,8 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
   }
 
   Future<void> _triggerScan() async {
+    final mode = _activeMode;
+    final request = ++_signalsRequest;
     setState(() => _isScanning = true);
     try {
       final dio = AppApi.dio;
@@ -299,6 +305,9 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
       // Sync active Watchlist
       try {
         final wlResp = await dio.get(AppApi.url('/api/v1/settings/watchlist'));
+        if (!mounted || mode != _activeMode || request != _signalsRequest) {
+          return;
+        }
         final List<dynamic> wlList = wlResp.data['watchlist'] ?? [];
         _activeWatchlistNorm = wlList
             .map((e) => _normalizeSym((e['symbol'] ?? '').toString()))
@@ -308,11 +317,11 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
 
       final resp = await dio.post(
         AppApi.url('/api/v1/signals/scan'),
-        queryParameters: {'mode': _activeMode},
+        queryParameters: {'mode': mode},
         options: Options(receiveTimeout: const Duration(seconds: 40)),
       );
       final List<dynamic> list = resp.data['signals'] ?? [];
-      if (!mounted) return;
+      if (!mounted || mode != _activeMode || request != _signalsRequest) return;
       setState(() {
         final rawList = list.map((e) {
           final m = Map<String, dynamic>.from(e as Map);
@@ -338,13 +347,15 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
       );
       _fetchLivePrices();
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || mode != _activeMode || request != _signalsRequest) return;
       setState(() => _isScanning = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
             backgroundColor: AppColors.bearish,
             content: Text('Scan failed: $e')),
       );
+    } finally {
+      if (mounted) setState(() => _isScanning = false);
     }
   }
 
@@ -421,74 +432,74 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
       ),
     );
 
-    if (result != null && result['confirmed'] == true) {
-      final tagId = _tagCounter++;
-      final entry = result['entry'] as double;
-      final safeSl = result['stop_loss'] as double;
-      final safeTp = result['take_profit'] as double;
-      final selectedQty = result['position_size'] as double;
-      final entryMode = result['entry_mode'] as String;
-      final tag =
-          '#${sym.replaceAll('/', '')}-${dir.toUpperCase()}-${entryMode == 'recommended' ? 'LIM' : 'MKT'}-$tagId';
+    if (!mounted || result == null || result['confirmed'] != true) return;
 
-      try {
-        final dio = AppApi.dio;
-        final signalEx = signal['exchange'] as String?;
-        final targetExchange =
-            signalEx ?? (_activeMode == 'live' ? 'innovestx' : 'binance');
+    final tagId = _tagCounter++;
+    final entry = (result['entry'] as num).toDouble();
+    final safeSl = (result['stop_loss'] as num).toDouble();
+    final safeTp = (result['take_profit'] as num).toDouble();
+    final selectedQty = (result['position_size'] as num).toDouble();
+    final entryMode = result['entry_mode']?.toString() ?? 'recommended';
+    final tag =
+        '#${sym.replaceAll('/', '')}-${dir.toUpperCase()}-${entryMode == 'recommended' ? 'LIM' : 'MKT'}-$tagId';
 
-        final resp = await dio.post(
-          AppApi.url('/api/v1/paper/orders'),
-          data: {
-            'symbol': sym,
-            'direction': dir,
-            'entry': entry,
-            'stop_loss': safeSl,
-            'take_profit': safeTp,
-            'order_type': entryMode == 'market' ? 'market' : 'limit',
-            'position_size': selectedQty,
-            'size': selectedQty,
-            'tag': tag,
-            'mode': 'paper',
-            'exchange': targetExchange,
-            'auto_be': true,
-            'trailing_stop': true,
-            'idempotency_key': '${DateTime.now().microsecondsSinceEpoch}-$tag',
-          },
+    try {
+      final dio = AppApi.dio;
+      final signalEx = signal['exchange'] as String?;
+      final targetExchange =
+          signalEx ?? (_activeMode == 'live' ? 'innovestx' : 'binance');
+
+      final resp = await dio.post(
+        AppApi.url('/api/v1/paper/orders'),
+        data: {
+          'symbol': sym,
+          'direction': dir,
+          'entry': entry,
+          'stop_loss': safeSl,
+          'take_profit': safeTp,
+          'order_type': entryMode == 'market' ? 'market' : 'limit',
+          'position_size': selectedQty,
+          'size': selectedQty,
+          'tag': tag,
+          'mode': 'paper',
+          'exchange': targetExchange,
+          'auto_be': true,
+          'trailing_stop': true,
+          'idempotency_key': '${DateTime.now().microsecondsSinceEpoch}-$tag',
+        },
+      );
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.bullish,
+            content: Text(
+              '✅ ${resp.data['message'] ?? 'Trade executed successfully: $tag'}',
+              style: const TextStyle(
+                  color: Colors.black, fontWeight: FontWeight.bold),
+            ),
+          ),
         );
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              backgroundColor: AppColors.bullish,
-              content: Text(
-                '✅ ${resp.data['message'] ?? 'Trade executed successfully: $tag'}',
+      }
+      _fetchPositions();
+    } catch (e) {
+      String errDetail = e.toString();
+      if (e is DioException && e.response?.data != null) {
+        final data = e.response!.data;
+        if (data is Map && data['detail'] != null) {
+          errDetail = data['detail'].toString();
+        }
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.bearish,
+            content: Text('❌ ส่งคำสั่งล้มเหลว: $errDetail',
                 style: const TextStyle(
-                    color: Colors.black, fontWeight: FontWeight.bold),
-              ),
-            ),
-          );
-        }
-        _fetchPositions();
-      } catch (e) {
-        String errDetail = e.toString();
-        if (e is DioException && e.response?.data != null) {
-          final data = e.response!.data;
-          if (data is Map && data['detail'] != null) {
-            errDetail = data['detail'].toString();
-          }
-        }
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              backgroundColor: AppColors.bearish,
-              content: Text('❌ ส่งคำสั่งล้มเหลว: $errDetail',
-                  style: const TextStyle(
-                      color: Colors.white, fontWeight: FontWeight.bold)),
-              duration: const Duration(seconds: 5),
-            ),
-          );
-        }
+                    color: Colors.white, fontWeight: FontWeight.bold)),
+            duration: const Duration(seconds: 5),
+          ),
+        );
       }
     }
   }
@@ -945,6 +956,16 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                                   s['delta_absorption'] == true;
                               final deltaStatus =
                                   (s['delta_status'] ?? '').toString();
+                              final volumeQuality =
+                                  (s['volume_quality'] ?? 'unavailable')
+                                      .toString();
+                              final deltaSource = (s['flow_source'] ??
+                                      s['delta_source'] ??
+                                      'unavailable')
+                                  .toString();
+                              final flowGranularity =
+                                  (s['flow_granularity'] ?? 'unavailable')
+                                      .toString();
                               final regime = s['market_regime'] is Map
                                   ? Map<String, dynamic>.from(
                                       s['market_regime'] as Map)
@@ -960,11 +981,32 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                                   ? Map<String, dynamic>.from(
                                       s['reaction'] as Map)
                                   : <String, dynamic>{};
+                              final triCore = s['tri_core_setup'] is Map
+                                  ? Map<String, dynamic>.from(
+                                      s['tri_core_setup'] as Map)
+                                  : <String, dynamic>{};
                               final mtf = s['mtf'] is Map
                                   ? Map<String, dynamic>.from(s['mtf'] as Map)
                                   : <String, dynamic>{};
+                              final institutionalMetrics =
+                                  s['institutional_metrics'] is Map
+                                      ? Map<String, dynamic>.from(
+                                          s['institutional_metrics'] as Map)
+                                      : (s['order_flow'] is Map
+                                          ? <String, dynamic>{
+                                              'order_flow': s['order_flow'],
+                                              'derivatives_sentiment':
+                                                  s['derivatives_sentiment'],
+                                              'inducements': s['inducements'],
+                                              'inducement_swept':
+                                                  s['inducement_swept'],
+                                              'active_zone_type':
+                                                  s['active_zone_type'],
+                                            }
+                                          : <String, dynamic>{});
 
                               return _SignalCard(
+                                institutionalMetrics: institutionalMetrics,
                                 symbol: sym,
                                 direction: dir,
                                 timeframe: tf,
@@ -979,6 +1021,9 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                                 volumeDelta: volumeDelta,
                                 deltaAbsorption: deltaAbsorption,
                                 deltaStatus: deltaStatus,
+                                volumeQuality: volumeQuality,
+                                deltaSource: deltaSource,
+                                flowGranularity: flowGranularity,
                                 regimeLabel:
                                     (regime['label'] ?? 'Legacy').toString(),
                                 regimeDirection:
@@ -995,9 +1040,16 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                                 mtf: mtf,
                                 message: msg,
                                 advice: s['advice'] as String?,
+                                aiReview: Map<String, dynamic>.from(
+                                    s['ai_review'] as Map? ?? {}),
+                                squeezeBonus: ((s['indicator_decision']
+                                            as Map?)?['squeeze_bonus'] as num?)
+                                        ?.toInt() ??
+                                    0,
                                 scenario:
                                     s['scenario'] as Map<String, dynamic>?,
                                 reaction: reaction,
+                                triCore: triCore,
                                 time: date,
                                 openPositions: matchingPositions,
                                 onExecuteTrade: () => _placeOrderFromSignal(s),
@@ -1098,10 +1150,13 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
 }
 
 class _SignalCard extends StatelessWidget {
+  final Map<String, dynamic> aiReview;
+  final int squeezeBonus;
   final String symbol, direction, timeframe, message, time;
   final String? advice;
   final Map<String, dynamic>? scenario;
   final Map<String, dynamic> reaction;
+  final Map<String, dynamic> triCore;
   final int confluence;
   final double? entry, livePrice, sl, tp, rr;
   final String entryType;
@@ -1109,6 +1164,9 @@ class _SignalCard extends StatelessWidget {
   final double volumeDelta;
   final bool deltaAbsorption;
   final String deltaStatus;
+  final String volumeQuality;
+  final String deltaSource;
+  final String flowGranularity;
   final String regimeLabel;
   final String regimeDirection;
   final bool regimeEntryAllowed;
@@ -1118,8 +1176,11 @@ class _SignalCard extends StatelessWidget {
   final List<Map<String, dynamic>> openPositions;
   final VoidCallback onExecuteTrade;
   final Function(dynamic id, String tag) onClosePosition;
+  final Map<String, dynamic> institutionalMetrics;
 
   const _SignalCard({
+    this.aiReview = const {},
+    this.squeezeBonus = 0,
     required this.symbol,
     required this.direction,
     required this.timeframe,
@@ -1134,6 +1195,9 @@ class _SignalCard extends StatelessWidget {
     this.volumeDelta = 0.0,
     this.deltaAbsorption = false,
     this.deltaStatus = '',
+    this.volumeQuality = 'unavailable',
+    this.deltaSource = 'unavailable',
+    this.flowGranularity = 'unavailable',
     this.regimeLabel = 'Legacy',
     this.regimeDirection = 'neutral',
     this.regimeEntryAllowed = false,
@@ -1143,11 +1207,13 @@ class _SignalCard extends StatelessWidget {
     this.advice,
     this.scenario,
     this.reaction = const <String, dynamic>{},
+    this.triCore = const <String, dynamic>{},
     this.entry,
     this.livePrice,
     this.sl,
     this.tp,
     this.rr,
+    this.institutionalMetrics = const <String, dynamic>{},
   });
 
   String _getAdviceText(String? customAdvice, String direction, int confluence,
@@ -1165,9 +1231,9 @@ class _SignalCard extends StatelessWidget {
     } else if (isGradeB) {
       final isLong = direction == 'LONG';
       final zone = isLong ? 'Discount' : 'Premium';
-      return 'คำแนะนำ: โครงสร้าง $direction (Grade B) แตะโซน $zone ควรรอแท่งยืนยัน Rejection ใน TF ย่อยและใช้ Risk Engine ตรวจสอบก่อนเข้า';
+      return 'คำแนะนำ: โครงสร้าง $direction แตะโซน $zone แต่ Tri-Core ยังไม่ยืนยัน SMC+CVD บน execution timeframe';
     } else {
-      return 'คำแนะนำ: รอยืนยันการเคลื่อนไหวของราคา แนะนำ "รอ (WAIT)" สัญญาณ CHoCH ยืนยันใน TF ย่อยก่อน';
+      return 'คำแนะนำ: รอ (WAIT) จน SMC location และ exchange-derived CVD ยืนยันบน execution timeframe เดียวกัน';
     }
   }
 
@@ -1188,14 +1254,126 @@ class _SignalCard extends StatelessWidget {
     return '$pfx${price.toStringAsFixed(2)}';
   }
 
+  Widget _buildInstitutionalEdgeStrip() {
+    final of = institutionalMetrics['order_flow'] is Map
+        ? Map<String, dynamic>.from(institutionalMetrics['order_flow'] as Map)
+        : <String, dynamic>{};
+    final deriv = institutionalMetrics['derivatives_sentiment'] is Map
+        ? Map<String, dynamic>.from(
+            institutionalMetrics['derivatives_sentiment'] as Map)
+        : <String, dynamic>{};
+    final zoneType =
+        (institutionalMetrics['active_zone_type'] ?? '').toString();
+    final idmSwept = institutionalMetrics['inducement_swept'] == true;
+    final hmm = (institutionalMetrics['hmm_regime'] ?? '').toString();
+
+    final hasData = of.isNotEmpty ||
+        deriv.isNotEmpty ||
+        zoneType.isNotEmpty ||
+        (hmm.isNotEmpty && hmm != 'unknown');
+    if (!hasData) return const SizedBox.shrink();
+
+    final vpin = (of['vpin'] as num?)?.toDouble();
+    final isToxic = of['toxic_flow_detected'] == true;
+    final vpinText = vpin != null
+        ? 'VPIN ${(vpin * 100).toStringAsFixed(0)}% ${isToxic ? '⚠️ TOXIC' : 'FLOW OK'}'
+        : null;
+
+    final oiDelta = (deriv['oi_delta_pct_1h'] as num?)?.toDouble();
+    final oiBias = (deriv['sentiment_bias'] ?? '').toString();
+    final oiSuffix = oiBias == 'SHORT_SQUEEZE_RISK'
+        ? '⚡ SQUEEZE'
+        : (oiDelta != null && oiDelta > 0.5 ? '📈 ACCUM' : '');
+    final oiText = oiDelta != null
+        ? 'OI ${oiDelta >= 0 ? '+' : ''}${oiDelta.toStringAsFixed(1)}% $oiSuffix'
+        : null;
+
+    String? idmText;
+    Color idmColor = AppColors.bullish;
+    if (zoneType == 'inducement_trap') {
+      idmText = '⚠️ TRAP OB';
+      idmColor = const Color(0xFFFF4D4D);
+    } else if (zoneType == 'extreme_ob' && idmSwept) {
+      idmText = '🎯 IDM SWEPT';
+      idmColor = AppColors.bullish;
+    } else if (zoneType == 'extreme_ob') {
+      idmText = 'ORIGIN OB';
+      idmColor = const Color(0xFF00C087);
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Wrap(
+        spacing: 5,
+        runSpacing: 4,
+        children: [
+          if (vpinText != null)
+            _buildInstitutionalBadge(
+              vpinText,
+              isToxic ? const Color(0xFFFF4D4D) : const Color(0xFF00C087),
+              isToxic ? Icons.warning_amber_rounded : Icons.waves,
+            ),
+          if (oiText != null && oiText.isNotEmpty)
+            _buildInstitutionalBadge(
+              oiText,
+              oiDelta != null && oiDelta < -1.0
+                  ? const Color(0xFFFFB84D)
+                  : const Color(0xFF4DA6FF),
+              Icons.trending_up,
+            ),
+          if (idmText != null)
+            _buildInstitutionalBadge(
+              idmText,
+              idmColor,
+              Icons.radar,
+            ),
+          if (hmm.isNotEmpty && hmm != 'unknown')
+            _buildInstitutionalBadge(
+              'HMM: ${hmm.replaceAll('_', ' ').toUpperCase()}',
+              const Color(0xFFB388FF),
+              Icons.psychology,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInstitutionalBadge(String text, Color color, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withValues(alpha: 0.4), width: 0.8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 11, color: color),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: TextStyle(
+              fontSize: 9,
+              color: color,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 0.3,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildMtfRoleStrip() {
     final stagesRaw = mtf['stages'];
     if (stagesRaw is! Map) return const SizedBox.shrink();
     final stages = Map<String, dynamic>.from(stagesRaw);
-    const roleLabels = <String, String>{
+    final triggerTf = timeframe.toUpperCase();
+    final roleLabels = <String, String>{
       'bias': '4H BIAS',
       'setup': '1H SETUP',
-      'trigger': '15M TRIGGER',
+      'trigger': '$triggerTf TRIGGER',
     };
     return Padding(
       padding: const EdgeInsets.only(top: 8),
@@ -1250,7 +1428,6 @@ class _SignalCard extends StatelessWidget {
         sl != null &&
         tp != null &&
         entry! > 0 &&
-        regimeEntryAllowed &&
         (isLong
             ? (sl! < entry! && tp! > entry!)
             : (isShort && sl! > entry! && tp! < entry!));
@@ -1259,7 +1436,7 @@ class _SignalCard extends StatelessWidget {
         : (isShort ? AppColors.bearish : AppColors.neutral);
 
     final isGradeS = gate.isGradeS;
-    final isGradeA = !isGradeS && confluence >= 70;
+    final isGradeA = !isGradeS && gate.coreSetupGrade == 'A';
     final isGradeB = confluence >= 55 && confluence < 70;
     final gradeText = gate.setupGradeLabel;
     final gradeColor = isGradeS
@@ -1303,6 +1480,15 @@ class _SignalCard extends StatelessWidget {
         : (isSetupShort
             ? AppColors.bearish.withValues(alpha: 0.7)
             : Colors.white24);
+    final lifecycleState =
+        (triCore['trigger_state'] ?? 'wait').toString().toUpperCase();
+    final lifecycleColor = lifecycleState == 'ENTRY_READY'
+        ? AppColors.bullish
+        : lifecycleState == 'LIMIT_RETEST_ONLY'
+            ? const Color(0xFF00E5FF)
+            : {'NO_CHASE', 'EXPIRED', 'INVALIDATED'}.contains(lifecycleState)
+                ? AppColors.bearish
+                : const Color(0xFFFFC857);
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -1438,6 +1624,24 @@ class _SignalCard extends StatelessWidget {
                                       color: Color(0xFFFF9900))),
                             ),
                           ],
+                          Tooltip(
+                            message: 'CVD source: $deltaSource',
+                            child: _buildInstitutionalBadge(
+                              volumeQuality == 'exchange_aggressor'
+                                  ? (flowGranularity == 'aggtrade_derived'
+                                      ? 'CVD AGGTRADES'
+                                      : 'CVD KLINE')
+                                  : (volumeQuality == 'estimated'
+                                      ? 'CVD ESTIMATED'
+                                      : 'CVD N/A'),
+                              volumeQuality == 'exchange_aggressor'
+                                  ? AppColors.bullish
+                                  : (volumeQuality == 'estimated'
+                                      ? const Color(0xFFFF9900)
+                                      : AppColors.bearish),
+                              Icons.query_stats,
+                            ),
+                          ),
                           if (scenario != null &&
                               scenario!['name_th'] != null) ...[
                             Container(
@@ -1479,7 +1683,15 @@ class _SignalCard extends StatelessWidget {
                                     width: 0.8),
                               ),
                               child: Text(
-                                '15M ${reaction['reaction_state']} · WATCH',
+                                reaction['actionable'] == true
+                                    ? '$timeframe ${reaction['reaction_state']} · ENTRY WINDOW'
+                                    : reaction['entry_status'] ==
+                                            'CONFIRMED_NO_ENTRY'
+                                        ? '$timeframe ${reaction['reaction_state']} · CONFIRMED · NO ENTRY'
+                                        : reaction['entry_status'] ==
+                                                'PRESSURE_WARNING'
+                                            ? '$timeframe ${reaction['reaction_state']} · PRESSURE · NO ENTRY'
+                                            : '$timeframe ${reaction['reaction_state']} · WATCH',
                                 style: const TextStyle(
                                     fontSize: 8,
                                     fontWeight: FontWeight.bold,
@@ -1507,6 +1719,30 @@ class _SignalCard extends StatelessWidget {
                                       color: Color(0xFF00E5FF))),
                             ),
                           ],
+                          if (lifecycleState != 'WAIT')
+                            Tooltip(
+                              message:
+                                  (triCore['state_reason'] ?? '').toString(),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: lifecycleColor.withValues(alpha: 0.14),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(
+                                      color: lifecycleColor.withValues(
+                                          alpha: 0.75),
+                                      width: 0.8),
+                                ),
+                                child: Text(
+                                  lifecycleState.replaceAll('_', ' '),
+                                  style: TextStyle(
+                                      fontSize: 8,
+                                      fontWeight: FontWeight.bold,
+                                      color: lifecycleColor),
+                                ),
+                              ),
+                            ),
                           Container(
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 6, vertical: 2),
@@ -1536,6 +1772,13 @@ class _SignalCard extends StatelessWidget {
               ],
             ),
             _buildMtfRoleStrip(),
+            _buildInstitutionalEdgeStrip(),
+            AiReviewPanel(
+                review: aiReview,
+                coreScore: confluence,
+                squeezeBonus: squeezeBonus,
+                longEvidence: gate.longEvidence,
+                shortEvidence: gate.shortEvidence),
             const SizedBox(height: 8),
             Container(
               width: double.infinity,
@@ -1812,8 +2055,9 @@ class _SignalCard extends StatelessWidget {
             const SizedBox(height: 10),
             Row(
               children: [
-                const Text('Setup score: ',
-                    style: TextStyle(fontSize: 11, color: Colors.white38)),
+                Text(gate.approved ? 'Setup score: ' : 'Evidence score: ',
+                    style:
+                        const TextStyle(fontSize: 11, color: Colors.white38)),
                 Text(
                   '$confluence/100',
                   style: TextStyle(
@@ -1874,7 +2118,7 @@ class _SignalCard extends StatelessWidget {
                 if (gate.minConfluence > 0) ...[
                   const SizedBox(width: 8),
                   Text(
-                    'Gate ${gate.gateScoreLabel}',
+                    gate.evidenceScoreLabel,
                     style: TextStyle(
                       fontSize: 10,
                       color: gate.approved
@@ -1885,7 +2129,10 @@ class _SignalCard extends StatelessWidget {
                   ),
                 ],
                 const Spacer(),
-                Text(gate.approved ? 'Entry Ready ✓' : 'Watchlist • WAIT',
+                Text(
+                    gate.approved
+                        ? 'Setup Ready • Risk pending'
+                        : 'Watchlist • WAIT',
                     style: TextStyle(
                         fontSize: 10,
                         color: gate.approved

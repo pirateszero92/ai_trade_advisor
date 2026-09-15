@@ -329,6 +329,7 @@ def test_volume_delta_prefers_exchange_aggressor_volume_over_candle_shape():
         "volume": [100.0] * rows,
         "buy_volume": [80.0] * rows,
         "sell_volume": [20.0] * rows,
+        "flow_source": ["binance_taker_volume"] * rows,
     })
 
     result = AdvancedIndicatorsEngine.compute_volume_delta(frame)

@@ -63,7 +63,7 @@ async def test_backtest_api_persists_run_and_fail_closed_gate(monkeypatch):
                 "/api/v1/backtests/runs",
                 json={
                     "symbol": "BTC/USDT",
-                    "timeframe": "15m",
+                        "timeframe": "15m",
                     "market_type": "crypto",
                     "exchange": "binance",
                     "limit": 220,

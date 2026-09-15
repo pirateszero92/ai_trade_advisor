@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 import uuid
 
 import pytest
@@ -16,8 +17,14 @@ from app.models.paper_oms import (
     PaperOMSFill,
     PaperOMSOrder,
     PaperOMSPosition,
+    PaperOMSRiskHalt,
 )
-from app.services.paper_oms import PaperOMS, PaperOMSError, PaperOMSValidation
+from app.services.paper_oms import (
+    PaperOMS,
+    PaperOMSConflict,
+    PaperOMSError,
+    PaperOMSValidation,
+)
 
 
 async def _make_oms(tmp_path: Path):
@@ -30,6 +37,7 @@ async def _make_oms(tmp_path: Path):
             PaperOMSOrder.__table__,
             PaperOMSFill.__table__,
             PaperOMSEvent.__table__,
+            PaperOMSRiskHalt.__table__,
         ):
             await connection.run_sync(table.create)
     projection = tmp_path / "paper_trades.json"
@@ -95,6 +103,49 @@ async def test_auto_pilot_order_requires_approved_risk_assessment(tmp_path):
     payload["source"] = "auto_pilot"
 
     with pytest.raises(PaperOMSValidation, match="approved RiskAssessment"):
+        await oms.place_order(payload)
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_setup_grade_is_persisted_with_entry_snapshot(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6GRADE{uuid.uuid4().hex[:6]}/USDT"
+    payload = _order_payload(direction="long", symbol=symbol)
+    payload.update({
+        "setup_grade": "S",
+        "setup_type": "sweep_reversal",
+        "decision_snapshot_id": "a1b2c3d4e5f60718293a4b5c",
+        "setup_timeframe": "1h",
+    })
+
+    opened = await oms.place_order(payload)
+
+    assert opened["setup_grade"] == "S"
+    assert opened["setup_type"] == "sweep_reversal"
+    assert opened["decision_snapshot_id"] == "a1b2c3d4e5f60718293a4b5c"
+    assert opened["setup_timeframe"] == "1h"
+    assert opened["grade_provenance"] == "entry_snapshot"
+
+    listed = await oms.list_positions(status="open", include_live=False)
+    persisted = next(item for item in listed["trades"] if item["id"] == opened["id"])
+    assert persisted["setup_grade"] == "S"
+    assert persisted["grade_provenance"] == "entry_snapshot"
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_partial_setup_metadata_is_rejected(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6BADGRADE{uuid.uuid4().hex[:6]}/USDT"
+    payload = _order_payload(direction="long", symbol=symbol)
+    payload["setup_grade"] = "S"
+
+    with pytest.raises(PaperOMSValidation, match="must be supplied together"):
         await oms.place_order(payload)
 
     await oms.stop()
@@ -451,6 +502,68 @@ async def test_auto_be_exit_covers_modeled_fee_and_slippage(tmp_path, direction)
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("direction", ["long", "short"])
+async def test_partial_tp1_and_breakeven_advance(tmp_path, direction):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6TP1{direction.upper()}{uuid.uuid4().hex[:4]}/USDT"
+    payload = _order_payload(direction=direction, symbol=symbol)
+    tp1_price = 105.0 if direction == "long" else 95.0
+    tp2_price = 115.0 if direction == "long" else 85.0
+    payload.update({
+        "entry": 100.0,
+        "stop_loss": 95.0 if direction == "long" else 105.0,
+        "take_profit": tp2_price,
+        "position_size": 10.0,
+        "auto_be": False,
+        "source_payload": {
+            "take_profit_1": tp1_price,
+        },
+    })
+    opened = await oms.place_order(payload)
+    assert opened["status"] == "open"
+    assert opened["remaining_quantity"] == 10.0
+
+    # 1. Price reaches TP1 -> partial 50% reduce and stop moved to Breakeven
+    reduced = (await oms.process_market_tick({
+        "symbol": symbol,
+        "price": tp1_price,
+        "bid": tp1_price if direction == "long" else tp1_price - 0.01,
+        "ask": tp1_price + 0.01 if direction == "long" else tp1_price,
+        "sequence": 501,
+        "source": "test_ws",
+        "received_timestamp": 1_787_776_501.0,
+    }))[0]
+
+    assert reduced["status"] == "open"
+    assert reduced["remaining_quantity"] == 5.0
+    assert reduced["source_payload"].get("tp1_filled") is True
+    # Stop loss should be advanced to Breakeven (at or beyond entry covering fee/slippage)
+    if direction == "long":
+        assert reduced["stop_loss"] > 100.0
+    else:
+        assert reduced["stop_loss"] < 100.0
+
+    # 2. Price reaches final TP2 -> closes remainder of position
+    closed = (await oms.process_market_tick({
+        "symbol": symbol,
+        "price": tp2_price,
+        "bid": tp2_price if direction == "long" else tp2_price - 0.01,
+        "ask": tp2_price + 0.01 if direction == "long" else tp2_price,
+        "sequence": 502,
+        "source": "test_ws",
+        "received_timestamp": 1_787_776_502.0,
+    }))[0]
+
+    assert closed["status"] == "closed"
+    assert closed["remaining_quantity"] == 0.0
+    assert "Take Profit" in closed["close_reason"]
+
+    await oms.stop()
+    await engine.dispose()
+
+
+
+@pytest.mark.anyio
 async def test_reset_creates_new_account_generation_without_deleting_audit(tmp_path):
     oms, factory, engine, _projection, _config = await _make_oms(tmp_path)
     trade = await oms.place_order(
@@ -473,3 +586,82 @@ async def test_reset_creates_new_account_generation_without_deleting_audit(tmp_p
     assert account_count == 2
     await oms.stop()
     await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_durable_risk_halt_survives_service_calls_and_blocks_new_orders(tmp_path):
+    oms, factory, engine, _projection, _config = await _make_oms(tmp_path)
+    now = datetime.now(timezone.utc)
+    async with factory() as session:
+        account = (await session.execute(
+            select(PaperOMSAccount).where(PaperOMSAccount.active.is_(True))
+        )).scalar_one()
+        session.add(PaperOMSRiskHalt(
+            account_id=account.id,
+            reason="Three consecutive stop-loss exits",
+            triggered_at=now,
+            halted_until=now + timedelta(hours=24),
+            source_payload={"test": True},
+        ))
+        await session.commit()
+
+    snapshot = await oms.account_snapshot()
+    assert snapshot["risk_halt"]["active"] is True
+    with pytest.raises(PaperOMSConflict, match="Risk halt active"):
+        await oms.place_order(
+            _order_payload(direction="long", symbol=f"P6HALT{uuid.uuid4().hex[:6]}/USDT")
+        )
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_tick_worker_snapshot_swap_no_dropped_ticks(tmp_path):
+    oms, factory, engine, _projection, _config = await _make_oms(tmp_path)
+    oms.running = True
+    oms.ready = True
+    from app.services.paper_oms import _norm_symbol
+    oms._active_symbols = {_norm_symbol("BTC/USDT"), _norm_symbol("ETH/USDT")}
+
+    # Enqueue first tick
+    oms._enqueue_tick({"symbol": "BTC/USDT", "price": 50000.0})
+    assert _norm_symbol("BTC/USDT") in oms._latest_ticks
+    assert oms._tick_event.is_set()
+
+    # Simulate worker clearing event then swapping snapshot
+    oms._tick_event.clear()
+    current_ticks = oms._latest_ticks
+    oms._latest_ticks = {}
+
+    # Simulate a concurrent incoming tick while processing
+    oms._enqueue_tick({"symbol": "ETH/USDT", "price": 3000.0})
+
+    # Verify that the new tick was preserved and tick_event is set
+    assert _norm_symbol("ETH/USDT") in oms._latest_ticks
+    assert oms._tick_event.is_set()
+    assert _norm_symbol("BTC/USDT") in current_ticks
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_trailing_stop_exits_do_not_trip_stop_loss_circuit_breaker(tmp_path):
+    oms, factory, engine, _projection, _config = await _make_oms(tmp_path)
+    for i in range(3):
+        trade = await oms.place_order(
+            _order_payload(direction="long", symbol=f"TRAIL{i}{uuid.uuid4().hex[:4]}/USDT")
+        )
+        await oms.close_position(
+            trade["id"],
+            close_price=99.9,
+            reason="Trailing Stop (Profit Protected) 📈",
+        )
+    # Check that after 3 trailing stop exits, no risk halt is active
+    snapshot = await oms.account_snapshot()
+    assert snapshot["risk_halt"]["active"] is False
+
+    await oms.stop()
+    await engine.dispose()
+
+

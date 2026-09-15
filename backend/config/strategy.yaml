@@ -2,19 +2,30 @@
 # Defines the rules the StrategyEngine uses to approve/reject trade setups.
 # Reload at runtime via POST /api/v1/settings/strategy/reload
 
-name: "SMC Conservative"
-version: "1.1"
+name: "Tri-Core SMC+CVD"
+version: "2.0"
 description: >
-  Conservative Smart Money Concepts strategy.
-  Requires an Order Block + BOS/CHoCH confirmation.
-  Minimum confluence score of 65/100.
-  R:R must be at least 2.0.
+  Causal single-timeframe strategy. SMC defines location and invalidation,
+  exchange-aggressor CVD confirms intent, and SQZ only adjusts risk size.
+  Legacy scenarios, MTF, HMM, VPIN and AI are analytics/advisory inputs only.
+
+# These are migration hypotheses, not optimal constants.  Every execution
+# snapshot records this version/status.  Promote changes only after anchored
+# walk-forward validation across multiple symbols and market regimes.
+tri_core_policy:
+  version: "15m-migration-v1"
+  calibration_status: "draft_unvalidated"
+  ttl_bars: 2
+  market_entry_max_extension_atr: 0.25
+  no_chase_max_extension_atr: 0.60
+  zone_approach_distance_atr: 0.50
+  minimum_rr: 2.0
 
 # Canonical decision input used by both Chart and Proactive Scanner. Strategy
 # calculations must use completed candles only; the live quote is display and
 # execution context, never an extra repainting analysis candle.
 analysis:
-  lookback: 300
+  lookback: 600
   htf_lookback: 120
   closed_candles_only: true
 
@@ -26,15 +37,17 @@ timeframe_profiles:
   enabled: true
   roles:
     bias:
-      timeframe: 4h
+      timeframe: 1d
       lookback: 180
       smc:
         swing_length: 7
         internal_swing_length: 4
-        eql_tolerance: 0.002
+        eql_tolerance: 0.1       # LuxAlgo: fraction of Wilder ATR(200)
         order_block_lookback: 60
         fvg_lookback: 40
-        atr_length: 14
+        atr_length: 200
+        internal_confluence_filter: false
+        structure_event_ttl_bars: 0
       indicator_overrides:
         smc_structure:
           weight: 60
@@ -49,15 +62,17 @@ timeframe_profiles:
         allow_neutral_structure: false
         require_any_trigger: []
     setup:
-      timeframe: 1h
+      timeframe: 4h
       lookback: 300
       smc:
         swing_length: 5
         internal_swing_length: 3
-        eql_tolerance: 0.002
+        eql_tolerance: 0.1       # LuxAlgo: fraction of Wilder ATR(200)
         order_block_lookback: 50
         fvg_lookback: 30
-        atr_length: 14
+        atr_length: 200
+        internal_confluence_filter: false
+        structure_event_ttl_bars: 0
       indicator_overrides:
         smc_structure:
           weight: 50
@@ -73,14 +88,16 @@ timeframe_profiles:
         require_any_trigger: []
     trigger:
       timeframe: 15m
-      lookback: 300
+      lookback: 600
       smc:
         swing_length: 3
         internal_swing_length: 2
-        eql_tolerance: 0.0015
+        eql_tolerance: 0.1       # LuxAlgo: fraction of Wilder ATR(200)
         order_block_lookback: 48
         fvg_lookback: 36
-        atr_length: 14
+        atr_length: 200
+        internal_confluence_filter: false
+        structure_event_ttl_bars: 2   # hybrid 15M entry window; other invalidators still apply
       indicator_overrides:
         smc_structure:
           weight: 35
@@ -113,7 +130,7 @@ indicator_core:
       params: {}
     volume_delta:
       enabled: true
-      required: false
+      required: true
       weight: 30
       params:
         absorption_lookback: 10
@@ -146,7 +163,7 @@ regime_policy:
   policies:
     trending:
       entry_allowed: true
-      min_confluence: 65
+      min_confluence: 60
       min_rr: 2.0
       risk_multiplier: 1.0
       require_direction_alignment: true
@@ -155,9 +172,9 @@ regime_policy:
       require_squeeze_fire: false
     ranging:
       entry_allowed: true
-      min_confluence: 75
+      min_confluence: 60
       min_rr: 2.0
-      risk_multiplier: 0.65
+      risk_multiplier: 0.80
       require_direction_alignment: false
       require_liquidity_sweep: true
       require_volume_confirmation: false
@@ -169,17 +186,17 @@ regime_policy:
       risk_multiplier: 0.40
       require_direction_alignment: true
       require_liquidity_sweep: false
-      require_volume_confirmation: true
-      require_squeeze_fire: true
+      require_volume_confirmation: false
+      require_squeeze_fire: false
     compression:
-      entry_allowed: false
-      min_confluence: 85
+      entry_allowed: true
+      min_confluence: 60
       min_rr: 2.0
-      risk_multiplier: 0.0
+      risk_multiplier: 0.50
       require_direction_alignment: true
       require_liquidity_sweep: false
       require_volume_confirmation: false
-      require_squeeze_fire: true
+      require_squeeze_fire: false
     unknown:
       entry_allowed: false
       min_confluence: 100
@@ -192,7 +209,7 @@ regime_policy:
 
 # Universal filters applied to ALL trades
 filters:
-  min_confluence: 65          # SMC confluence score (0-100)
+  min_confluence: 60          # SMC confluence score (0-100)
   require_indicator_readiness: true  # Block entries when required data is unavailable
   require_bos: false          # Require Break of Structure
   require_ob: true            # Require Order Block
@@ -225,7 +242,7 @@ symbol_overrides:
   "BTC/USDT":
     filters:
       min_rr: 2.0
-      min_confluence: 65
+      min_confluence: 60
   "XAUUSD":
     filters:
       min_rr: 1.8

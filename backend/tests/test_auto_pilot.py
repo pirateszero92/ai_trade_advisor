@@ -40,6 +40,15 @@ def mock_mtf():
         stop_loss=496.0,
         take_profit=516.0,
         risk_reward=4.0,
+        scenario={"scenario_id": "TEST_CONFIRMED", "actionable": True},
+        volume_quality="exchange_aggressor",
+        indicator_decision={"ready": True, "squeeze_bonus": 10, "squeeze_bonus_max": 10},
+        tri_core_setup={"actionable": True, "direction": "long", "grade": "S",
+                        "setup_type": "sweep_reversal",
+                        "entry_policy": "market_eligible", "order_type": "market",
+                        "event_id": "sweep:MSFT:15m:test",
+                        "smc_confirmed": True, "cvd_confirmed": True,
+                        "flow_confirmed": True},
     )
     stage_15m = TimeframeStage(role="trigger", timeframe="15m", status="ready", direction="long", signal=sig_15m)
 
@@ -89,6 +98,8 @@ async def test_auto_pilot_executes_grade_s(mock_mtf):
             strat_res=mock_mtf.strategy,
             confluence=85,
             entry_mode="limit",
+            decision_snapshot_id="a1b2c3d4e5f60718293a4b5c",
+            setup_timeframe="15m",
         )
 
         assert result is not None
@@ -100,6 +111,10 @@ async def test_auto_pilot_executes_grade_s(mock_mtf):
         assert call_args["entry"] == 500.0
         assert call_args["auto_be"] is True
         assert call_args["trailing_stop"] is True
+        assert call_args["setup_grade"] == "S"
+        assert call_args["setup_type"] == "sweep_reversal"
+        assert call_args["decision_snapshot_id"] == "a1b2c3d4e5f60718293a4b5c"
+        assert call_args["setup_timeframe"] == "15m"
 
 
 @pytest.mark.asyncio
@@ -119,6 +134,8 @@ async def test_auto_pilot_blocked_when_disabled(mock_mtf):
             strat_res=mock_mtf.strategy,
             confluence=85,
             entry_mode="limit",
+            decision_snapshot_id="a1b2c3d4e5f60718293a4b5c",
+            setup_timeframe="15m",
         )
         assert result is None
 
@@ -155,6 +172,8 @@ async def test_auto_pilot_15m_agile_mode_triggers_without_4h(mock_mtf):
             strat_res=mock_mtf.strategy,
             confluence=85,
             entry_mode="limit",
+            decision_snapshot_id="a1b2c3d4e5f60718293a4b5c",
+            setup_timeframe="15m",
         )
 
         assert result is not None
@@ -191,6 +210,8 @@ async def test_auto_pilot_fast_mode_blocks_non_actionable_trigger(mock_mtf):
             strat_res=mock_mtf.strategy,
             confluence=85,
             entry_mode="limit",
+            decision_snapshot_id="a1b2c3d4e5f60718293a4b5c",
+            setup_timeframe="15m",
         )
     assert result is None
     mock_create.assert_not_awaited()
@@ -218,6 +239,8 @@ async def test_auto_pilot_counts_pending_positions_and_prevents_duplicate(mock_m
             strat_res=mock_mtf.strategy,
             confluence=85,
             entry_mode="limit",
+            decision_snapshot_id="a1b2c3d4e5f60718293a4b5c",
+            setup_timeframe="15m",
         )
 
     assert result is None

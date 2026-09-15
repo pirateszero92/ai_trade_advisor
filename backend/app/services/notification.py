@@ -92,6 +92,10 @@ class NotificationService:
             ])
 
         text_lines.extend([
+                "",
+            ])
+
+        text_lines.extend([
             "Analysis:",
             f"{message}",
             "",
@@ -120,24 +124,49 @@ class NotificationService:
         message: str,
         confluence: int,
     ) -> bool:
-        if not self.cfg.line_notify_token:
+        token = (self.cfg.line_notify_token or "").strip()
+        if not token:
             return False
 
-        line_msg = f"\n[Apex Signal] {direction.upper()} {symbol} ({timeframe})\nConfluence: {confluence}/100\n\n{message}"
+        line_msg = f"[Apex Signal] {direction.upper()} {symbol} ({timeframe})\nConfluence: {confluence}/100\n\n{message}"
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
+                # 1. Try LINE Messaging API Broadcast first (Modern LINE Bot)
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "messages": [{"type": "text", "text": line_msg}]
+                }
                 resp = await client.post(
-                    "https://notify-api.line.me/api/notify",
-                    headers={"Authorization": f"Bearer {self.cfg.line_notify_token}"},
-                    data={"message": line_msg},
+                    "https://api.line.me/v2/bot/message/broadcast",
+                    headers=headers,
+                    json=payload,
                 )
-                return resp.status_code == 200
+                if resp.status_code == 200:
+                    return True
+
+                # 2. Fallback to Legacy LINE Notify (Sunset by LINE Corp on March 31, 2025)
+                legacy_resp = await client.post(
+                    "https://notify-api.line.me/api/notify",
+                    headers={"Authorization": f"Bearer {token}"},
+                    data={"message": f"\n{line_msg}"},
+                )
+                if legacy_resp.status_code == 200:
+                    return True
+                logger.warning(
+                    f"[LINE] Notification failed: Messaging API HTTP {resp.status_code}, "
+                    f"Legacy Notify HTTP {legacy_resp.status_code}"
+                )
+                return False
         except Exception as e:
             logger.error(f"Failed to send LINE alert: {e}")
             return False
 
     async def _send_fcm(self, title: str, body: str, data: dict) -> bool:
-        if not self.cfg.fcm_server_key:
+        server_key = (self.cfg.fcm_server_key or "").strip()
+        if not server_key:
             return False
 
         try:
@@ -151,12 +180,15 @@ class NotificationService:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
                     "https://fcm.googleapis.com/fcm/send",
-                    headers={"Authorization": f"key={self.cfg.fcm_server_key.strip()}"},
+                    headers={"Authorization": f"key={server_key}"},
                     json=payload,
                 )
-                if resp.status_code != 200:
-                    logger.warning(f"[FCM] Push response status {resp.status_code}: {resp.text}")
-                return resp.status_code == 200
+                if resp.status_code == 200:
+                    return True
+                logger.warning(
+                    f"[FCM] Push response status {resp.status_code} (Legacy HTTP API sunset by Google in June 2024): {resp.text}"
+                )
+                return False
         except Exception as e:
             logger.error(f"[FCM] Failed to send push: {e}")
             return False

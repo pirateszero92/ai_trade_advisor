@@ -29,8 +29,10 @@ class JournalService:
             }
 
         wins = [t for t in trades if (t.pnl or 0) > 0]
-        losses = [t for t in trades if (t.pnl or 0) <= 0]
-        win_rate = (len(wins) / total) * 100
+        losses = [t for t in trades if (t.pnl or 0) < 0]
+        breakevens = [t for t in trades if (t.pnl or 0) == 0]
+        decisive_count = len(wins) + len(losses)
+        win_rate = (len(wins) / decisive_count * 100) if decisive_count > 0 else 0.0
         total_pnl = sum(t.pnl or 0 for t in trades)
         valid_rrs = [t.rr_ratio for t in trades if t.rr_ratio is not None]
         avg_rr = sum(valid_rrs) / len(valid_rrs) if valid_rrs else 0.0
@@ -40,7 +42,20 @@ class JournalService:
             "total_trades": total,
             "wins": len(wins),
             "losses": len(losses),
+            "breakevens": len(breakevens),
             "win_rate": round(win_rate, 2),
             "total_pnl": round(total_pnl, 2),
             "avg_rr": round(avg_rr, 2),
+            "trades": [
+                {
+                    "id": str(t.id),
+                    "symbol": t.symbol,
+                    "direction": t.direction,
+                    "pnl": t.pnl,
+                    "rr_ratio": t.rr_ratio,
+                    "status": t.status,
+                    "created_at": t.created_at.isoformat() if t.created_at else None,
+                }
+                for t in trades
+            ],
         }

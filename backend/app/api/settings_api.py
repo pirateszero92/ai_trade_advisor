@@ -31,7 +31,11 @@ from app.engines.timeframe_profiles import (
     save_timeframe_profiles,
 )
 from app.core.url_security import configured_host_set, validate_service_url
-from app.core.runtime_config import load_runtime_config, update_runtime_config
+from app.core.runtime_config import (
+    get_runtime_trading_mode,
+    load_runtime_config,
+    update_runtime_config,
+)
 from app.models.base import get_db
 from app.models.phase3 import BacktestRun, ReleaseGateEvaluation
 
@@ -120,6 +124,8 @@ class ChatMessageRequest(BaseModel):
 
 class ChatContextRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    market_type: Literal["crypto", "forex", "stock"] = "crypto"
+    exchange: Literal["binance", "bybit", "innovestx", "mt5", "alpaca", "yfinance"] = "binance"
     symbol: str = Field(default="BTC/USDT", min_length=1, max_length=30, pattern=r"^[A-Za-z0-9_./:-]+$")
     price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     timeframe: str = Field(default="1h", max_length=10)
@@ -133,7 +139,16 @@ class ChatContextRequest(BaseModel):
     reaction_scenario_id: str = Field(default="", max_length=80)
     reaction_state: str = Field(default="", max_length=50)
     reaction_archetype: str = Field(default="", max_length=50)
+    reaction_entry_status: str = Field(default="", max_length=50)
+    reaction_entry_block_reason: str = Field(default="", max_length=240)
     reaction_evidence: dict[str, Any] = Field(default_factory=dict, max_length=30)
+    order_flow: dict[str, Any] = Field(default_factory=dict)
+    derivatives_sentiment: dict[str, Any] = Field(default_factory=dict)
+    inducements: list[dict[str, Any]] = Field(default_factory=list)
+    inducement_swept: bool = False
+    active_zone_type: str = Field(default="regular", max_length=50)
+    hmm_regime: str = Field(default="", max_length=50)
+    hmm_probabilities: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatRequest(BaseModel):
@@ -1427,16 +1442,21 @@ async def update_risk_config(
     session: AsyncSession = Depends(get_db),
 ):
     """Update risk management and entry mode settings and persist to JSON storage."""
-    if req.auto_trade_enabled is True:
+    if req.auto_trade_enabled is True and get_runtime_trading_mode() == "live":
         latest = (
             await session.execute(
                 select(ReleaseGateEvaluation, BacktestRun)
                 .join(BacktestRun, BacktestRun.id == ReleaseGateEvaluation.backtest_run_id)
                 .where(
                     ReleaseGateEvaluation.passed.is_(True),
+                    ReleaseGateEvaluation.production_eligible.is_(True),
                     BacktestRun.status == "completed",
                     BacktestRun.timeframe == "15m",
-                    BacktestRun.evaluation_mode == "anchored_out_of_sample_replay",
+                    BacktestRun.evaluation_mode.in_([
+                        "anchored_out_of_sample_replay",
+                        "rolling_walk_forward_evaluation",
+                        "rolling_walk_forward_oos",
+                    ]),
                 )
                 .order_by(ReleaseGateEvaluation.created_at.desc())
                 .limit(1)
@@ -1446,8 +1466,8 @@ async def update_risk_config(
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "Auto-Pilot remains locked: no passing 15m anchored OOS release gate. "
-                    "Run Paper backtests with at least 100 completed trades first."
+                    "Auto-Pilot remains locked for live trading: no approved, production-eligible 15m OOS release gate. "
+                    "Requires certified rolling/anchored OOS backtest and explicit human approval."
                 ),
             )
         gate, run = latest
@@ -1460,7 +1480,7 @@ async def update_risk_config(
         ):
             raise HTTPException(
                 status_code=409,
-                detail="Auto-Pilot remains locked: latest gate used insufficient release samples",
+                detail="Auto-Pilot remains locked for live trading: latest gate used insufficient release samples",
             )
     cfg = get_settings()
     if req.risk_per_trade is not None:
@@ -1522,3 +1542,36 @@ async def update_risk_config(
             "mtf_hierarchy_required": False,
         },
     }
+
+
+class RuntimeSettingsUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    auto_trade_enabled: Optional[bool] = None
+    auto_trade_min_grade: Optional[Literal["S", "A"]] = None
+    auto_trade_entry_type: Optional[Literal["momentum_market", "limit_pullback"]] = None
+    auto_trade_cooldown_seconds: Optional[int] = Field(default=None, ge=30, le=3600)
+
+
+@router.post("/runtime")
+async def update_runtime_settings(
+    req: RuntimeSettingsUpdateRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Fast-path update for runtime settings (e.g. quick toggle from UI)."""
+    updates = {}
+    if req.auto_trade_enabled is not None:
+        updates["auto_trade_enabled"] = req.auto_trade_enabled
+    if req.auto_trade_min_grade is not None:
+        updates["auto_trade_min_grade"] = req.auto_trade_min_grade
+    if req.auto_trade_entry_type is not None:
+        updates["auto_trade_entry_type"] = req.auto_trade_entry_type
+    if req.auto_trade_cooldown_seconds is not None:
+        updates["auto_trade_cooldown_seconds"] = req.auto_trade_cooldown_seconds
+
+    if updates:
+        saved = update_runtime_config(updates)
+        from app.services.event_trigger import invalidate_runtime_settings_cache
+        invalidate_runtime_settings_cache()
+        return {"status": "ok", "config": saved}
+    return {"status": "ok"}
+

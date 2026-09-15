@@ -66,12 +66,17 @@ async def lifespan(app: FastAPI):
     yield
     
     await monitor.stop()
+    from app.services.execution_analysis import execution_analyses
+    await execution_analyses.close()
     await paper_oms.stop()
     await ledger_mirror.stop()
     await price_hub.stop_stream()
+    from app.engines.sentiment_derivatives_engine import SentimentDerivativesEngine
+    await SentimentDerivativesEngine.close()
     try:
-        from app.engines.market_data import close_shared_http_client
+        from app.engines.market_data import close_shared_http_client, shutdown_executors
         await close_shared_http_client()
+        shutdown_executors()
     except Exception:
         pass
     logger.info("Shutting down cleanly.")
@@ -79,9 +84,12 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     cfg = get_settings()
-    allowed_origins = [
-        origin.strip() for origin in cfg.cors_allowed_origins.split(",") if origin.strip()
-    ]
+    if cfg.app_env == "development":
+        allowed_origins = ["*"]
+    else:
+        allowed_origins = [
+            origin.strip() for origin in cfg.cors_allowed_origins.split(",") if origin.strip()
+        ]
     app = FastAPI(
         title="AI Trade Advisor API",
         version="1.0.2",

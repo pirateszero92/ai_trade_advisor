@@ -38,7 +38,7 @@ DEFAULT_INDICATOR_CORE: dict[str, Any] = {
         },
         "volume_delta": {
             "enabled": True,
-            "required": False,
+            "required": True,
             "weight": 30.0,
             "params": {
                 "absorption_lookback": 10,
@@ -327,8 +327,11 @@ def _score_volume(signal: Any, params: dict[str, Any]) -> LayerScore:
     if not getattr(signal, "volume_data_valid", False):
         return LayerScore("volume_delta", False, 0, 30, "unavailable", ["Reliable volume is unavailable"])
     quality = getattr(signal, "volume_quality", "unavailable")
-    if quality == "unavailable":
-        return LayerScore("volume_delta", False, 0, 30, "unavailable", ["Volume data is unavailable"])
+    if quality != "exchange_aggressor":
+        return LayerScore(
+            "volume_delta", False, 0, 30, "unavailable",
+            ["True exchange aggressor CVD is unavailable; candle-volume estimates are presentation-only"],
+        )
     score = 0.0
     evidence: list[str] = []
     direction = getattr(signal, "direction", "wait")
@@ -336,25 +339,36 @@ def _score_volume(signal: Any, params: dict[str, Any]) -> LayerScore:
     ratio = float(getattr(signal, "delta_ratio", 0.0))
     threshold = float(params["pressure_threshold"])
     if _aligned(direction, delta > 0, delta < 0):
-        score += 10
-        evidence.append("Aggressor volume delta supports trade direction" if quality == "exchange_aggressor" else "Estimated candle-volume proxy supports trade direction")
+        score += 5
+        evidence.append("Aggressor volume delta supports trade direction")
+    divergence = getattr(signal, "cvd_divergence", "none")
+    divergence_aligned = _aligned(
+        direction, divergence == "bullish", divergence == "bearish"
+    )
+    divergence_evidence = getattr(signal, "cvd_divergence_evidence", {}) or {}
+    if divergence_aligned:
+        score += 15
+        evidence.append("CVD divergence supports trade direction")
+        if (float(divergence_evidence.get("price_excursion_atr", 0.0)) >= 0.50
+                and float(divergence_evidence.get("cvd_efficiency", 0.0)) >= 0.10):
+            score += 5
+            evidence.append("CVD divergence passes high-significance thresholds")
     absorption_type = getattr(signal, "delta_absorption_type", None)
     absorption_aligned = _aligned(
         direction,
         absorption_type == "bullish_absorption",
         absorption_type == "bearish_absorption",
     )
-    if quality == "exchange_aggressor" and getattr(signal, "delta_absorption", False) and absorption_aligned:
+    if not divergence_aligned and getattr(signal, "delta_absorption", False) and absorption_aligned:
         score += 15
-        evidence.append("Institutional absorption is direction-aligned")
-    elif _aligned(direction, ratio >= threshold, ratio <= -threshold):
-        score += 8
+        evidence.append("Failed aggressive flow (absorption) is direction-aligned")
+    elif not divergence_aligned and _aligned(direction, ratio >= threshold, ratio <= -threshold):
+        score += 5
         evidence.append(f"Directional pressure exceeds {threshold:.0%}")
     if getattr(signal, "volume_spike", False):
         score += 5
         evidence.append("Volume expansion confirmed")
-    if quality != "exchange_aggressor":
-        score = min(score * 0.4, 6.0)
+    score = min(score, 30.0)
     status = "strong" if score >= 22 else "supporting" if score >= 10 else "weak"
     return LayerScore("volume_delta", True, score, 30, status, evidence)
 
@@ -419,19 +433,26 @@ class IndicatorDecisionCore:
     def config(self) -> dict[str, Any]:
         return load_indicator_core_config()
 
-    def evaluate(self, signal: Any, config: dict[str, Any] | None = None) -> dict[str, Any]:
-        active_config = validate_indicator_core_config(config or self.config())
+    def _evaluate_direction(
+        self, signal: Any, active_config: dict[str, Any], direction: str
+    ) -> dict[str, Any]:
+        scored_signal = deepcopy(signal)
+        scored_signal.direction = direction
         total_weight = 0.0
         available_weight = 0.0
         weighted_points = 0.0
         layers: list[dict[str, Any]] = []
         blocking_reasons: list[str] = []
+        squeeze_bonus = 0
 
         for indicator_id, scorer in self.scorers.items():
             layer_config = active_config["indicators"][indicator_id]
             metadata = INDICATOR_METADATA[indicator_id]
             enabled = bool(layer_config["enabled"])
             weight = float(layer_config["weight"])
+            is_bonus = indicator_id == "squeeze_momentum"
+            if is_bonus:
+                weight = 0.0  # Excluded from core score and data coverage.
             if not enabled:
                 layers.append({
                     "id": indicator_id,
@@ -447,22 +468,30 @@ class IndicatorDecisionCore:
                 })
                 continue
             total_weight += weight
-            layer_score = scorer(signal, layer_config["params"])
+            layer_score = scorer(scored_signal, layer_config["params"])
             if layer_score.available:
                 available_weight += weight
-            elif layer_config["required"]:
+            elif layer_config["required"] and not is_bonus:
                 blocking_reasons.append(f"Required indicator unavailable: {metadata['label']}")
             normalized = (
                 max(0.0, min(layer_score.raw_score / layer_score.max_score, 1.0))
                 if layer_score.max_score > 0 else 0.0
             )
             contribution = normalized * weight if layer_score.available else 0.0
+            if (is_bonus and layer_score.available
+                    and getattr(scored_signal, "squeeze_status", "") == "squeeze_fire"
+                    and _aligned(direction,
+                                 getattr(scored_signal, "squeeze_momentum", 0) > 0,
+                                 getattr(scored_signal, "squeeze_momentum", 0) < 0)):
+                # Display-only bonus; never added to the core approval score.
+                squeeze_bonus = round(normalized * 10)
             weighted_points += contribution
             layers.append({
                 "id": indicator_id,
                 **metadata,
                 "enabled": True,
-                "required": bool(layer_config["required"]),
+                "required": bool(layer_config["required"]) and not is_bonus,
+                "role": "bonus" if is_bonus else "core",
                 "available": layer_score.available,
                 "weight": weight,
                 "score": round(normalized * 100),
@@ -481,6 +510,9 @@ class IndicatorDecisionCore:
         return {
             "version": int(active_config["version"]),
             "score": max(0, min(score, 100)),
+            "core_score": max(0, min(score, 100)),
+            "squeeze_bonus": squeeze_bonus,
+            "squeeze_bonus_max": 10,
             "coverage": coverage,
             "minimum_coverage": minimum_coverage,
             "ready": not blocking_reasons,
@@ -489,3 +521,24 @@ class IndicatorDecisionCore:
             "blocking_reasons": blocking_reasons,
             "layers": layers,
         }
+
+    def evaluate(self, signal: Any, config: dict[str, Any] | None = None) -> dict[str, Any]:
+        active_config = validate_indicator_core_config(config or self.config())
+        long_result = self._evaluate_direction(signal, active_config, "long")
+        short_result = self._evaluate_direction(signal, active_config, "short")
+        requested = str(getattr(signal, "direction", "wait")).lower()
+        if requested == "long":
+            selected = long_result
+        elif requested == "short":
+            selected = short_result
+        else:
+            selected = max((long_result, short_result), key=lambda item: item["score"])
+            selected = deepcopy(selected)
+            selected["squeeze_bonus"] = 0
+        selected["selected_direction"] = requested if requested in {"long", "short"} else "evidence_only"
+        selected["score_role"] = "setup" if requested in {"long", "short"} else "directional_evidence"
+        selected["directional_scores"] = {
+            "long": long_result["score"],
+            "short": short_result["score"],
+        }
+        return selected

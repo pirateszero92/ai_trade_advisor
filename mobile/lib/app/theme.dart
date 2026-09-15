@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 
 class AppTheme {
   static ThemeData dark() {
@@ -7,9 +7,9 @@ class AppTheme {
       brightness: Brightness.dark,
       scaffoldBackgroundColor: const Color(0xFF0B0E14),
       colorScheme: const ColorScheme.dark(
-        primary: Color(0xFF0ECB81),         // Binance Bullish Green
-        secondary: Color(0xFFF6465D),       // Binance Bearish Red
-        surface: Color(0xFF151A24),         // TradingView dark surface
+        primary: Color(0xFF0ECB81), // Binance Bullish Green
+        secondary: Color(0xFFF6465D), // Binance Bearish Red
+        surface: Color(0xFF151A24), // TradingView dark surface
         surfaceContainerHigh: Color(0xFF1A202C),
         onPrimary: Colors.black,
         onSurface: Colors.white,

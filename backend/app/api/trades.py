@@ -11,8 +11,6 @@ import threading
 from typing import Literal, Optional
 from uuid import uuid4
 from datetime import datetime, timezone
-from uuid import uuid4
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -159,6 +157,16 @@ def get_all_trades() -> dict[str, dict]:
         return dict(_trades)
 
 
+async def get_all_trades_async() -> dict[str, dict]:
+    """Non-blocking async retrieval of trade ledger for FastAPI coroutines."""
+    return await asyncio.to_thread(get_all_trades)
+
+
+async def _mutate_trades_async(mutator):
+    """Non-blocking async mutation of trade ledger for FastAPI coroutines."""
+    return await asyncio.to_thread(_mutate_trades, mutator)
+
+
 def auto_close_trade_sync(trade_id: str, reason: str, close_price: float) -> Optional[dict]:
     def mutate(trades: dict[str, dict]) -> Optional[dict]:
         trade = trades.get(trade_id)
@@ -280,7 +288,7 @@ async def reset_paper_account(req: ResetAccountRequest, _key: str = Depends(veri
                 if value.get("mode", "paper") == "paper"
             ]:
                 trades.pop(trade_id, None)
-        _mutate_trades(clear_paper)
+        await _mutate_trades_async(clear_paper)
 
     return await get_account_portfolio(mode="paper", _key=_key)
 
@@ -305,6 +313,17 @@ class PlaceOrderRequest(BaseModel):
     risk_pct: float = Field(default=1.0, gt=0, le=5, allow_inf_nan=False)
     auto_be: bool = True
     trailing_stop: bool = False
+    # Immutable deterministic setup metadata.  These fields are copied onto
+    # the position at entry so Journal never has to infer a historical grade
+    # from today's market state.
+    setup_grade: Optional[Literal["A", "S"]] = None
+    setup_type: Optional[Literal["sweep_reversal", "displacement_retest"]] = None
+    decision_snapshot_id: Optional[str] = Field(
+        default=None, min_length=8, max_length=64, pattern=r"^[a-fA-F0-9]+$"
+    )
+    setup_timeframe: Optional[str] = Field(
+        default=None, min_length=1, max_length=8, pattern=r"^[0-9]+[mhdwM]$"
+    )
     idempotency_key: Optional[str] = Field(default=None, min_length=8, max_length=100)
 
     @model_validator(mode="after")
@@ -314,6 +333,18 @@ class PlaceOrderRequest(BaseModel):
             raise ValueError("One of position_size, size, or qty is required")
         if len(supplied) > 1 and any(not math.isclose(supplied[0], value) for value in supplied[1:]):
             raise ValueError("position_size, size, and qty must agree when supplied together")
+        setup_metadata = (
+            self.setup_grade,
+            self.setup_type,
+            self.decision_snapshot_id,
+            self.setup_timeframe,
+        )
+        if any(value is not None for value in setup_metadata) and not all(
+            value is not None for value in setup_metadata
+        ):
+            raise ValueError(
+                "setup_grade, setup_type, decision_snapshot_id and setup_timeframe must be supplied together"
+            )
         return self
 
     def get_effective_size(self) -> float:
@@ -368,63 +399,52 @@ async def place_order(
                 detail=f"Invalid SL/TP for SHORT: Stop Loss ({sl}) must be above Entry ({entry}) and Take Profit ({tp}) must be below Entry",
             )
 
+    manual_override = False
+    if req.decision_snapshot_id:
+        from app.services.execution_analysis import execution_analyses
+        snapshot = execution_analyses.get_by_snapshot_id(req.decision_snapshot_id)
+        if snapshot is not None:
+            sig = snapshot.signal
+            if (
+                snapshot.symbol.upper() != req.symbol.upper()
+                or (sig.direction and sig.direction.lower() != dir_)
+                or (sig.entry and abs(float(sig.entry) - entry) > 1e-4)
+                or (sig.stop_loss and abs(float(sig.stop_loss) - sl) > 1e-4)
+                or (sig.take_profit and abs(float(sig.take_profit) - tp) > 1e-4)
+            ):
+                manual_override = True
+
     if _paper_oms_available():
         try:
             payload = req.model_dump()
             payload["position_size"] = effective_size
+            payload["manual_override"] = manual_override
             return await paper_oms.place_order(payload)
         except PaperOMSError as exc:
             _raise_paper_oms_http(exc)
+
 
     cfg = get_settings()
     effective_mode: Literal["paper"] = "paper"
     broker_name = "paper"
     currency_name = "USD"
 
-    current_trades = get_all_trades()
-    if req.idempotency_key:
-        existing = next(
-            (trade for trade in current_trades.values() if trade.get("idempotency_key") == req.idempotency_key),
-            None,
-        )
-        if existing:
-            return existing
-    open_count = sum(1 for trade in current_trades.values() if trade.get("mode", "paper") == effective_mode and trade.get("status") in {"open", "pending"})
-    if open_count >= cfg.max_open_positions:
-        raise HTTPException(status_code=409, detail="Maximum open/pending position limit reached")
-
-    paper_cfg = _load_paper_config()
-    initial_capital = float(paper_cfg.get("initial_capital", 100000.0))
-    realized = sum(
-        float(trade.get("pnl", 0.0)) for trade in current_trades.values()
-        if trade.get("mode", "paper") == "paper" and trade.get("status") == "closed"
-    )
-    equity = max(initial_capital + realized, 0.0)
-    today_utc = datetime.now(timezone.utc).date()
-    daily_realized = 0.0
-    for trade in current_trades.values():
-        if trade.get("mode", "paper") != "paper" or trade.get("status") != "closed":
-            continue
+    # Check initial status for Paper Trading (Pending Limit vs Open Market)
+    initial_status = "open"
+    if effective_mode == "paper" and req.order_type == "limit":
         try:
-            closed_at = datetime.fromisoformat(str(trade["closed_at"]).replace("Z", "+00:00"))
-            if closed_at.astimezone(timezone.utc).date() == today_utc:
-                daily_realized += float(trade.get("pnl", 0.0))
-        except (KeyError, TypeError, ValueError):
-            continue
-    daily_loss_limit = initial_capital * cfg.max_daily_loss / 100.0
-    if daily_realized <= -daily_loss_limit:
-        raise HTTPException(status_code=409, detail="Daily loss limit reached; new orders are disabled")
-
-    allowed_risk_pct = min(req.risk_pct, cfg.default_risk_per_trade)
-    allowed_risk = equity * allowed_risk_pct / 100.0
-    estimated_loss = abs(entry - sl) * effective_size
-    if estimated_loss > allowed_risk * 1.001:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Position risks {estimated_loss:.2f}, above allowed {allowed_risk:.2f} ({allowed_risk_pct:.2f}%)",
-        )
-    if entry * effective_size > equity * 5.0:
-        raise HTTPException(status_code=400, detail="Position notional exceeds the 5x paper leverage limit")
+            s_up = req.symbol.upper()
+            mtype = "forex" if any(f in s_up for f in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]) else ("crypto" if "/" in s_up or "USDT" in s_up or "THB" in s_up else "stock")
+            tk = await _market_data.get_ticker_24h(req.symbol, mtype)
+            cur_p = float(tk.get("price", 0.0))
+            if cur_p <= 0:
+                raise ValueError("provider returned no valid price")
+            if dir_ == "long" and cur_p > entry * 1.0005:
+                initial_status = "pending"
+            elif dir_ == "short" and cur_p < entry * 0.9995:
+                initial_status = "pending"
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Unable to validate limit order against live price") from exc
 
     try:
         result = await _paper_execution.place_order(
@@ -444,50 +464,7 @@ async def place_order(
     if not isinstance(result, dict) or result.get("status") not in {"filled", "submitted"}:
         raise HTTPException(status_code=502, detail="Execution engine did not acknowledge the order")
 
-    # Check initial status for Paper Trading (Pending Limit vs Open Market)
-    initial_status = "open"
-    if effective_mode == "paper" and req.order_type == "limit":
-            try:
-                s_up = req.symbol.upper()
-                mtype = "forex" if any(f in s_up for f in ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]) else ("crypto" if "/" in s_up or "USDT" in s_up or "THB" in s_up else "stock")
-                tk = await _market_data.get_ticker_24h(req.symbol, mtype)
-                cur_p = float(tk.get("price", 0.0))
-                if cur_p <= 0:
-                    raise ValueError("provider returned no valid price")
-                if dir_ == "long" and cur_p > entry * 1.0005:
-                    initial_status = "pending"
-                elif dir_ == "short" and cur_p < entry * 0.9995:
-                    initial_status = "pending"
-            except Exception as exc:
-                raise HTTPException(status_code=503, detail=f"Unable to validate limit order against live price: {exc}") from exc
-
-    trade_id = str(uuid4())
-    tag_name = req.tag if (req.tag and req.tag.strip()) else f"POS-{trade_id[:8]}"
-    trade = {
-        **result,
-        "id": trade_id,
-        "tag": tag_name,
-        "mode": effective_mode,
-        "broker": broker_name,
-        "currency": currency_name,
-        "entry": entry,
-        "stop_loss": sl,
-        "initial_stop_loss": sl,
-        "initial_sl_dist": abs(entry - sl),
-        "take_profit": tp,
-        "opened_at": datetime.now(timezone.utc).isoformat(),
-        "status": initial_status,
-        "notes": req.notes,
-        "order_type": req.order_type,
-        "risk_pct": allowed_risk_pct,
-        "estimated_risk": round(estimated_loss, 2),
-        "auto_be": req.auto_be,
-        "trailing_stop": req.trailing_stop,
-        "idempotency_key": req.idempotency_key,
-        "pnl": 0.0,
-        "pnl_pct": 0.0,
-    }
-    def add_trade(trades: dict[str, dict]) -> dict:
+    def insert_order(trades: dict[str, dict]) -> dict:
         if req.idempotency_key:
             existing = next(
                 (item for item in trades.values() if item.get("idempotency_key") == req.idempotency_key),
@@ -495,10 +472,79 @@ async def place_order(
             )
             if existing:
                 return dict(existing)
+
+        open_count = sum(1 for trade in trades.values() if trade.get("mode", "paper") == effective_mode and trade.get("status") in {"open", "pending"})
+        if open_count >= cfg.max_open_positions:
+            raise HTTPException(status_code=409, detail="Maximum open/pending position limit reached")
+
+        paper_cfg = _load_paper_config()
+        initial_capital = float(paper_cfg.get("initial_capital", 100000.0))
+        realized = sum(
+            float(trade.get("pnl", 0.0)) for trade in trades.values()
+            if trade.get("mode", "paper") == "paper" and trade.get("status") == "closed"
+        )
+        equity = max(initial_capital + realized, 0.0)
+        today_utc = datetime.now(timezone.utc).date()
+        daily_realized = 0.0
+        for trade in trades.values():
+            if trade.get("mode", "paper") != "paper" or trade.get("status") != "closed":
+                continue
+            try:
+                closed_at = datetime.fromisoformat(str(trade["closed_at"]).replace("Z", "+00:00"))
+                if closed_at.astimezone(timezone.utc).date() == today_utc:
+                    daily_realized += float(trade.get("pnl", 0.0))
+            except (KeyError, TypeError, ValueError):
+                continue
+        daily_loss_limit = initial_capital * cfg.max_daily_loss / 100.0
+        if daily_realized <= -daily_loss_limit:
+            raise HTTPException(status_code=409, detail="Daily loss limit reached; new orders are disabled")
+
+        allowed_risk_pct = min(req.risk_pct, cfg.default_risk_per_trade)
+        allowed_risk = equity * allowed_risk_pct / 100.0
+        estimated_loss = abs(entry - sl) * effective_size
+        if estimated_loss > allowed_risk * 1.001:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Position risks {estimated_loss:.2f}, above allowed {allowed_risk:.2f} ({allowed_risk_pct:.2f}%)",
+            )
+        if entry * effective_size > equity * 5.0:
+            raise HTTPException(status_code=400, detail="Position notional exceeds the 5x paper leverage limit")
+
+        trade_id = str(uuid4())
+        tag_name = req.tag if (req.tag and req.tag.strip()) else f"POS-{trade_id[:8]}"
+        trade = {
+            **result,
+            "id": trade_id,
+            "tag": tag_name,
+            "mode": effective_mode,
+            "broker": broker_name,
+            "currency": currency_name,
+            "entry": entry,
+            "stop_loss": sl,
+            "initial_stop_loss": sl,
+            "initial_sl_dist": abs(entry - sl),
+            "take_profit": tp,
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+            "status": initial_status,
+            "notes": req.notes,
+            "order_type": req.order_type,
+            "risk_pct": allowed_risk_pct,
+            "estimated_risk": round(estimated_loss, 2),
+            "auto_be": req.auto_be,
+            "trailing_stop": req.trailing_stop,
+            "setup_grade": req.setup_grade,
+            "setup_type": req.setup_type,
+            "decision_snapshot_id": req.decision_snapshot_id,
+            "setup_timeframe": req.setup_timeframe,
+            "manual_override": manual_override,
+            "idempotency_key": req.idempotency_key,
+            "pnl": 0.0,
+            "pnl_pct": 0.0,
+        }
         trades[trade_id] = trade
         return dict(trade)
 
-    saved_trade = _mutate_trades(add_trade)
+    saved_trade = await _mutate_trades_async(insert_order)
     from app.engines.price_hub import price_hub
     price_hub.register_symbol(req.symbol)
     return saved_trade
@@ -644,7 +690,7 @@ async def close_trade(
             })
             return dict(current)
 
-        cancelled = _mutate_trades(cancel_pending)
+        cancelled = await _mutate_trades_async(cancel_pending)
         if not cancelled:
             latest = get_all_trades().get(trade_id)
             latest_status = latest.get("status") if latest else "missing"
@@ -1133,7 +1179,7 @@ async def update_trade(
         return dict(trade)
 
     try:
-        updated = _mutate_trades(mutate)
+        updated = await _mutate_trades_async(mutate)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not updated:
@@ -1168,7 +1214,7 @@ async def cancel_trade(
         return dict(trade)
 
     try:
-        cancelled = _mutate_trades(mutate)
+        cancelled = await _mutate_trades_async(mutate)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not cancelled:

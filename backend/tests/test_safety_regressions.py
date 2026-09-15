@@ -15,6 +15,7 @@ from app.engines.indicators import AdvancedIndicatorsEngine
 from app.engines.execution_engine import ExecutionEngine
 from app.engines.risk_engine import RiskEngine
 from app.engines.smc_engine import SMCSignal
+from app.api.chart import _approved_execution_levels
 from app.services.event_trigger import (
     _confirmed_invalidation_direction,
     _rejected_strategy_advice,
@@ -251,7 +252,18 @@ async def test_ai_chat_refuses_cross_timeframe_decision_before_provider_call(mon
 
 
 @pytest.mark.anyio
-async def test_ai_chat_cannot_override_rejected_strategy_gate():
+async def test_ai_chat_cannot_override_rejected_strategy_gate(monkeypatch):
+    from types import SimpleNamespace
+    from app.engines.strategy_engine import StrategyResult
+    from app.services.execution_analysis import execution_analyses
+    async def canonical(**kwargs):
+        return SimpleNamespace(
+            timeframe="1h", signal=_signal(symbol="SOL/USDT", confluence=72),
+            frame=pd.DataFrame({"close": [100.0]}),
+            strategy=StrategyResult(approved=False, setup_direction="long",
+                                    rejection_reasons=["Liquidity sweep required but not detected"]),
+        )
+    monkeypatch.setattr(execution_analyses, "get", canonical)
     reply = await AIEngine().chat(
         [{"role": "user", "content": "ช่วยวิเคราะห์ว่าควรเปิด Long ตอนนี้ไหม"}],
         context={
@@ -308,3 +320,18 @@ async def test_legacy_execution_and_runtime_mode_fail_closed_to_paper():
             exchange="innovestx",
             order_type="limit",
         )
+def test_chart_never_exposes_execution_levels_when_strategy_gate_rejects():
+    signal = SMCSignal(symbol="NEAR/USDT", timeframe="15m", current_price=2.015)
+    signal.entry = 1.970
+    signal.stop_loss = 1.960
+    signal.take_profit = 1.990
+    signal.risk_reward = 2.0
+
+    levels = _approved_execution_levels(signal, approved=False)
+
+    assert levels == {
+        "entry": None,
+        "stop_loss": None,
+        "take_profit": None,
+        "risk_reward": 0.0,
+    }

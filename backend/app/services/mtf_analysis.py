@@ -8,6 +8,7 @@ approval, risk, alerts, or order execution.
 from __future__ import annotations
 
 import asyncio
+from weakref import WeakValueDictionary
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -492,7 +493,7 @@ class MTFAnalysisService:
     def __init__(self) -> None:
         self._market = MarketDataEngine()
         self._cache: dict[tuple[str, ...], MTFAnalysis] = {}
-        self._locks: dict[tuple[str, ...], asyncio.Lock] = {}
+        self._locks: WeakValueDictionary = WeakValueDictionary()
 
     def clear(self) -> None:
         self._cache.clear()

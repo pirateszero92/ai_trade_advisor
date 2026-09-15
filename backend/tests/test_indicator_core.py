@@ -47,6 +47,11 @@ def _strong_long_signal() -> SMCSignal:
     signal.delta_ratio = 0.4
     signal.delta_absorption = True
     signal.delta_absorption_type = "bullish_absorption"
+    signal.cvd_divergence = "bullish"
+    signal.cvd_divergence_evidence = {
+        "price_excursion_atr": 0.8,
+        "cvd_efficiency": 0.2,
+    }
     signal.volume_spike = True
 
     signal.squeeze_data_valid = True
@@ -78,9 +83,9 @@ def test_unavailable_optional_layer_reduces_coverage_and_score():
 
     decision = IndicatorDecisionCore().evaluate(signal, DEFAULT_INDICATOR_CORE)
 
-    assert decision["coverage"] == 70.0
-    assert decision["score"] == 70
-    assert decision["ready"] is True
+    assert decision["coverage"] == 57.1  # SMC 40 / core weight 70; SQZ is not coverage.
+    assert decision["score"] == 57
+    assert decision["ready"] is False
     volume = next(layer for layer in decision["layers"] if layer["id"] == "volume_delta")
     assert volume["status"] == "unavailable"
 
@@ -106,7 +111,7 @@ def test_required_unavailable_layer_blocks_strategy_entry():
     result = strategy.evaluate(signal)
 
     assert result.approved is False
-    assert any("Indicator data is not ready" in reason for reason in result.rejection_reasons)
+    assert any("SMC+CVD" in reason for reason in result.rejection_reasons)
 
 
 def test_disabled_layer_is_excluded_from_normalization():
@@ -219,3 +224,32 @@ def test_opposing_structure_event_never_adds_smc_points():
 
     assert aligned_layer["weighted_points"] == opposing_layer["weighted_points"] + 3
     assert any("opposes" in item for item in opposing_layer["evidence"])
+
+
+def test_estimated_cvd_is_not_counted_as_execution_coverage():
+    signal = _strong_long_signal()
+    signal.volume_quality = "estimated"
+    decision = IndicatorDecisionCore().evaluate(signal)
+    volume = next(layer for layer in decision["layers"] if layer["id"] == "volume_delta")
+    assert volume["available"] is False
+    assert decision["coverage"] == 57.1
+    assert decision["ready"] is False
+
+
+def test_wait_signal_reports_both_directional_evidence_scores():
+    signal = _strong_long_signal()
+    signal.direction = "wait"
+    decision = IndicatorDecisionCore().evaluate(signal)
+    assert decision["score_role"] == "directional_evidence"
+    assert decision["selected_direction"] == "evidence_only"
+    assert decision["directional_scores"]["long"] > decision["directional_scores"]["short"]
+    assert decision["squeeze_bonus"] == 0
+
+
+def test_cvd_divergence_contributes_to_volume_layer():
+    signal = _strong_long_signal()
+    with_divergence = IndicatorDecisionCore().evaluate(signal)["layers"][1]
+    signal.cvd_divergence = "none"
+    signal.cvd_divergence_evidence = {}
+    without_divergence = IndicatorDecisionCore().evaluate(signal)["layers"][1]
+    assert with_divergence["weighted_points"] > without_divergence["weighted_points"]

@@ -32,6 +32,7 @@ services:
     environment:
       APP_ENV: production
     volumes:
+      - ./backend/app:/app/app
       - ./backend/config:/app/config
       - ./backend/data:/app/data
       - ./backend/prompts:/app/prompts

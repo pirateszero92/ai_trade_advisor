@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from itertools import pairwise
+
 import pandas as pd
 import pytest
 
@@ -11,8 +13,10 @@ from app.engines.backtest_engine import (
     ReleaseCriteria,
     calculate_backtest_metrics,
     evaluate_release_gate,
+    run_rolling_walk_forward_backtest,
     run_walk_forward_backtest,
     simulate_execution,
+    summarize_sweep_observations,
 )
 from app.engines.strategy_engine import DEFAULT_STRATEGY
 from app.engines.timeframe_profiles import DEFAULT_TIMEFRAME_PROFILES
@@ -222,6 +226,9 @@ def test_release_gate_never_marks_result_production_eligible():
             "S1_BULL_BREAKOUT": {"trades": 60},
             "S2_BULL_OB_RETEST": {"trades": 60},
         },
+        "data_readiness": {"coverage": 1.0, "history_days": 180.0},
+        "tri_core_policy": {"calibration_status": "walk_forward_validated"},
+        "oos_fold_count": 3,
     }
     gate = evaluate_release_gate(metrics, ReleaseCriteria())
     assert gate["passed"] is True
@@ -259,3 +266,62 @@ def test_backtest_rejects_non_execution_timeframe():
             assumptions=ExecutionAssumptions(),
             warmup_bars=60,
         )
+
+
+def test_sweep_distribution_is_diagnostic_and_does_not_select_thresholds():
+    result = summarize_sweep_observations(
+        [
+            {"reclaim_duration_bars": 1, "post_reclaim_extension_atr": 0.2},
+            {"reclaim_duration_bars": 2, "post_reclaim_extension_atr": 0.5},
+            {"reclaim_duration_bars": 4, "post_reclaim_extension_atr": 1.1},
+            {"reclaim_duration_bars": 8, "post_reclaim_extension_atr": 1.8},
+        ],
+        split_scope="outer_oos_observation_only",
+    )
+
+    assert result["reclaim_duration_bars"]["p50"] == 3.0
+    assert result["post_reclaim_extension_atr"]["p75"] == pytest.approx(1.275)
+    assert result["candidate_selection"] == "not_selected"
+    assert "training/inner-validation" in result["warning"]
+
+
+def test_rolling_walk_forward_uses_non_overlapping_chronological_oos_folds(monkeypatch):
+    import app.engines.backtest_engine as module
+
+    calls: list[tuple[int, float]] = []
+
+    def fake_anchored(**kwargs):
+        fold_frame = kwargs["market_data"]
+        fraction = kwargs["oos_fraction"]
+        start = int(len(fold_frame) * fraction)
+        calls.append((len(fold_frame), fraction))
+        return {
+            "trades": [],
+            "rejection_diagnostics": [],
+            "calibration_distribution": {"observation_count": 0},
+            "metrics": {"completed_trades": 0},
+            "oos_start_index": start,
+        }
+
+    monkeypatch.setattr(module, "run_walk_forward_backtest", fake_anchored)
+    frame = _bars([(100, 101, 99, 100, 1000)] * 200)
+    result = run_rolling_walk_forward_backtest(
+        market_data=frame,
+        symbol="BTC/USDT",
+        timeframe="15m",
+        config={"tri_core_policy": {"calibration_status": "draft_unvalidated"}},
+        assumptions=ExecutionAssumptions(),
+        folds=3,
+        initial_train_fraction=0.50,
+        warmup_bars=20,
+    )
+
+    fold_ranges = [
+        (fold["oos_start_index"], fold["oos_end_index"])
+        for fold in result["folds"]
+    ]
+    assert fold_ranges == [(100, 132), (133, 165), (166, 199)]
+    assert all(left[1] < right[0] for left, right in pairwise(fold_ranges))
+    assert calls == [(133, 100 / 133), (166, 133 / 166), (200, 166 / 200)]
+    assert result["metrics"]["oos_fold_count"] == 3
+    assert result["evaluation_mode"] == "rolling_walk_forward_oos"

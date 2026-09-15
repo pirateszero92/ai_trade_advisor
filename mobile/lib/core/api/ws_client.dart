@@ -50,19 +50,23 @@ class AppWebSocketClient {
         isConnected) {
       return;
     }
+    final apiKey = await ApiConfig.getApiKey();
+    if (apiKey == null || apiKey.isEmpty) {
+      debugPrint('[WS-Client] Cannot connect: API key is not configured.');
+      _setConnectionState(WsConnectionState.disconnected);
+      return;
+    }
+
     _setConnectionState(WsConnectionState.connecting);
 
+    WebSocketChannel? channel;
     try {
       final wsUri = Uri.parse(AppApi.wsUrl('/ws/stream'));
-      final apiKey = await ApiConfig.getApiKey();
-      if (apiKey == null || apiKey.isEmpty) {
-        throw StateError('API key is not configured');
-      }
       final encodedKey =
           base64Url.encode(utf8.encode(apiKey)).replaceAll('=', '');
       final protocol = 'api-key.$encodedKey';
       debugPrint('[WS-Client] Connecting to $wsUri...');
-      final channel = WebSocketChannel.connect(wsUri, protocols: [protocol]);
+      channel = WebSocketChannel.connect(wsUri, protocols: [protocol]);
       _channel = channel;
       await channel.ready.timeout(const Duration(seconds: 10));
 
@@ -85,6 +89,9 @@ class AppWebSocketClient {
       _subscribeChannels();
     } catch (e) {
       debugPrint('[WS-Client] Connect exception: $e');
+      try {
+        await channel?.sink.close();
+      } catch (_) {}
       _handleDisconnect();
     }
   }
@@ -92,11 +99,16 @@ class AppWebSocketClient {
   void _onMessage(dynamic raw) {
     try {
       final String text = raw is List<int> ? utf8.decode(raw) : raw.toString();
-      final data = json.decode(text) as Map<String, dynamic>;
+      final decoded = json.decode(text);
+      if (decoded is! Map) return;
+      final data = Map<String, dynamic>.from(decoded);
       final type = data['type']?.toString();
 
       if (type == 'price_tick' || type == 'initial_snapshot') {
-        final payload = data['data'] as Map<String, dynamic>? ?? {};
+        final rawPayload = data['data'];
+        final payload = rawPayload is Map
+            ? Map<String, dynamic>.from(rawPayload)
+            : <String, dynamic>{};
         _latestPrices.addAll(payload);
         _priceStreamController.add(payload);
       } else if (type == 'trade_updated' || type == 'trade_closed') {

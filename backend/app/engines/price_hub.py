@@ -224,18 +224,25 @@ class PriceHub:
             "transport": effective_transport,
             "data_quality": effective_quality,
         }
-        if extra:
-            data.update(extra)
-        self._prices[clean] = data
+        with self._lock:
+            if extra:
+                data.update(extra)
+            self._prices[clean] = data
         self._notify(data)
         return self._with_freshness(data, now=now)
 
     def _notify(self, data: dict) -> None:
-        for callback in tuple(self._subscribers):
+        with self._lock:
+            subscribers = tuple(self._subscribers)
+        for callback in subscribers:
             try:
                 result = callback(dict(data))
                 if inspect.isawaitable(result):
-                    asyncio.create_task(result)
+                    task = asyncio.create_task(result)
+                    task.add_done_callback(
+                        lambda t: logger.debug(f"[PriceHub] Subscriber task finished with error: {t.exception()}")
+                        if not t.cancelled() and t.exception() else None
+                    )
             except Exception as exc:
                 logger.debug("[PriceHub] Subscriber failed: {}", exc)
 

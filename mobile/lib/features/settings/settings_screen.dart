@@ -2477,7 +2477,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               const ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: Icon(Icons.speed, color: AppColors.bullish),
-                title: Text('15M Execution Only',
+                title: Text('1H Execution Only',
                     style: TextStyle(color: Colors.white)),
                 subtitle: Text(
                     'MTF แสดงเป็นข้อมูลประกอบเท่านั้น ไม่มีผลต่อคะแนนหรือการตัดสินใจ',
@@ -2532,7 +2532,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 children: [
                   Expanded(
                     child: _modeButton(
-                      label: '⚡ Momentum Market\n(เข้าทันที SL ชิด 15M)',
+                      label: '⚡ Momentum Market\n(เข้าทันที SL ชิด 1H)',
                       icon: Icons.flash_on,
                       selected:
                           settings.autoTradeEntryType == 'momentum_market',

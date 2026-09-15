@@ -17,24 +17,25 @@ from app.engines.market_data import MarketDataEngine
 from app.engines.smc_engine import SMCEngine
 from app.engines.strategy_engine import StrategyEngine
 from app.engines.ai_engine import AIEngine
-from app.engines.risk_engine import RiskEngine
+from app.engines.risk_engine import RiskEngine, squeeze_adjusted_risk_pct
 from app.services.notification import NotificationService
 from app.api.ws import broadcast
 from app.services.execution_analysis import execution_analyses
 from app.services.instrument_rules import instrument_rules
+from app.services.lifecycle_state_store import lifecycle_state_store
 
 DEFAULT_WATCHLIST = [
     # Crypto
-    {"symbol": "BTC/USDT", "timeframe": "1h", "htf_timeframe": "4h", "market_type": "crypto", "exchange": "binance"},
-    {"symbol": "ETH/USDT", "timeframe": "1h", "htf_timeframe": "4h", "market_type": "crypto", "exchange": "binance"},
-    {"symbol": "SOL/USDT", "timeframe": "1h", "htf_timeframe": "4h", "market_type": "crypto", "exchange": "binance"},
+    {"symbol": "BTC/USDT", "timeframe": "15m", "htf_timeframe": "4h", "market_type": "crypto", "exchange": "binance"},
+    {"symbol": "ETH/USDT", "timeframe": "15m", "htf_timeframe": "4h", "market_type": "crypto", "exchange": "binance"},
+    {"symbol": "SOL/USDT", "timeframe": "15m", "htf_timeframe": "4h", "market_type": "crypto", "exchange": "binance"},
     # Forex & Gold
-    {"symbol": "XAUUSD", "timeframe": "1h", "htf_timeframe": "4h", "market_type": "forex", "exchange": "mt5"},
-    {"symbol": "EURUSD", "timeframe": "1h", "htf_timeframe": "4h", "market_type": "forex", "exchange": "mt5"},
+    {"symbol": "XAUUSD", "timeframe": "15m", "htf_timeframe": "4h", "market_type": "forex", "exchange": "mt5"},
+    {"symbol": "EURUSD", "timeframe": "15m", "htf_timeframe": "4h", "market_type": "forex", "exchange": "mt5"},
     # Stocks
-    {"symbol": "AAPL", "timeframe": "1d", "htf_timeframe": "1w", "market_type": "stock", "exchange": "alpaca"},
-    {"symbol": "TSLA", "timeframe": "1d", "htf_timeframe": "1w", "market_type": "stock", "exchange": "alpaca"},
-    {"symbol": "NVDA", "timeframe": "1d", "htf_timeframe": "1w", "market_type": "stock", "exchange": "alpaca"},
+    {"symbol": "AAPL", "timeframe": "15m", "htf_timeframe": "1d", "market_type": "stock", "exchange": "alpaca"},
+    {"symbol": "TSLA", "timeframe": "15m", "htf_timeframe": "1d", "market_type": "stock", "exchange": "alpaca"},
+    {"symbol": "NVDA", "timeframe": "15m", "htf_timeframe": "1d", "market_type": "stock", "exchange": "alpaca"},
 ]
 
 _ALERT_HISTORY: dict[str, float] = {}
@@ -179,6 +180,7 @@ class MarketMonitor:
     async def start(self):
         if self.running:
             return
+        await lifecycle_state_store.start()
         self.running = True
         logger.info(f"🚀 Proactive MarketMonitor started with {len(self.watchlist)} watchlist symbols.")
         self._scan_task = asyncio.create_task(self._run_scan_loop())
@@ -196,6 +198,7 @@ class MarketMonitor:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await lifecycle_state_store.close()
         logger.info("🛑 MarketMonitor stopped.")
 
     async def _run_scan_loop(self):
@@ -519,6 +522,7 @@ class MarketMonitor:
         symbol = item["symbol"]
         m_type = item.get("market_type", "crypto")
         ex = item.get("exchange", "binance")
+        tf = str(item.get("timeframe") or "execution")
 
         try:
             # One closed-candle execution snapshot owns the whole decision.
@@ -638,7 +642,19 @@ class MarketMonitor:
             zone_name = "Discount" if ltf_sig.in_discount else ("Premium" if ltf_sig.in_premium else "Equilibrium")
             
             # Tailored structure description with Quantitative Multi-Layer details
-            entry_type_label = "Limit Zone (OB/FVG)" if entry_mode == "limit" else "Market Price"
+            tri_core_setup = getattr(ltf_sig, "tri_core_setup", {}) or {}
+            setup_type = tri_core_setup.get("setup_type", "no_edge")
+            entry_policy = str(tri_core_setup.get("entry_policy", "none"))
+            order_type = str(tri_core_setup.get("order_type", "none"))
+            if entry_policy == "market_eligible" and order_type == "market":
+                resolved_entry_type = "market_eligible"
+                entry_type_label = "Market Eligible"
+            elif entry_policy == "limit_retest_only" and order_type == "limit":
+                resolved_entry_type = "limit_retest_only"
+                entry_type_label = "Causal OB/FVG Limit Retest"
+            else:
+                resolved_entry_type = "none"
+                entry_type_label = "No Entry"
             if not strat_res.approved:
                 reasons = "; ".join(strat_res.rejection_reasons[:3]) or "Strategy Gate rejected setup"
                 structure_summary = f"WAIT — {reasons}"
@@ -668,7 +684,7 @@ class MarketMonitor:
             reaction_info = getattr(ltf_sig, "reaction", {}) or {}
             reaction_state = str(reaction_info.get("reaction_state", "")).strip()
             if reaction_state:
-                structure_summary += f" | 15M Reaction: {reaction_state} (observation-only)"
+                structure_summary += f" | {tf.upper()} Reaction: {reaction_state} (observation-only)"
 
             regime_data = ltf_sig.market_regime or {}
             regime_label = regime_data.get("label", "Unknown")
@@ -677,20 +693,10 @@ class MarketMonitor:
 
             price_decimals = 4 if entry < 5.0 else 2
             scenario_info = getattr(ltf_sig, "scenario", {}) or {}
-            c_plan = scenario_info.get("contingency_plan", {})
-
             if not strat_res.approved:
-                # A rejected candidate is observational only. Never leak the
-                # scenario's actionable Plan A/Plan B through the Strategy Gate.
                 advice_text = _rejected_strategy_advice(strat_res.rejection_reasons)
-            elif scenario_info.get("name_th") and c_plan.get("plan_a"):
-                advice_text = f"คำแนะนำ: {scenario_info['name_th']} — {c_plan['plan_a']}"
-            elif confluence >= float(regime_policy.get("min_confluence", 65)) + 5:
-                advice_text = f"คำแนะนำ: โครงสร้างผ่าน Strategy Gate ใน {regime_label} regime ให้พิจารณาแผน {entry_type_label} Entry ${entry:.{price_decimals}f} SL ${sl:.{price_decimals}f} และใช้ Risk ×{float(regime_policy.get('risk_multiplier', 1.0)):.2f} จาก Risk Engine"
-            elif confluence >= float(regime_policy.get("min_confluence", 65)):
-                advice_text = f"คำแนะนำ: โครงสร้าง {direction.upper()} ผ่านเกณฑ์ขั้นต่ำของ {regime_label} regime แต่ควรรอแท่ง 15M ปิดยืนยัน Rejection และให้ Risk Engine ตรวจขนาดก่อนเข้า"
             else:
-                advice_text = 'คำแนะนำ: รอยืนยันการเคลื่อนไหวของราคา แนะนำ "รอ (WAIT)" สัญญาณ CHoCH หรือ Squeeze Release ก่อน'
+                advice_text = f"คำแนะนำ: Tri-Core {setup_type} ยืนยัน SMC+CVD บน {tf.upper()} — ใช้ {entry_type_label} Entry ${entry:.{price_decimals}f} SL ${sl:.{price_decimals}f} TP ${tp:.{price_decimals}f}; Risk Engine เป็นผู้กำหนดขนาดไม้"
 
             signal_payload = {
                 "id": f"{symbol}_{tf}_{int(datetime.now(timezone.utc).timestamp())}",
@@ -712,7 +718,9 @@ class MarketMonitor:
                 "stop_loss": round(sl, price_decimals) if strat_res.approved else None,
                 "take_profit": round(tp, price_decimals) if strat_res.approved else None,
                 "rr": ltf_sig.risk_reward if strat_res.approved else 0.0,
-                "entry_type": entry_mode,
+                "entry_type": resolved_entry_type,
+                "entry_policy": entry_policy,
+                "order_type": order_type,
                 "live_price": round(live_price, price_decimals),
                 "squeeze_status": ltf_sig.squeeze_status,
                 "squeeze_momentum": ltf_sig.squeeze_momentum,
@@ -720,16 +728,46 @@ class MarketMonitor:
                 "volume_delta": ltf_sig.volume_delta,
                 "delta_ratio": ltf_sig.delta_ratio,
                 "delta_absorption": ltf_sig.delta_absorption,
+                "delta_absorption_type": ltf_sig.delta_absorption_type,
+                "delta_absorption_evidence": ltf_sig.delta_absorption_evidence,
+                "cvd_divergence": ltf_sig.cvd_divergence,
+                "cvd_divergence_evidence": ltf_sig.cvd_divergence_evidence,
                 "delta_status": ltf_sig.delta_status,
+                "delta_source": ltf_sig.delta_source,
+                "flow_source": ltf_sig.flow_source,
+                "flow_granularity": ltf_sig.flow_granularity,
+                "volume_quality": ltf_sig.volume_quality,
                 "volume_spike": ltf_sig.volume_spike,
                 "indicator_decision": ltf_sig.indicator_decision,
                 "market_regime": ltf_sig.market_regime,
                 "scenario": scenario_info,
                 "reaction": reaction_info,
-                "analysis_snapshot": {
-                    "authority": "execution_timeframe_only",
-                    "timeframe": tf.upper(),
+                "tri_core_setup": tri_core_setup,
+                "migration_comparison": getattr(ltf_sig, "migration_comparison", {}),
+                "order_flow": getattr(ltf_sig, "order_flow", {}),
+                "derivatives_sentiment": getattr(ltf_sig, "derivatives_sentiment", {}),
+                "inducements": getattr(ltf_sig, "inducements", []),
+                "inducement_swept": getattr(ltf_sig, "inducement_swept", False),
+                "active_zone_type": getattr(ltf_sig, "active_zone_type", "regular"),
+                "hmm_regime": (
+                    getattr(ltf_sig, "market_regime", {}).get("metrics", {}).get("hmm_dominant_state")
+                    or getattr(ltf_sig, "hmm_regime", None)
+                ),
+                "hmm_probabilities": (
+                    getattr(ltf_sig, "market_regime", {}).get("metrics", {}).get("hmm_probabilities", {})
+                    or getattr(ltf_sig, "hmm_probabilities", {})
+                ),
+                "institutional_metrics": {
+                    "order_flow": getattr(ltf_sig, "order_flow", {}),
+                    "derivatives_sentiment": getattr(ltf_sig, "derivatives_sentiment", {}),
+                    "inducements": getattr(ltf_sig, "inducements", []),
+                    "inducement_swept": getattr(ltf_sig, "inducement_swept", False),
+                    "active_zone_type": getattr(ltf_sig, "active_zone_type", "regular"),
+                    "hmm_regime": getattr(ltf_sig, "market_regime", {}).get("metrics", {}).get("hmm_dominant_state"),
+                    "hmm_probabilities": getattr(ltf_sig, "market_regime", {}).get("metrics", {}).get("hmm_probabilities", {}),
                 },
+                "analysis_snapshot": execution.metadata(),
+                "ai_review": ltf_sig.ai_review,
                 "message": structure_summary,
                 "advice": advice_text,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -761,11 +799,49 @@ class MarketMonitor:
             # Broadcast to WebSocket
             await broadcast({"type": "signal", "data": signal_payload})
 
-            # Send Push / Telegram / LINE alerts if high confluence with 30-min debounce cooldown
-            alert_threshold = float(
-                strat_res.effective_policy.get("min_confluence", 65)
+            await self._cancel_invalidated_limit_entry(symbol, tri_core_setup)
+
+            # Pre-alerts are state transitions on one stable causal event, not
+            # repeated score alerts.  They provide preparation time without
+            # authorizing an order before ENTRY_READY/LIMIT_RETEST_ONLY.
+            lifecycle_state = str(tri_core_setup.get("trigger_state", "wait"))
+            lifecycle_event_id = str(tri_core_setup.get("event_id", ""))
+            lifecycle_key = f"{_compact_symbol(symbol)}:{tf}:{lifecycle_event_id}"
+            alertable_states = {
+                "zone_approach", "armed", "sweep_detected", "flow_confirmed",
+                "entry_ready", "limit_retest_only", "no_chase", "expired", "invalidated",
+            }
+            lifecycle_changed = bool(
+                lifecycle_event_id
+                and lifecycle_state in alertable_states
+                and await lifecycle_state_store.transition(lifecycle_key, lifecycle_state)
             )
-            if strat_res.approved and confluence >= alert_threshold and direction in ("long", "short"):
+            if lifecycle_changed:
+                lifecycle_direction = direction if direction in ("long", "short") else "watch"
+                state_reason = str(tri_core_setup.get("state_reason", ""))
+                await self.notifier.send_signal_alert(
+                    symbol=symbol,
+                    timeframe=tf.upper(),
+                    direction=lifecycle_direction,
+                    message=(
+                        f"Tri-Core lifecycle: {lifecycle_state.upper()} | "
+                        f"{state_reason} | Event {lifecycle_event_id}"
+                    ),
+                    confluence_score=confluence,
+                    entry=entry if strat_res.approved else None,
+                    sl=sl if strat_res.approved else None,
+                    tp=tp if strat_res.approved else None,
+                    rr=ltf_sig.risk_reward if strat_res.approved else None,
+                )
+
+            # A deterministic Tri-Core approval already contains SMC, true CVD
+            # and R:R gates. Legacy evidence score may explain quality but must
+            # not silently suppress an approved alert.
+            if (
+                strat_res.approved
+                and direction in ("long", "short")
+                and not lifecycle_event_id
+            ):
                 alert_key = f"{symbol}:{direction.upper()}"
                 now_ts = asyncio.get_event_loop().time()
                 last_alert_ts = _ALERT_HISTORY.get(alert_key, 0.0)
@@ -800,6 +876,8 @@ class MarketMonitor:
                         strat_res=strat_res,
                         confluence=confluence,
                         entry_mode=entry_mode,
+                        decision_snapshot_id=execution.snapshot_id,
+                        setup_timeframe=execution.timeframe,
                     )
                 except Exception as auto_exc:
                     logger.error(f"[Auto-Pilot] Error evaluating auto-trade for {symbol}: {auto_exc}")
@@ -809,6 +887,44 @@ class MarketMonitor:
         except Exception as e:
             logger.error(f"Error scanning {symbol} ({tf}): {e}")
             return None
+
+    async def _cancel_invalidated_limit_entry(
+        self,
+        symbol: str,
+        setup: dict[str, Any],
+    ) -> None:
+        """Cancel causal pending limit orders when their exact event expires/fails or transitions."""
+        state = str(setup.get("trigger_state", "wait"))
+        event_id = str(setup.get("event_id", ""))
+        try:
+            from app.services.paper_oms import paper_oms
+
+            if not paper_oms.ready:
+                return
+            positions = await paper_oms.list_positions(include_live=False)
+            trades = positions.get("trades", []) if isinstance(positions, dict) else positions
+            for position in trades or []:
+                if (
+                    position.get("status") == "pending"
+                    and position.get("order_type") == "limit"
+                    and _compact_symbol(position.get("symbol", "")) == _compact_symbol(symbol)
+                ):
+                    pos_event_id = str(position.get("tri_core_event_id", ""))
+                    cancel_reason = None
+                    if pos_event_id and pos_event_id == event_id and state in {"no_chase", "expired", "invalidated"}:
+                        cancel_reason = f"Tri-Core {state}: {str(setup.get('state_reason', ''))}"[:200]
+                    elif pos_event_id and event_id and pos_event_id != event_id:
+                        cancel_reason = f"Tri-Core setup replaced by new event {event_id}"[:200]
+                    elif pos_event_id and state == "wait" and not event_id:
+                        cancel_reason = "Tri-Core setup transitioned to wait; order invalidated"[:200]
+
+                    if cancel_reason:
+                        await paper_oms.cancel_entry_order(
+                            str(position["id"]),
+                            reason=cancel_reason,
+                        )
+        except Exception as exc:
+            logger.error(f"[Auto-Pilot] Unable to cancel invalidated limit for {symbol}: {exc}")
 
     async def _evaluate_and_execute_auto_pilot(
         self,
@@ -822,6 +938,8 @@ class MarketMonitor:
         strat_res: Any,
         confluence: int,
         entry_mode: str,
+        decision_snapshot_id: str,
+        setup_timeframe: str,
     ) -> Optional[dict]:
         """Execute only when the execution-timeframe Strategy Gate approves."""
         r_cfg = _get_cached_runtime_settings()
@@ -832,23 +950,15 @@ class MarketMonitor:
         if not strat_res.approved or strat_res.direction != direction:
             return None
 
-        # 2. Grade Check
-        scenario = getattr(ltf_sig, "scenario", {}) or {}
-        directional_sweep = bool(ltf_sig.liquidity_swept) and (
-            (direction == "long" and ltf_sig.sweep_direction == "low")
-            or (direction == "short" and ltf_sig.sweep_direction == "high")
-        )
-        directional_squeeze = ltf_sig.squeeze_status == "squeeze_fire" and (
-            (direction == "long" and ltf_sig.squeeze_momentum > 0)
-            or (direction == "short" and ltf_sig.squeeze_momentum < 0)
-        )
-        is_grade_s = (
-            confluence >= 85
-            or (scenario.get("actionable") and scenario.get("setup_grade") == "GRADE_S")
-            or directional_sweep
-            or directional_squeeze
-        )
-        is_grade_a = confluence >= 70 or is_grade_s
+        # 2. Tri-Core is the only setup authority. Legacy scenarios remain
+        # analytics labels and SQZ can affect size, never eligibility.
+        setup = getattr(ltf_sig, "tri_core_setup", {}) or {}
+        if setup.get("actionable") is not True:
+            return None
+
+        setup_grade = str(setup.get("grade", "WAIT")).upper()
+        is_grade_s = setup_grade == "S"
+        is_grade_a = setup_grade in {"A", "S"}
         min_grade = str(r_cfg.get("auto_trade_min_grade", "A")).upper()
         if min_grade == "S" and not is_grade_s:
             return None
@@ -914,9 +1024,11 @@ class MarketMonitor:
             return None
         live_price = float(executable_quote)
 
-        # 5. Price & SL/TP Calculation
-        entry_style = str(r_cfg.get("auto_trade_entry_type", "momentum_market"))
-        if entry_style == "momentum_market":
+        # 5. Entry Engine authority. Runtime UI preferences may not override
+        # the deterministic MARKET_ELIGIBLE/LIMIT_RETEST_ONLY/NO_CHASE state.
+        entry_policy = str(setup.get("entry_policy", "none"))
+        deterministic_order_type = str(setup.get("order_type", "none"))
+        if entry_policy == "market_eligible" and deterministic_order_type == "market":
             exec_entry = live_price
             if direction == "long":
                 if not (
@@ -939,11 +1051,20 @@ class MarketMonitor:
                 exec_sl = float(ltf_sig.stop_loss)
                 exec_tp = float(ltf_sig.take_profit)
             order_type = "market"
-        else:
-            exec_entry = float(ltf_sig.entry or live_price)
-            exec_sl = float(ltf_sig.stop_loss or (live_price * 0.99 if direction == "long" else live_price * 1.01))
-            exec_tp = float(ltf_sig.take_profit or (live_price * 1.02 if direction == "long" else live_price * 0.98))
+        elif entry_policy == "limit_retest_only" and deterministic_order_type == "limit":
+            if not (ltf_sig.entry and ltf_sig.stop_loss and ltf_sig.take_profit):
+                logger.warning(f"[Auto-Pilot] Incomplete causal limit plan for {symbol}")
+                return None
+            exec_entry = float(ltf_sig.entry)
+            exec_sl = float(ltf_sig.stop_loss)
+            exec_tp = float(ltf_sig.take_profit)
             order_type = "limit"
+        else:
+            logger.warning(
+                f"[Auto-Pilot] Entry Engine rejected {symbol}: "
+                f"policy={entry_policy}, order_type={deterministic_order_type}"
+            )
+            return None
 
         rules = await instrument_rules.get(
             symbol=symbol,
@@ -992,6 +1113,7 @@ class MarketMonitor:
             quantity_step=quantity_step,
             active_positions=active_positions,
             execution_cost_per_unit=execution_cost_per_unit,
+            risk_per_trade_pct=squeeze_adjusted_risk_pct(execution_signal),
             minimum_rr=float(r_cfg.get("target_rr", 2.0)),
             max_stop_distance_pct=float(r_cfg.get("default_sl_pct", 1.0)),
         )
@@ -1034,11 +1156,25 @@ class MarketMonitor:
                 "cluster_risk_multiplier": risk_assessment.cluster_risk_multiplier,
                 "regime_risk_multiplier": risk_assessment.regime_risk_multiplier,
                 "execution_cost_per_unit": risk_assessment.execution_cost_per_unit,
+                "squeeze_bonus": (ltf_sig.indicator_decision or {}).get("squeeze_bonus", 0),
+                "sizing_policy": "SQZ sizes within 0.75%-1.00%; never gates entry",
                 "evaluated_at": datetime.now(timezone.utc).isoformat(),
             },
             "auto_be": True,
             "trailing_stop": True,
-            "idempotency_key": f"auto-{symbol}-{direction}-{int(now_ts // 60)}",
+            "setup_grade": setup_grade,
+            "setup_type": str(setup.get("setup_type", "")),
+            "tri_core_event_id": str(setup.get("event_id", "")),
+            "entry_policy": entry_policy,
+            "policy_version": str(setup.get("policy_version", "")),
+            "calibration_status": str(setup.get("calibration_status", "")),
+            "decision_snapshot_id": decision_snapshot_id,
+            "setup_timeframe": setup_timeframe,
+            "idempotency_key": (
+                f"auto-{decision_snapshot_id}"
+                if decision_snapshot_id
+                else f"auto-{symbol}-{direction}-{int(datetime.now(timezone.utc).timestamp() // 60)}"
+            ),
         }
 
         try:
@@ -1048,7 +1184,7 @@ class MarketMonitor:
             await broadcast({"type": "auto_trade_executed", "data": res})
             await self.notifier.send_signal_alert(
                 symbol=symbol,
-                timeframe="15M",
+                timeframe=ltf_sig.timeframe.upper(),
                 direction=direction,
                 message=f"🚀 [AUTO-PILOT] เข้าออเดอร์ {direction.upper()} {symbol} อัตโนมัติ @ ${exec_entry:,.2f} | SL: ${exec_sl:,.2f} | TP: ${exec_tp:,.2f} ({grade_label})",
                 confluence_score=confluence,

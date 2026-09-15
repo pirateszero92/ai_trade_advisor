@@ -79,35 +79,35 @@
    * **ปุ่มเลือกเหรียญ/คู่เงิน**: แตะเพื่อเปิดแผ่นเลือกคู่เงินพร้อมแสดงราคา Real-time
    * **สถานะการเชื่อมต่อ `• ⚡ WS (15ms)`**: แสดงว่าแอปกำลังรับราคาสดผ่าน Full-Duplex WebSocket
    * **ปุ่ม `🎙️ Briefing`**: แตะเพื่อฟังเสียงบรรยายสรุปสภาวะตลาดเช้า และดูจุด SMC สำคัญประจำวัน
-2. **แถบ Multi-Timeframe Alignment Matrix (MTF Bar)**:
-   * แสดงแนวโน้ม 4 Timeframe พร้อมกัน: `1D` | `4H` | `1H` | `15M`
-   * ป้ายเกรดสถาบัน: `🌟 SUPREME A+` (4/4 TF), `💎 GRADE A` (3/4 TF), `⚖️ GRADE B`, `⏳ WAIT`
-   * แตะที่แถบเพื่อเปิด **MTF Breakdown Sheet** ดูรายละเอียด FVG, OB, Volume Delta ของแต่ละ TF
+2. **สถานะ Execution Timeframe**:
+   * การตัดสินใจทั้งหมดใช้แท่งปิด `15M` จาก canonical snapshot เดียวกัน
+   * `1H/4H/1D` ถ้ามีแสดงบนหน้าจอเป็น research/display context เท่านั้น ห้ามให้คะแนน ยืนยัน ปฏิเสธ เปลี่ยนทิศ หรือปรับขนาดสถานะ
+   * Grade/Setup ที่ใช้ส่งต่อ Strategy และ Risk ต้องมาจาก causal `tri_core_setup` บน 15M เท่านั้น
 3. **กราฟแท่งเทียนเชิงโต้ตอบ (Interactive Candlestick Chart)**:
    * แสดงกล่อง Order Block (เขียว/แดง), โซน FVG (ม่วง), เส้นประ EQ 50% และป้าย Liquidity Sweep
    * สามารถซูม ย่อ-ขยาย เลื่อนกราฟ และเปิด/ปิดเลเยอร์ SMC ได้ด้วยปุ่ม `LuxAlgo SMC`
 4. **AI Blueprint Execution Suite**:
    * กล่องคำนวณจุดเข้า Entry, Stop Loss, Take Profit 1 (2.0R), และ Take Profit 2 (Runner)
-   * **แถบเลือก Risk % (0.5%, 1.0%, 2.0%, 3.0%)**: คำนวณ Lot/Quantity ให้ทันที ป้องกันการโอเวอร์เทรด
-   * สวิตช์ **`Auto-BE (1.5R)`** และ **`Trailing Stop`** สำหรับล็อกกำไรอัตโนมัติ
+   * Risk Engine ใช้ base risk 0.75%; SQZ ที่ไปทิศเดียวกันเพิ่มได้ไม่เกิน 1.00% และ guardrail อื่นลดได้เท่านั้น
+   * **Auto-BE ที่ 1.0R** และ **Trailing Stop** สำหรับล็อกกำไรอัตโนมัติ
 
 ---
 
 ### หน้า 2: ระบบสแกนหาจุดเข้าเทรดเชิงรุก (Proactive Signals Screen)
-ศูนย์รวมสัญญาณ SMC Confluence ที่ผ่านการคัดกรองจาก AI Background Scanner
+ศูนย์รวมสัญญาณ deterministic SMC+CVD จาก Background Scanner; AI เป็นคำอธิบาย advisory หลังมี setup แล้ว ไม่ใช่ตัวกรองคำสั่ง
 
 1. **ตัวกรองและโหมดพอร์ต**:
    * สลับระหว่าง `🧪 พอร์ตจำลอง Paper ($)` และ `🔒 บัญชีจริง Live`
    * ฟิลเตอร์กรองตามหมวด: `ALL`, `CRYPTO`, `FOREX & GOLD`, `STOCKS`
 2. **การ์ดสัญญาณ (Signal Card)**:
    * ป้ายบอกทิศทาง `🟢 BUY / LONG` หรือ `🔴 SELL / SHORT`
-   * ป้ายเกรดความน่าจะเป็น: `🌟 SUPREME A+`, `💎 GRADE A`, `⚖️ GRADE B`
+   * ป้าย `SETUP S/A` แสดงคุณภาพหลักฐาน deterministic ไม่ใช่การรับประกันความน่าจะเป็นหรือผลกำไร
    * ป้ายสภาพคล่อง: `🐳 CVD Absorption`, `🧹 Liquidity Swept`
-   * แถบ Confluence Score (0–100) และคำแนะนำเชิงกลยุทธ์จาก AI
+   * Evidence score (0–100), lifecycle state, Strategy/Risk reason และ AI advisory เมื่อระบบมี deterministic setup
 3. **การส่งคำสั่งใน 1 คลิก (1-Click Execution)**:
    * แตะที่การ์ดสัญญาณเพื่อเปิดหน้าต่าง **Order Confirmation Modal**
-   * เลือกประเภทคำสั่ง: `Limit Order ที่แนว OB/FVG` หรือ `Market Order ทันที`
-   * ปรับแก้ความเสี่ยงหรือกดยืนยันเพื่อเปิดออเดอร์ทันที
+   * Entry Engine เป็นผู้เลือก `MARKET_ELIGIBLE`, `LIMIT_RETEST_ONLY` หรือ `NO_CHASE`; UI ห้ามเปลี่ยน limit-only ให้เป็น market
+   * ผู้ใช้ยืนยันได้เฉพาะแผนที่ผ่าน Strategy และ Risk แล้ว และเพิ่มความเสี่ยงเกินงบที่ระบบอนุมัติไม่ได้
 
 ---
 

@@ -13,7 +13,16 @@ import '../settings/settings_screen.dart';
 import 'smc_interactive_chart.dart';
 
 class ChartScreen extends ConsumerStatefulWidget {
-  const ChartScreen({super.key});
+  const ChartScreen({
+    super.key,
+    this.initialSymbol,
+    this.initialMarket,
+    this.initialExchange,
+  });
+
+  final String? initialSymbol;
+  final String? initialMarket;
+  final String? initialExchange;
 
   @override
   ConsumerState<ChartScreen> createState() => _ChartScreenState();
@@ -23,7 +32,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   String _selectedMarket = 'crypto';
   String _selectedSymbol = 'BTC/USDT';
   String _selectedExchange = 'binance';
-  String _selectedTimeframe = '1h';
+  String _selectedTimeframe = '15m';
   String get _selectedHtfTimeframe {
     final watchItem = _watchlistMap[_selectedSymbol];
     final watchTf = watchItem?['timeframe']?.toString().toLowerCase();
@@ -68,6 +77,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   final _qtyCtrl = TextEditingController(text: '0.10');
   final _symbolSearchCtrl = TextEditingController();
   bool _isChatLoading = false;
+  int _chartRequest = 0;
+  int _tickerRequest = 0;
+  int _chatRequest = 0;
+  String get _chartIdentity =>
+      '$_selectedSymbol|$_selectedMarket|$_selectedExchange|$_selectedTimeframe';
 
   // Dynamic Risk Sizing & Execution Automation State
   double _selectedRiskPct = 1.0;
@@ -166,6 +180,18 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   @override
   void initState() {
     super.initState();
+    final initialSymbol = widget.initialSymbol?.trim();
+    if (initialSymbol != null && initialSymbol.isNotEmpty) {
+      _selectedSymbol = initialSymbol;
+    }
+    final initialMarket = widget.initialMarket?.trim().toLowerCase();
+    if (const {'crypto', 'forex', 'stock'}.contains(initialMarket)) {
+      _selectedMarket = initialMarket!;
+    }
+    final initialExchange = widget.initialExchange?.trim().toLowerCase();
+    if (initialExchange != null && initialExchange.isNotEmpty) {
+      _selectedExchange = initialExchange;
+    }
     _wsState = AppWebSocketClient.instance.currentState;
     _wsStateSub =
         AppWebSocketClient.instance.connectionStateStream.listen((state) {
@@ -176,6 +202,25 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     _bootstrapFromWatchlist();
     _fetchOpenPositions();
     _startLiveTicker();
+  }
+
+  @override
+  void didUpdateWidget(covariant ChartScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final symbol = widget.initialSymbol?.trim();
+    if (symbol == null || symbol.isEmpty) return;
+    final destinationChanged = symbol != oldWidget.initialSymbol ||
+        widget.initialMarket != oldWidget.initialMarket ||
+        widget.initialExchange != oldWidget.initialExchange;
+    if (!destinationChanged) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _switchToSymbol(
+        symbol,
+        targetMarket: widget.initialMarket,
+        targetExchange: widget.initialExchange,
+      );
+    });
   }
 
   void _onWsPriceTick(Map<String, dynamic> ticks) {
@@ -318,6 +363,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   }
 
   Future<void> _fetchLiveTicker() async {
+    final identity = _chartIdentity;
+    final request = ++_tickerRequest;
     try {
       _resolveExchangeForCurrentSymbol();
       final dio = AppApi.dio;
@@ -331,7 +378,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       );
       if (resp.statusCode == 200 && resp.data != null) {
         final d = resp.data;
-        if (!mounted) return;
+        if (!mounted ||
+            identity != _chartIdentity ||
+            request != _tickerRequest) {
+          return;
+        }
         final newPrice = (d['price'] as num?)?.toDouble() ?? 0.0;
         if (newPrice <= 0.0) {
           return; // Strict guard against 0.0 or corrupted price
@@ -526,6 +577,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     setState(() {
       _selectedMarket = m;
       _selectedSymbol = symbol;
+      _chatRequest++;
+      _isChatLoading = false;
       if (targetExchange != null) {
         _selectedExchange = targetExchange;
       } else {
@@ -571,6 +624,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   }
 
   Future<void> _fetchChartData() async {
+    final request = ++_chartRequest;
+    final identity = _chartIdentity;
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -595,7 +650,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         },
       );
 
-      final requestedSymbol = _selectedSymbol;
+      if (!mounted || request != _chartRequest || identity != _chartIdentity) {
+        return;
+      }
       final List<dynamic> rawCandles =
           List<dynamic>.from(overlayResp.data['candles'] ?? const []);
       final formingRaw = overlayResp.data['forming_candle'];
@@ -648,7 +705,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       }
       _fetchLiveTicker();
 
-      if (!mounted || _selectedSymbol != requestedSymbol) return;
+      if (!mounted || request != _chartRequest || identity != _chartIdentity) {
+        return;
+      }
       setState(() {
         _candles = parsedCandles;
         _formingCandleOpenTime = parsedFormingTime;
@@ -664,6 +723,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           if (_activeAiBlueprint?['symbol'] == _selectedSymbol) {
             _activeAiBlueprint = null;
           }
+          _bpEntryCtrl.clear();
+          _bpSlCtrl.clear();
+          _bpTpCtrl.clear();
+          _bpTp2Ctrl.clear();
+          _bpEntryMode = 'ai';
         }
 
         // Auto-refresh text controllers and blueprint for current symbol
@@ -716,7 +780,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         }
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || request != _chartRequest || identity != _chartIdentity) {
+        return;
+      }
       setState(() {
         _errorMessage = 'Failed to load live data: $e';
         _isLoading = false;
@@ -803,7 +869,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     try {
       final match = RegExp(r'\{[\s\S]*\}').firstMatch(rawResponse);
       if (match != null) {
-        parsed = jsonDecode(match.group(0)!);
+        final decoded = jsonDecode(match.group(0)!);
+        if (decoded is Map) {
+          parsed = Map<String, dynamic>.from(decoded);
+        }
       }
     } catch (_) {}
 
@@ -868,11 +937,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
     final isLong = direction == 'LONG';
 
-    final inDiscount = _smcOverlayData?['in_discount'] == true;
-    final inPremium = _smcOverlayData?['in_premium'] == true;
-    zoneName = inDiscount
-        ? 'DISCOUNT ZONE'
-        : (inPremium ? 'PREMIUM ZONE' : 'EQUILIBRIUM');
+    final zonePosition =
+        _smcOverlayData?['zone_position']?.toString().toUpperCase();
+    zoneName = zonePosition == null || zonePosition == 'UNKNOWN'
+        ? 'RANGE UNKNOWN'
+        : '${zonePosition.replaceAll('_', ' ')} ZONE';
     htfTrend = isLong ? 'Bullish' : 'Bearish';
 
     _activeAiBlueprint = {
@@ -914,6 +983,34 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       return;
     }
     final live = _lastPrice > 0 ? _lastPrice : null;
+    final gate = StrategyGateView.fromPayload(_smcOverlayData);
+    final directionMatches = (direction == 'long' && gate.allowsLong) ||
+        (direction == 'short' && gate.allowsShort);
+    final triCoreRaw = _smcOverlayData?['tri_core_setup'];
+    final triCore = triCoreRaw is Map
+        ? Map<String, dynamic>.from(triCoreRaw)
+        : const <String, dynamic>{};
+    final setupType = triCore['setup_type']?.toString();
+    final snapshotId = _smcOverlayData?['decision_snapshot_id']?.toString();
+    final setupTimeframe = _smcOverlayData?['execution_timeframe']?.toString();
+    final hasAuditableGrade = directionMatches &&
+        const {'A', 'S'}.contains(gate.coreSetupGrade) &&
+        const {'sweep_reversal', 'displacement_retest'}.contains(setupType) &&
+        snapshotId != null &&
+        snapshotId.isNotEmpty &&
+        setupTimeframe != null &&
+        setupTimeframe.isNotEmpty;
+    if (!hasAuditableGrade) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          backgroundColor: AppColors.bearish,
+          content: Text(
+              'ไม่สามารถส่งคำสั่งได้: setup/grade ไม่มี execution snapshot ที่ตรวจสอบย้อนกลับได้ กรุณารอข้อมูลรอบล่าสุด'),
+        ),
+      );
+      return;
+    }
     final isMarketOrder = _bpEntryMode == 'market';
     final entry = isMarketOrder ? live : customEntry;
     final sl = customSl;
@@ -973,6 +1070,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           'risk_pct': _selectedRiskPct,
           'auto_be': _autoBeEnabled,
           'trailing_stop': _trailingStopEnabled,
+          'setup_grade': gate.coreSetupGrade,
+          'setup_type': setupType,
+          'decision_snapshot_id': snapshotId,
+          'setup_timeframe': setupTimeframe,
           'exchange': targetExchange,
           'mode': targetMode,
           'tag': tag,
@@ -1255,7 +1356,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 side: const BorderSide(color: AppColors.border),
               ),
               onSelected: (tf) {
-                setState(() => _selectedTimeframe = tf);
+                setState(() {
+                  _selectedTimeframe = tf;
+                  _chatRequest++;
+                  _isChatLoading = false;
+                });
                 _fetchChartData();
               },
               itemBuilder: (context) => _timeframes.map((tf) {
@@ -3036,6 +3141,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     final coverage = (decision['coverage'] as num? ?? 0).toDouble();
     final ready = decision['ready'] == true;
     final stateColor = ready ? AppColors.bullish : AppColors.bearish;
+    final volumeQuality =
+        (_smcOverlayData?['volume_quality'] ?? 'unavailable').toString();
+    final flowSource =
+        (_smcOverlayData?['flow_source'] ?? 'unavailable').toString();
+    final cvdColor = volumeQuality == 'exchange_aggressor'
+        ? AppColors.bullish
+        : (volumeQuality == 'estimated'
+            ? const Color(0xFFFF9900)
+            : AppColors.bearish);
 
     return Material(
       color: const Color(0xFF0B1118),
@@ -3051,7 +3165,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     size: 13, color: Color(0xFF00E5FF)),
                 const SizedBox(width: 5),
                 const Text(
-                  '3-INDICATOR CORE',
+                  'SMC + CVD CORE',
                   style: TextStyle(
                     fontSize: 9.5,
                     fontWeight: FontWeight.w700,
@@ -3073,6 +3187,29 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     style: TextStyle(
                       fontSize: 9.5,
                       color: stateColor,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: cvdColor.withValues(alpha: 0.13),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                        color: cvdColor.withValues(alpha: 0.55), width: 0.8),
+                  ),
+                  child: Text(
+                    volumeQuality == 'exchange_aggressor'
+                        ? 'CVD ${flowSource == 'binance_taker_volume' ? 'KLINE' : 'AGGTRADES'} · BINANCE'
+                        : (volumeQuality == 'estimated'
+                            ? 'CVD ESTIMATED'
+                            : 'CVD N/A'),
+                    style: TextStyle(
+                      fontSize: 9,
+                      color: cvdColor,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
@@ -3425,7 +3562,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             ],
             const Spacer(),
             // Ordered Phase 5 role profiles: Bias -> Setup -> Trigger.
-            ...['4h', '1h', '15m'].map((tfKey) {
+            ...(matrix.isNotEmpty ? matrix.keys.toList() : ['1d', '4h', '1h'])
+                .map((tfKey) {
               final tfData = matrix[tfKey] as Map<String, dynamic>?;
               final bias = tfData?['bias']?.toString() ?? 'neutral';
               final isBull = bias == 'bullish';
@@ -3580,13 +3718,23 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             // Ordered timeframe-role breakdown.
             Expanded(
               child: ListView(
-                children: ['4h', '1h', '15m'].map((tfKey) {
+                children: (matrix.isNotEmpty
+                        ? matrix.keys.toList()
+                        : ['1d', '4h', '1h'])
+                    .map((tfKey) {
                   final tfData = matrix[tfKey] as Map<String, dynamic>? ?? {};
-                  final tfName = tfKey == '4h'
-                      ? '4H (Market Bias)'
-                      : (tfKey == '1h'
-                          ? '1H (SMC Setup)'
-                          : '15M (Entry Trigger)');
+                  final String tfName;
+                  if (tfKey == '1d') {
+                    tfName = '1D (Market Bias)';
+                  } else if (tfKey == '4h') {
+                    tfName = '4H (SMC Setup)';
+                  } else if (tfKey == '1h') {
+                    tfName = '1H (Execution / Trigger)';
+                  } else if (tfKey == '15m') {
+                    tfName = '15M (LTF Trigger)';
+                  } else {
+                    tfName = '${tfKey.toUpperCase()} (Analysis)';
+                  }
                   final bias = tfData['bias']?.toString() ?? 'neutral';
                   final isTfBull = bias == 'bullish';
                   final isTfBear = bias == 'bearish';
@@ -3811,6 +3959,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     final text = (customText ?? ctrl.text).trim();
     if (text.isEmpty || _isChatLoading) return;
 
+    final identity = _chartIdentity;
+    final request = ++_chatRequest;
     if (customText == null) ctrl.clear();
 
     setState(() {
@@ -3843,7 +3993,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           sendTimeout: const Duration(seconds: 120),
         ),
         data: {
-          'messages': chatHistory,
+          'messages': chatHistory.length > 50
+              ? chatHistory.sublist(chatHistory.length - 50)
+              : chatHistory,
           'context': {
             'symbol': _selectedSymbol,
             'market_type': _selectedMarket,
@@ -3861,6 +4013,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             'reaction_scenario_id': (reaction['scenario_id'] ?? '').toString(),
             'reaction_state': (reaction['reaction_state'] ?? '').toString(),
             'reaction_archetype': (reaction['archetype'] ?? '').toString(),
+            'reaction_entry_status':
+                (reaction['entry_status'] ?? '').toString(),
+            'reaction_entry_block_reason':
+                (reaction['entry_block_reason'] ?? '').toString(),
             'reaction_evidence': reaction['reaction_evidence'] is Map
                 ? Map<String, dynamic>.from(
                     reaction['reaction_evidence'] as Map)
@@ -3872,8 +4028,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       final reply = resp.data['response'] as String? ??
           'ขออภัยครับ เกิดข้อผิดพลาดในการประมวลผล';
 
+      if (!mounted || request != _chatRequest || identity != _chartIdentity) {
+        return;
+      }
       setState(() {
-        _chatMessages.removeLast();
+        if (_chatMessages.isNotEmpty) _chatMessages.removeLast();
         _chatMessages.add({'role': 'assistant', 'content': reply});
         _isChatLoading = false;
         _syncBlueprintFromAI(reply);
@@ -3881,8 +4040,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
       modalState?.call(() {});
       _scrollChatToBottom(scrollCtrl);
     } catch (e) {
+      if (!mounted || request != _chatRequest || identity != _chartIdentity) {
+        return;
+      }
       setState(() {
-        _chatMessages.removeLast();
+        if (_chatMessages.isNotEmpty) _chatMessages.removeLast();
         _chatMessages.add({
           'role': 'assistant',
           'content':
@@ -4468,6 +4630,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
         final color = isLong ? AppColors.bullish : AppColors.bearish;
         final protectionStage =
             (pos['protection_stage']?.toString() ?? 'initial').toLowerCase();
+        final setupGrade = (pos['setup_grade']?.toString() ?? '').toUpperCase();
+        final gradeProvenance = pos['grade_provenance']?.toString() ?? '';
         final trailStage = protectionStage.startsWith('trailing');
         final protectionLabel = switch (protectionStage) {
           'breakeven' => '🛡️ BE',
@@ -4546,6 +4710,40 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     ),
                   ),
                 ),
+                if (setupGrade == 'S' || setupGrade == 'A') ...[
+                  const SizedBox(width: 6),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: (setupGrade == 'S'
+                              ? const Color(0xFFFFD700)
+                              : const Color(0xFF00E5FF))
+                          .withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(
+                        color: setupGrade == 'S'
+                            ? const Color(0xFFFFD700)
+                            : const Color(0xFF00E5FF),
+                        width: 0.7,
+                      ),
+                    ),
+                    child: Text(
+                      setupGrade == 'S' ? '👑 S' : '💎 A',
+                      style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                        color: setupGrade == 'S'
+                            ? const Color(0xFFFFD700)
+                            : const Color(0xFF00E5FF),
+                      ),
+                    ),
+                  ),
+                ] else if (gradeProvenance == 'legacy_unavailable') ...[
+                  const SizedBox(width: 6),
+                  const Text('LEGACY · N/A',
+                      style: TextStyle(fontSize: 9, color: Colors.white38)),
+                ],
                 if (protectionStage != 'initial') ...[
                   const SizedBox(width: 6),
                   Container(
@@ -4719,22 +4917,28 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
     final confluence = gate.confluence;
 
+    final overlayZone =
+        _smcOverlayData?['zone_position']?.toString().toUpperCase();
     final zoneName = bp?['zone_name'] as String? ??
-        (_smcOverlayData?['in_discount'] == true
-            ? 'DISCOUNT ZONE'
-            : (_smcOverlayData?['in_premium'] == true
-                ? 'PREMIUM ZONE'
-                : 'EQUILIBRIUM'));
+        (overlayZone == null || overlayZone == 'UNKNOWN'
+            ? 'RANGE UNKNOWN'
+            : '${overlayZone.replaceAll('_', ' ')} ZONE');
     // 2. Resolve Price Levels from Active Mode
-    final aiEntry = (bp?['entry'] as num?)?.toDouble() ??
-        (_smcOverlayData?['entry'] as num?)?.toDouble() ??
-        0.0;
-    final aiSl = (bp?['stop_loss'] as num?)?.toDouble() ??
-        (_smcOverlayData?['stop_loss'] as num?)?.toDouble() ??
-        0.0;
-    final aiTp = (bp?['take_profit'] as num?)?.toDouble() ??
-        (_smcOverlayData?['take_profit'] as num?)?.toDouble() ??
-        0.0;
+    final aiEntry = gate.approved
+        ? ((bp?['entry'] as num?)?.toDouble() ??
+            (_smcOverlayData?['entry'] as num?)?.toDouble() ??
+            0.0)
+        : 0.0;
+    final aiSl = gate.approved
+        ? ((bp?['stop_loss'] as num?)?.toDouble() ??
+            (_smcOverlayData?['stop_loss'] as num?)?.toDouble() ??
+            0.0)
+        : 0.0;
+    final aiTp = gate.approved
+        ? ((bp?['take_profit'] as num?)?.toDouble() ??
+            (_smcOverlayData?['take_profit'] as num?)?.toDouble() ??
+            0.0)
+        : 0.0;
     final aiTp2 = (bp?['take_profit_2'] as num?)?.toDouble() ?? 0.0;
     final hasAiSetup = aiEntry > 0 &&
         ((isBull && aiSl < aiEntry && aiTp > aiEntry) ||
@@ -4919,11 +5123,27 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      _checkChip('Execution TF', '15M', true),
+                      _checkChip(
+                        'Execution TF',
+                        (_smcOverlayData?['execution_timeframe'] ??
+                                _selectedTimeframe)
+                            .toString()
+                            .toUpperCase(),
+                        true,
+                      ),
                       _checkChip('Market Zone', zoneName, true),
-                      _checkChip('Liquidity', 'Swept', true),
+                      _checkChip(
+                        'Liquidity',
+                        (_smcOverlayData?['liquidity_sweep'] == true ||
+                                _smcOverlayData?['inducement_swept'] == true)
+                            ? 'Swept'
+                            : 'Pending',
+                        _smcOverlayData?['liquidity_sweep'] == true ||
+                            _smcOverlayData?['inducement_swept'] == true,
+                      ),
                     ],
                   ),
+                  _buildInstitutionalEdgeStrip(),
                 ],
               ),
             ),
@@ -4961,9 +5181,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             // Execution Blueprint & Order Control Suite
             Row(
               children: [
-                const Text(
-                  'EXECUTION BLUEPRINT & ORDER SUITE',
-                  style: TextStyle(
+                Text(
+                  gate.approved
+                      ? 'EXECUTION BLUEPRINT & ORDER SUITE'
+                      : 'EXECUTION LOCKED · STRATEGY GATE WAIT',
+                  style: const TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.bold,
                       color: AppColors.textMuted,
@@ -4998,10 +5220,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 _buildBpModeButton(
                   mode: 'ai',
                   title: '🎯 แผน AI (Limit)',
-                  subtitle: _fmtPrice(aiEntry),
+                  subtitle: gate.approved ? _fmtPrice(aiEntry) : 'LOCKED',
                   selected: _bpEntryMode == 'ai',
                   color: const Color(0xFF2E82FE),
-                  onTap: hasAiSetup
+                  onTap: gate.approved && hasAiSetup
                       ? () {
                           setState(() {
                             _bpEntryMode = 'ai';
@@ -5016,10 +5238,12 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 _buildBpModeButton(
                   mode: 'market',
                   title: '⚡ ตลาดสด (Market)',
-                  subtitle: live > 0 ? _fmtPrice(live) : 'Unavailable',
+                  subtitle: gate.approved
+                      ? (live > 0 ? _fmtPrice(live) : 'Unavailable')
+                      : 'LOCKED',
                   selected: _bpEntryMode == 'market',
                   color: const Color(0xFF00E5FF),
-                  onTap: live > 0
+                  onTap: gate.approved && live > 0
                       ? () {
                           setState(() {
                             _bpEntryMode = 'market';
@@ -5037,14 +5261,16 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 _buildBpModeButton(
                   mode: 'custom',
                   title: '✏️ กำหนดเอง',
-                  subtitle: 'พิมพ์ราคาอิสระ',
+                  subtitle: gate.approved ? 'พิมพ์ราคาอิสระ' : 'LOCKED',
                   selected: _bpEntryMode == 'custom',
                   color: const Color(0xFFFFB300),
-                  onTap: () {
-                    setState(() {
-                      _bpEntryMode = 'custom';
-                    });
-                  },
+                  onTap: gate.approved
+                      ? () {
+                          setState(() {
+                            _bpEntryMode = 'custom';
+                          });
+                        }
+                      : null,
                 ),
               ],
             ),
@@ -5078,9 +5304,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      isPending
-                          ? 'คำสั่ง Limit Order รอดักราคา (ห่างจากราคาตลาด ${diffFromLivePct > 0 ? "+" : ""}${diffFromLivePct.toStringAsFixed(2)}%)'
-                          : 'ส่งคำสั่งเปิด Position ทันทีที่ราคาตลาดสด $_currSym${_fmtPrice(live)}',
+                      !gate.approved
+                          ? 'Strategy Gate ยังไม่อนุมัติ — ไม่มีคำสั่งรอดักราคาและไม่แสดง Entry / SL / TP'
+                          : isPending
+                              ? 'คำสั่ง Limit Order รอดักราคา (ห่างจากราคาตลาด ${diffFromLivePct > 0 ? "+" : ""}${diffFromLivePct.toStringAsFixed(2)}%)'
+                              : 'ส่งคำสั่งเปิด Position ทันทีที่ราคาตลาดสด $_currSym${_fmtPrice(live)}',
                       style: TextStyle(
                         fontSize: 10.5,
                         color: isPending
@@ -5112,7 +5340,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     color: _bpEntryMode == 'ai'
                         ? const Color(0xFF5CA3FF)
                         : Colors.white,
-                    isEditable: isCustom,
+                    isEditable: gate.approved && isCustom,
                     hintText: _fmtPrice(aiEntry),
                     helperText: _bpEntryMode == 'ai'
                         ? '🎯 ราคาแนะนำตามแผน AI Blueprint'
@@ -5138,7 +5366,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     label: '🛑 จุดตัดขาดทุน (Stop Loss)',
                     controller: _bpSlCtrl,
                     color: AppColors.bearish,
-                    isEditable: isCustom,
+                    isEditable: gate.approved && isCustom,
                     hintText: _fmtPrice(aiSl),
                     helperText:
                         'ความเสี่ยง: -${riskPct.toStringAsFixed(2)}% (-$_currSym${riskAmount.toStringAsFixed(2)})',
@@ -5151,7 +5379,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     label: '🎯 เป้าหมายทำกำไร (Take Profit)',
                     controller: _bpTpCtrl,
                     color: AppColors.bullish,
-                    isEditable: isCustom,
+                    isEditable: gate.approved && isCustom,
                     hintText: _fmtPrice(aiTp),
                     helperText:
                         'เป้าหมาย: +${gainPct.toStringAsFixed(2)}% (+$_currSym${rewardAmount.toStringAsFixed(2)}) • R:R 1:${calculatedRR.toStringAsFixed(2)}R',
@@ -5853,6 +6081,129 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           ],
         ),
       ],
+    );
+  }
+
+  Widget _buildInstitutionalEdgeStrip() {
+    final data = _smcOverlayData;
+    if (data == null) return const SizedBox.shrink();
+
+    final of = (data['order_flow'] is Map)
+        ? Map<String, dynamic>.from(data['order_flow'] as Map)
+        : <String, dynamic>{};
+    final deriv = (data['derivatives_sentiment'] is Map)
+        ? Map<String, dynamic>.from(data['derivatives_sentiment'] as Map)
+        : <String, dynamic>{};
+    final zoneType = (data['active_zone_type'] ?? '').toString();
+    final idmSwept = data['inducement_swept'] == true;
+    final hmm = (data['hmm_regime'] ?? '').toString();
+    final hmmProbs = (data['hmm_probabilities'] is Map)
+        ? Map<String, dynamic>.from(data['hmm_probabilities'] as Map)
+        : <String, dynamic>{};
+
+    final hasData = of.isNotEmpty ||
+        deriv.isNotEmpty ||
+        zoneType.isNotEmpty ||
+        (hmm.isNotEmpty && hmm != 'unknown');
+    if (!hasData) return const SizedBox.shrink();
+
+    final vpin = (of['vpin'] as num?)?.toDouble();
+    final isToxic = of['toxic_flow_detected'] == true;
+    final vpinText = vpin != null
+        ? 'VPIN ${(vpin * 100).toStringAsFixed(0)}% ${isToxic ? '⚠️ TOXIC' : 'FLOW OK'}'
+        : null;
+
+    final oiDelta = (deriv['oi_delta_pct_1h'] as num?)?.toDouble();
+    final oiBias = (deriv['sentiment_bias'] ?? '').toString();
+    final oiSuffix = oiBias == 'SHORT_SQUEEZE_RISK'
+        ? '⚡ SQUEEZE'
+        : (oiDelta != null && oiDelta > 0.5 ? '📈 ACCUM' : '');
+    final oiText = oiDelta != null
+        ? 'OI ${oiDelta >= 0 ? '+' : ''}${oiDelta.toStringAsFixed(1)}% $oiSuffix'
+        : null;
+
+    String? idmText;
+    Color idmColor = AppColors.bullish;
+    if (zoneType == 'inducement_trap') {
+      idmText = '⚠️ TRAP OB';
+      idmColor = const Color(0xFFFF4D4D);
+    } else if (zoneType == 'extreme_ob' && idmSwept) {
+      idmText = '🎯 IDM SWEPT';
+      idmColor = AppColors.bullish;
+    } else if (zoneType == 'extreme_ob') {
+      idmText = 'ORIGIN OB';
+      idmColor = const Color(0xFF00C087);
+    }
+
+    String? hmmText;
+    if (hmm.isNotEmpty && hmm != 'unknown') {
+      final probVal = (hmmProbs[hmm] as num?)?.toDouble();
+      final probStr =
+          probVal != null ? ' ${(probVal * 100).toStringAsFixed(0)}%' : '';
+      hmmText = 'HMM: ${hmm.replaceAll('_', ' ').toUpperCase()}$probStr';
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 5,
+        children: [
+          if (vpinText != null)
+            _buildInstitutionalBadge(
+              vpinText,
+              isToxic ? const Color(0xFFFF4D4D) : const Color(0xFF00C087),
+              isToxic ? Icons.warning_amber_rounded : Icons.waves,
+            ),
+          if (oiText != null && oiText.isNotEmpty)
+            _buildInstitutionalBadge(
+              oiText,
+              oiDelta != null && oiDelta < -1.0
+                  ? const Color(0xFFFFB84D)
+                  : const Color(0xFF4DA6FF),
+              Icons.trending_up,
+            ),
+          if (idmText != null)
+            _buildInstitutionalBadge(
+              idmText,
+              idmColor,
+              Icons.radar,
+            ),
+          if (hmmText != null)
+            _buildInstitutionalBadge(
+              hmmText,
+              const Color(0xFFB388FF),
+              Icons.psychology,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInstitutionalBadge(String text, Color color, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withValues(alpha: 0.4), width: 0.8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 11, color: color),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: TextStyle(
+              fontSize: 9,
+              color: color,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 0.3,
+            ),
+          ),
+        ],
+      ),
     );
   }
 

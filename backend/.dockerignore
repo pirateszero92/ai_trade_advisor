@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+config/*_store.json
+config/paper_portfolio.json
+config/runtime_settings.json
+config/*.lock
+data/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+*.log

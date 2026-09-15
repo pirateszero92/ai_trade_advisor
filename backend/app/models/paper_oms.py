@@ -222,3 +222,25 @@ class PaperOMSEvent(Base):
     new_status = Column(String(24), nullable=True)
     occurred_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
     payload = Column(JSON_DOCUMENT, nullable=False, default=dict)
+
+
+class PaperOMSRiskHalt(Base):
+    """Durable rolling-risk circuit breaker for one Paper account generation."""
+
+    __tablename__ = "paper_oms_risk_halts"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    account_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("paper_oms_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    reason = Column(String(200), nullable=False)
+    triggered_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    halted_until = Column(DateTime(timezone=True), nullable=False, index=True)
+    source_payload = Column(JSON_DOCUMENT, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index("ix_paper_oms_risk_halt_account_until", "account_id", "halted_until"),
+    )

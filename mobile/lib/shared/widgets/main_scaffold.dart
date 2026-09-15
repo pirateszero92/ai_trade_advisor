@@ -10,7 +10,9 @@ class MainScaffold extends StatelessWidget {
     return Scaffold(
       body: navigationShell,
       bottomNavigationBar: NavigationBar(
-        height: MediaQuery.of(context).orientation == Orientation.landscape ? 52 : 65,
+        height: MediaQuery.of(context).orientation == Orientation.landscape
+            ? 52
+            : 65,
         backgroundColor: const Color(0xFF1A1A2E),
         selectedIndex: navigationShell.currentIndex,
         onDestinationSelected: (i) => _onTap(context, i),

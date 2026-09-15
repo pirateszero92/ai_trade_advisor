@@ -263,7 +263,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
       final resp = await _dio.post(
         AppApi.url('/api/v1/settings/llm/chat'),
-        data: {'messages': history},
+        data: {
+          'messages': history,
+          'context': {
+            'symbol': 'BTC/USDT',
+            'timeframe': '1h',
+          },
+        },
       );
 
       final reply = resp.data['response'] as String? ??
@@ -278,7 +284,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
       if (!mounted) return;
       setState(() {
-        _messages.removeLast(); // remove thinking
+        if (_messages.isNotEmpty &&
+            _messages.last.role == 'assistant' &&
+            _messages.last.id.endsWith('_thinking')) {
+          _messages.removeLast();
+        } else {
+          _messages.removeWhere((m) => m.id.endsWith('_thinking'));
+        }
         _messages.add(aiMsg);
         _isLoading = false;
       });
@@ -302,7 +314,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _messages.removeLast();
+        if (_messages.isNotEmpty &&
+            _messages.last.role == 'assistant' &&
+            _messages.last.id.endsWith('_thinking')) {
+          _messages.removeLast();
+        } else {
+          _messages.removeWhere((m) => m.id.endsWith('_thinking'));
+        }
         _messages.add(ChatMessage(
           id: '${DateTime.now().millisecondsSinceEpoch}_err',
           role: 'assistant',

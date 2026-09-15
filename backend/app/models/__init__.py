@@ -13,6 +13,7 @@ from app.models.paper_oms import (
     PaperOMSFill,
     PaperOMSOrder,
     PaperOMSPosition,
+    PaperOMSRiskHalt,
 )
 from app.models.signal import Signal
 from app.models.trade import Trade
@@ -28,6 +29,7 @@ __all__ = [
     "PaperOMSFill",
     "PaperOMSOrder",
     "PaperOMSPosition",
+    "PaperOMSRiskHalt",
     "ReleaseGateEvaluation",
     "Signal",
     "Trade",

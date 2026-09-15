@@ -8,6 +8,11 @@ class StrategyGateView {
     required this.minConfluence,
     this.hasLiquiditySweep = false,
     this.hasSqueezeFire = false,
+    this.entryStatus = '',
+    this.entryBlockReason = '',
+    this.coreSetupGrade = 'WAIT',
+    this.longEvidence = 0,
+    this.shortEvidence = 0,
   });
 
   factory StrategyGateView.fromPayload(Map<String, dynamic>? payload) {
@@ -16,21 +21,24 @@ class StrategyGateView {
     final strategy = strategyRaw is Map
         ? Map<String, dynamic>.from(strategyRaw)
         : <String, dynamic>{};
+    final triCoreRaw = source['tri_core_setup'];
+    final triCore = triCoreRaw is Map
+        ? Map<String, dynamic>.from(triCoreRaw)
+        : const <String, dynamic>{};
     final approved = strategy['approved'] == true ||
-        (strategy.isEmpty &&
-            (source['actionable'] == true ||
-                source['strategy_approved'] == true));
+        (strategy.isEmpty && triCore['actionable'] == true);
 
     String normalizeDirection(dynamic value) {
       final direction = value?.toString().trim().toLowerCase() ?? 'wait';
       return const {'long', 'short'}.contains(direction) ? direction : 'wait';
     }
 
-    final rawAction =
-        normalizeDirection(strategy['direction'] ?? source['direction']);
+    final rawAction = normalizeDirection(
+        strategy['direction'] ?? triCore['direction'] ?? source['direction']);
     final action = approved ? rawAction : 'wait';
     final setupDirection = normalizeDirection(strategy['setup_direction'] ??
         source['setup_direction'] ??
+        triCore['direction'] ??
         (approved ? action : null));
     final reasonsRaw = strategy['rejection_reasons'] ??
         source['rejection_reasons'] ??
@@ -41,6 +49,27 @@ class StrategyGateView {
             .where((item) => item.isNotEmpty)
             .toList(growable: false)
         : const <String>[];
+    final scenarioRaw = source['scenario'];
+    final scenario = scenarioRaw is Map
+        ? Map<String, dynamic>.from(scenarioRaw)
+        : const <String, dynamic>{};
+    final reactionRaw = source['reaction'];
+    final reaction = reactionRaw is Map
+        ? Map<String, dynamic>.from(reactionRaw)
+        : const <String, dynamic>{};
+    final entryStatus = (scenario['entry_status'] ??
+            reaction['entry_status'] ??
+            source['entry_status'] ??
+            '')
+        .toString()
+        .trim()
+        .toUpperCase();
+    final entryBlockReason = (scenario['entry_block_reason'] ??
+            reaction['entry_block_reason'] ??
+            source['entry_block_reason'] ??
+            '')
+        .toString()
+        .trim();
     final policyRaw = strategy['effective_policy'] ??
         source['effective_policy'] ??
         (source['market_regime'] is Map
@@ -49,6 +78,14 @@ class StrategyGateView {
             : null);
     final policy = policyRaw is Map
         ? Map<String, dynamic>.from(policyRaw)
+        : const <String, dynamic>{};
+    final indicatorRaw = source['indicator_decision'];
+    final indicator = indicatorRaw is Map
+        ? Map<String, dynamic>.from(indicatorRaw)
+        : const <String, dynamic>{};
+    final directionalRaw = indicator['directional_scores'];
+    final directional = directionalRaw is Map
+        ? Map<String, dynamic>.from(directionalRaw)
         : const <String, dynamic>{};
 
     final sweepDirection = source['sweep_direction']?.toString().toLowerCase();
@@ -72,6 +109,12 @@ class StrategyGateView {
           ((policy['min_confluence'] as num?)?.toDouble() ?? 0).clamp(0, 100),
       hasLiquiditySweep: hasSweep,
       hasSqueezeFire: hasSqueeze,
+      entryStatus: entryStatus,
+      entryBlockReason: entryBlockReason,
+      coreSetupGrade: (triCore['grade'] ?? 'WAIT').toString().toUpperCase(),
+      longEvidence: ((directional['long'] as num?)?.toInt() ?? 0).clamp(0, 100),
+      shortEvidence:
+          ((directional['short'] as num?)?.toInt() ?? 0).clamp(0, 100),
     );
   }
 
@@ -83,6 +126,14 @@ class StrategyGateView {
   final double minConfluence;
   final bool hasLiquiditySweep;
   final bool hasSqueezeFire;
+  final String entryStatus;
+  final String entryBlockReason;
+  final String coreSetupGrade;
+  final int longEvidence;
+  final int shortEvidence;
+
+  bool get confirmedNoEntry => entryStatus == 'CONFIRMED_NO_ENTRY';
+  bool get pressureWarning => entryStatus == 'PRESSURE_WARNING';
 
   bool get allowsLong => approved && action == 'long';
   bool get allowsShort => approved && action == 'short';
@@ -104,20 +155,29 @@ class StrategyGateView {
       if (action == 'short') return 'SHORT';
       return 'WAIT';
     }
+    if (confirmedNoEntry && setupDirection == 'long') {
+      return 'LONG CONFIRMED · NO ENTRY';
+    }
+    if (confirmedNoEntry && setupDirection == 'short') {
+      return 'SHORT CONFIRMED · NO ENTRY';
+    }
+    if (pressureWarning && setupDirection == 'long') {
+      return 'BULLISH PRESSURE · NOT ENTRY';
+    }
+    if (pressureWarning && setupDirection == 'short') {
+      return 'BEARISH PRESSURE · NOT ENTRY';
+    }
     if (setupDirection == 'long') return 'LONG BIAS · NOT ENTRY';
     if (setupDirection == 'short') return 'SHORT BIAS · NOT ENTRY';
     return 'NEUTRAL · WAIT';
   }
 
-  bool get isGradeS =>
-      confluence >= 85 ||
-      (confluence >= 75 && (hasLiquiditySweep || hasSqueezeFire));
+  bool get isGradeS => coreSetupGrade == 'S';
 
   String get setupGradeLabel {
     if (isGradeS) return '👑 SETUP S';
-    if (confluence >= 70) return '💎 SETUP A';
-    if (confluence >= 55) return '⚖️ SETUP B';
-    return '⏳ SETUP C';
+    if (coreSetupGrade == 'A') return '💎 SETUP A';
+    return '⏳ NO ACTIVE SETUP';
   }
 
   String get gateScoreLabel {
@@ -125,8 +185,19 @@ class StrategyGateView {
     return '$confluence/${minConfluence.round()}';
   }
 
+  String get evidenceScoreLabel => 'Evidence L$longEvidence/S$shortEvidence';
+
   String get waitReasonThai {
     if (approved) return 'ผ่าน Strategy Gate';
+    if (confirmedNoEntry) {
+      final detail = entryBlockReason.isEmpty
+          ? 'จุดเข้าที่เหลือไม่ผ่านเกณฑ์ความเสี่ยง'
+          : _translateReason(entryBlockReason);
+      return 'สัญญาณยืนยันแล้ว แต่ไม่เปิดสถานะ/ห้ามไล่ราคา — $detail';
+    }
+    if (pressureWarning) {
+      return 'คำเตือนล่วงหน้า: แรงกดดันต่อโซนสูง แต่ยังไม่ยืนยันคำสั่ง';
+    }
     if (rejectionReasons.isEmpty) {
       return 'Strategy Gate ยังไม่อนุมัติ setup นี้';
     }
@@ -146,6 +217,9 @@ class StrategyGateView {
     }
 
     final lower = reason.toLowerCase();
+    if (lower.contains('zone reaction') && lower.contains('confirmed')) {
+      return 'ยังไม่มีแท่งเทียนยืนยันการเด้ง/ปฏิเสธโซน';
+    }
     if (lower.contains('liquidity sweep')) {
       return 'ยังไม่พบ Liquidity Sweep ยืนยัน';
     }
@@ -154,6 +228,18 @@ class StrategyGateView {
     }
     if (lower.contains('squeeze release')) {
       return 'ยังไม่เกิด Squeeze Release';
+    }
+    if (lower.contains('liquidity target') && lower.contains('no opposing')) {
+      return 'ยังไม่มีเป้าสภาพคล่องฝั่งตรงข้ามที่ใช้วาง Take Profit';
+    }
+    if (lower.contains('price extended') && lower.contains('atr')) {
+      return 'ราคาออกห่างจากโซนยืนยันมากเกินไป ห้ามไล่ราคา';
+    }
+    if (lower.contains('entry window expired')) {
+      return 'หน้าต่างเข้าเทรดหมดอายุแล้ว ห้ามไล่ราคา';
+    }
+    if (lower.contains('reaction invalidated')) {
+      return 'แท่งเทียนล่าสุดทำให้ปฏิกิริยานี้ใช้เข้าเทรดไม่ได้แล้ว';
     }
     if (lower.contains('r:r')) return 'R:R ยังต่ำกว่าเกณฑ์';
     if (lower.contains('premium zone')) return 'ราคาอยู่ Premium Zone';

@@ -8,8 +8,9 @@ boundary and returns an immutable-by-convention snapshot with a stable ID.
 from __future__ import annotations
 
 import asyncio
+from weakref import WeakValueDictionary
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -58,12 +59,19 @@ def load_analysis_profile() -> dict[str, Any]:
 
 
 def _frame_digest(frame: pd.DataFrame) -> bytes:
-    columns = [name for name in ("open", "high", "low", "close", "volume") if name in frame]
+    numeric_cols = [
+        name for name in (
+            "open", "high", "low", "close", "volume",
+            "buy_volume", "sell_volume", "volume_delta", "cvd",
+        ) if name in frame
+    ]
     # Evidence serialization restores JSON numbers as floats. Normalize here
     # so a replayed frame fingerprints identically even when the provider used
     # integer volume dtype at runtime.
-    normalized = frame[columns].copy()
-    normalized[columns] = normalized[columns].apply(pd.to_numeric, errors="coerce").astype(float)
+    normalized = frame[numeric_cols].copy()
+    normalized[numeric_cols] = normalized[numeric_cols].apply(pd.to_numeric, errors="coerce").astype(float)
+    if "flow_source" in frame:
+        normalized["flow_source"] = frame["flow_source"].astype(str)
     return pd.util.hash_pandas_object(normalized, index=True).values.tobytes()
 
 
@@ -76,15 +84,21 @@ def _next_refresh_at(last_open: pd.Timestamp, timeframe: str) -> datetime:
         opened = opened.tz_convert("UTC")
     tf = canonical_timeframe(timeframe)
     if tf == "1M":
-        refresh = opened + pd.offsets.MonthBegin(2)
+        refresh = (opened + pd.offsets.MonthBegin(2)).to_pydatetime()
+        min_seconds = 3600
     else:
         seconds = {
             "1m": 60, "2m": 120, "3m": 180, "5m": 300,
             "15m": 900, "30m": 1800, "1h": 3600, "2h": 7200,
             "4h": 14400, "1d": 86400, "1w": 604800,
         }[tf]
-        refresh = opened + pd.to_timedelta(seconds * 2, unit="s")
-    return refresh.to_pydatetime()
+        refresh = (opened + pd.to_timedelta(seconds * 2, unit="s")).to_pydatetime()
+        min_seconds = seconds
+    now = datetime.now(timezone.utc)
+    if refresh <= now:
+        # Off-hours, weekend, or closed markets: snapshot remains canonical for at least the timeframe duration
+        return now + timedelta(seconds=min_seconds)
+    return refresh
 
 
 @dataclass(frozen=True)
@@ -126,7 +140,7 @@ class AnalysisSnapshotService:
         self._smc = SMCEngine()
         self._cache: dict[tuple[str, ...], AnalysisSnapshot] = {}
         self._by_id: dict[str, AnalysisSnapshot] = {}
-        self._locks: dict[tuple[str, ...], asyncio.Lock] = {}
+        self._locks: WeakValueDictionary = WeakValueDictionary()
 
     def clear(self) -> None:
         self._cache.clear()

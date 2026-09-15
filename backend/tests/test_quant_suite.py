@@ -52,10 +52,8 @@ def test_ablation_engine():
     )
 
     assert study.symbol == "BTC/USDT"
-    assert "SMC_ONLY" in study.variants
-    assert "SMC_CVD" in study.variants
-    assert "SMC_SQZ" in study.variants
-    assert "FULL_TRINITY" in study.variants
+    assert "SMC_CVD_BASE" in study.variants
+    assert "SMC_CVD_SQZ_BONUS" in study.variants
     assert study.best_variant in study.variants
 
 

@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     app_secret_key: str = ""
     api_host: str = "0.0.0.0"
     api_port: int = 8000
-    cors_allowed_origins: str = "http://localhost:3000,http://localhost:8080"
+    cors_allowed_origins: str = (
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8080,http://127.0.0.1:8080,http://localhost:8000,http://127.0.0.1:8000"
+    )
     app_timezone: str = "Asia/Bangkok"
     allowed_llm_hosts: str = "localhost,127.0.0.1,::1,host.docker.internal"
 
@@ -28,6 +30,9 @@ class Settings(BaseSettings):
 
     local_llm_endpoint: str = "http://localhost:1234/v1"
     local_llm_model: str = "llama-3.2-8b"
+    scanner_ai_mode: Literal["shadow", "paper", "off"] = "shadow"
+    scanner_ai_timeout_seconds: float = Field(default=60.0, ge=5.0, le=120.0)
+    scanner_ai_min_score: int = Field(default=60, ge=40, le=90)
 
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
@@ -81,6 +86,8 @@ class Settings(BaseSettings):
 
     trading_mode: Literal["paper", "live"] = "paper"
     default_risk_per_trade: float = 1.0
+    tri_core_base_risk_pct: float = Field(default=0.75, gt=0, le=1.0)
+    tri_core_max_risk_pct: float = Field(default=1.0, gt=0, le=1.0)
     max_daily_loss: float = 3.0
     max_open_positions: int = 5
 

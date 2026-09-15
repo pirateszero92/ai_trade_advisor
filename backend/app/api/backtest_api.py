@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Literal
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -12,12 +12,13 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import verify_api_key
 from app.core.runtime_config import load_runtime_config
+from app.core.security import verify_api_key
 from app.engines.backtest_engine import (
     ExecutionAssumptions,
     ReleaseCriteria,
     evaluate_release_gate,
+    run_rolling_walk_forward_backtest,
     run_walk_forward_backtest,
 )
 from app.engines.market_data import MarketDataEngine
@@ -32,7 +33,6 @@ from app.models.phase3 import (
     TradeLedgerRecord,
 )
 from app.services.evidence import current_decision_config, fingerprint
-
 
 router = APIRouter()
 _market = MarketDataEngine()
@@ -62,6 +62,10 @@ class ReleaseCriteriaRequest(BaseModel):
     min_fill_rate: float = Field(default=0.70, ge=0, le=1)
     min_regimes_tested: int = Field(default=2, ge=1, le=10)
     require_out_of_sample: bool = True
+    min_true_aggressor_coverage: float = Field(default=0.95, gt=0, le=1)
+    min_history_days: float = Field(default=90.0, ge=1, le=3650)
+    require_validated_policy: bool = True
+    min_oos_folds: int = Field(default=3, ge=1, le=20)
 
 
 class BacktestRequest(BaseModel):
@@ -70,14 +74,16 @@ class BacktestRequest(BaseModel):
     timeframe: Literal["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"] = "15m"
     market_type: Literal["crypto", "forex", "stock"] = "crypto"
     exchange: Literal["binance", "bybit", "innovestx", "mt5", "alpaca", "yfinance"] = "binance"
-    limit: int = Field(default=750, ge=200, le=1000)
+    limit: int = Field(default=10_000, ge=200, le=40_000)
     initial_capital: float = Field(default=10_000.0, gt=0, le=1_000_000_000)
     risk_per_trade_pct: float = Field(default=1.0, gt=0, le=5)
     max_leverage: float = Field(default=3.0, gt=0, le=100)
     warmup_bars: int = Field(default=100, ge=60, le=500)
     oos_fraction: float = Field(default=0.70, ge=0.50, le=0.95)
-    stride_bars: int = Field(default=3, ge=1, le=100)
+    stride_bars: int = Field(default=1, ge=1, le=100)
     max_trades: int = Field(default=1000, ge=1, le=5000)
+    validation_mode: Literal["rolling", "anchored_single"] = "rolling"
+    oos_folds: int = Field(default=3, ge=3, le=10)
     assumptions: ExecutionAssumptionsRequest = Field(default_factory=ExecutionAssumptionsRequest)
     release_criteria: ReleaseCriteriaRequest = Field(default_factory=ReleaseCriteriaRequest)
 
@@ -171,13 +177,20 @@ async def create_backtest_run(
 ):
     if req.warmup_bars >= req.limit:
         raise HTTPException(status_code=422, detail="warmup_bars must be below limit")
-    frame = await _market.get_ohlcv(
-        req.symbol,
-        req.timeframe,
-        req.market_type,
-        req.exchange,
-        limit=req.limit,
-    )
+    if req.market_type == "crypto" and req.exchange == "binance" and req.limit > 1500:
+        frame = await _market.get_crypto_history(
+            req.symbol,
+            req.timeframe,
+            limit=req.limit,
+        )
+    else:
+        frame = await _market.get_ohlcv(
+            req.symbol,
+            req.timeframe,
+            req.market_type,
+            req.exchange,
+            limit=req.limit,
+        )
     if frame.empty or len(frame) <= req.warmup_bars:
         raise HTTPException(status_code=502, detail="Insufficient market data for backtest")
     config = current_decision_config(_strategy)
@@ -189,21 +202,35 @@ async def create_backtest_run(
         else "limit"
     )
     try:
+        runner = (
+            run_rolling_walk_forward_backtest
+            if req.validation_mode == "rolling"
+            else run_walk_forward_backtest
+        )
+        runner_kwargs = {
+            "market_data": frame,
+            "symbol": req.symbol,
+            "timeframe": req.timeframe,
+            "config": config,
+            "assumptions": assumptions,
+            "initial_capital": req.initial_capital,
+            "risk_per_trade_pct": req.risk_per_trade_pct,
+            "max_leverage": req.max_leverage,
+            "warmup_bars": req.warmup_bars,
+            "stride_bars": req.stride_bars,
+            "max_trades": req.max_trades,
+            "entry_mode": execution_entry_mode,
+        }
+        if req.validation_mode == "rolling":
+            runner_kwargs.update({
+                "folds": req.oos_folds,
+                "initial_train_fraction": req.oos_fraction,
+            })
+        else:
+            runner_kwargs["oos_fraction"] = req.oos_fraction
         result = await asyncio.to_thread(
-            run_walk_forward_backtest,
-            market_data=frame,
-            symbol=req.symbol,
-            timeframe=req.timeframe,
-            config=config,
-            assumptions=assumptions,
-            initial_capital=req.initial_capital,
-            risk_per_trade_pct=req.risk_per_trade_pct,
-            max_leverage=req.max_leverage,
-            warmup_bars=req.warmup_bars,
-            oos_fraction=req.oos_fraction,
-            stride_bars=req.stride_bars,
-            max_trades=req.max_trades,
-            entry_mode=execution_entry_mode,
+            runner,
+            **runner_kwargs,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -234,7 +261,7 @@ async def create_backtest_run(
     )
     session.add(run)
     await session.flush()
-    gate, gate_result = await _store_gate(session, run, _criteria(req.release_criteria))
+    _, gate_result = await _store_gate(session, run, _criteria(req.release_criteria))
     return {
         "run": _run_summary(run),
         "release_gate": gate_result,

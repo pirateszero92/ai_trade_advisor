@@ -1,4 +1,4 @@
-﻿"""
+"""
 Risk Engine
 Evaluates trade risk before execution: position sizing, R:R validation,
 daily loss limits, drawdown management, and portfolio correlation/cluster controls.
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from decimal import Decimal, ROUND_FLOOR
 from typing import Any, Literal, Optional
 
 from loguru import logger
@@ -85,6 +86,18 @@ def get_asset_cluster(symbol: str) -> str:
     if any(fx in clean for fx in ("EUR", "GBP", "JPY", "AUD", "CAD")):
         return "forex_majors"
     return "other"
+
+
+def squeeze_adjusted_risk_pct(signal: SMCSignal) -> float:
+    """Translate SQZ strength into sizing only; it can never create or veto a setup."""
+    cfg = get_settings()
+    base = min(float(cfg.tri_core_base_risk_pct), float(cfg.default_risk_per_trade), 1.0)
+    cap = min(max(base, float(cfg.tri_core_max_risk_pct)), 1.0)
+    decision = getattr(signal, "indicator_decision", {}) or {}
+    bonus = float(decision.get("squeeze_bonus", 0) or 0)
+    bonus_max = max(float(decision.get("squeeze_bonus_max", 10) or 10), 1.0)
+    strength = min(max(bonus / bonus_max, 0.0), 1.0)
+    return round(base + (cap - base) * strength, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +314,7 @@ class RiskEngine:
         # --- 5. R:R check ---
         # Costs belong in both sides of the expectancy equation: they increase
         # the amount lost at the stop and reduce the reward available at target.
-        all_in_risk_dist = sl_dist + execution_cost_per_unit
+        all_in_risk_dist = max(sl_dist + execution_cost_per_unit, 1e-9)
         net_reward_dist = max(
             abs(signal.take_profit - signal.entry) - execution_cost_per_unit,
             0.0,
@@ -352,7 +365,12 @@ class RiskEngine:
         max_units = max_notional / (signal.entry * contract_multiplier)
         raw_size = risk_budget / (all_in_risk_dist * contract_multiplier)
         capped_size = min(raw_size, max_units)
-        position_size = math.floor(capped_size / quantity_step) * quantity_step
+        step_d = Decimal(str(quantity_step))
+        capped_d = Decimal(str(round(capped_size, 8)))
+        steps = (capped_d / step_d).to_integral_value(rounding=ROUND_FLOOR)
+        step_exp = step_d.as_tuple().exponent
+        step_decimals = abs(step_exp) if isinstance(step_exp, int) and step_exp < 0 else 0
+        position_size = round(float(steps * step_d), step_decimals)
         if position_size <= 0:
             assessment.rejection_reason = "Account is too small for the instrument quantity step"
             return assessment
@@ -361,7 +379,7 @@ class RiskEngine:
 
         assessment.risk_pct = round(actual_risk / account_balance * 100.0, 4)
         assessment.risk_amount = round(actual_risk, 2)
-        assessment.position_size = round(position_size, 6)
+        assessment.position_size = position_size
 
         # --- 7. Portfolio correlation warning ---
         if open_positions >= max(1, self.cfg.max_open_positions // 2):
@@ -398,16 +416,18 @@ class RiskEngine:
 
         if drawdown_pct >= 10:
             assessment.tone = "cautious"
+            adjusted = min(base * 0.5, 0.5)
             assessment.warnings.append(
-                f"Drawdown {drawdown_pct:.1f}% — reducing risk to 0.5%"
+                f"Drawdown {drawdown_pct:.1f}% — reducing risk to {adjusted:.2f}%"
             )
-            return min(base * 0.5, 0.5)
+            return adjusted
         elif drawdown_pct >= 5:
             assessment.tone = "cautious"
+            adjusted = min(base * 0.75, 0.75)
             assessment.warnings.append(
-                f"Drawdown {drawdown_pct:.1f}% — reducing risk to 0.75%"
+                f"Drawdown {drawdown_pct:.1f}% — reducing risk to {adjusted:.2f}%"
             )
-            return min(base * 0.75, 0.75)
+            return adjusted
         elif drawdown_pct > 0:
             assessment.tone = "cautious"
             return round(base * 0.9, 2)

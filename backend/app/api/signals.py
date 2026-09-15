@@ -211,7 +211,15 @@ async def list_signals(
 
     signals = signals[:limit]
 
+    from app.services.execution_analysis import execution_analyses
     for s in signals:
+        sym = s.get("symbol", "")
+        for cached in execution_analyses._cache.values():
+            if cached.symbol == sym:
+                rev = getattr(cached.signal, "ai_review", {})
+                if rev and rev.get("status") in ("reviewed", "error"):
+                    s["ai_review"] = rev
+                break
         if "message" in s:
             s["message"] = _clean_message_text(s["message"])
 

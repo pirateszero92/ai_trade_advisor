@@ -1,7 +1,6 @@
 ﻿"""
 Ablation Testing Engine
-Quantifies the marginal alpha contribution of each indicator layer
-(SMC Only vs SMC+CVD vs SMC+SQZ vs Full Trinity) on identical historical datasets.
+Measures SQZ sizing value on top of the mandatory SMC+CVD setup edge.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ class AblationVariantResult:
     net_pnl: float
     net_return_pct: float
     max_drawdown_pct: float
-    marginal_expectancy_delta_r: float = 0.0  # Difference vs SMC_ONLY baseline
+    marginal_expectancy_delta_r: float = 0.0  # Difference vs SMC_CVD_BASE baseline
     marginal_win_rate_delta_pct: float = 0.0
 
 
@@ -59,57 +58,31 @@ class AblationStudySummary:
 
 
 class AblationEngine:
-    """Runs 4-way orthogonal indicator ablation studies."""
+    """Compare mandatory SMC+CVD with and without the optional SQZ sizing bonus."""
 
     VARIANTS = {
-        "SMC_ONLY": {
-            "name": "SMC Only (Where)",
-            "description": "Baseline pure structural Price Action & Order Blocks",
-            "indicator_core": {
-                "version": 1,
-                "minimum_data_coverage": 70.0,
-                "indicators": {
-                    "smc_structure": {"enabled": True, "required": True, "weight": 100.0, "params": {}},
-                    "volume_delta": {"enabled": False, "required": False, "weight": 0.0, "params": {}},
-                    "squeeze_momentum": {"enabled": False, "required": False, "weight": 0.0, "params": {}},
-                },
-            },
-        },
-        "SMC_CVD": {
+        "SMC_CVD_BASE": {
             "name": "SMC + CVD (Where + Intent)",
-            "description": "Structure confirmed by Order Flow Delta Absorption",
+            "description": "Mandatory setup edge with fixed base risk and no SQZ bonus",
             "indicator_core": {
                 "version": 1,
                 "minimum_data_coverage": 70.0,
                 "indicators": {
                     "smc_structure": {"enabled": True, "required": True, "weight": 60.0, "params": {}},
-                    "volume_delta": {"enabled": True, "required": False, "weight": 40.0, "params": {}},
+                    "volume_delta": {"enabled": True, "required": True, "weight": 40.0, "params": {}},
                     "squeeze_momentum": {"enabled": False, "required": False, "weight": 0.0, "params": {}},
                 },
             },
         },
-        "SMC_SQZ": {
-            "name": "SMC + SQZ (Where + When)",
-            "description": "Structure filtered by Squeeze Volatility Timing",
-            "indicator_core": {
-                "version": 1,
-                "minimum_data_coverage": 70.0,
-                "indicators": {
-                    "smc_structure": {"enabled": True, "required": True, "weight": 60.0, "params": {}},
-                    "volume_delta": {"enabled": False, "required": False, "weight": 0.0, "params": {}},
-                    "squeeze_momentum": {"enabled": True, "required": False, "weight": 40.0, "params": {}},
-                },
-            },
-        },
-        "FULL_TRINITY": {
-            "name": "Full Trinity (Where + Intent + When)",
-            "description": "Complete 3-Layer Confluence Architecture",
+        "SMC_CVD_SQZ_BONUS": {
+            "name": "SMC + CVD + SQZ sizing bonus",
+            "description": "Same entries; SQZ may scale risk from 0.75% up to 1.00%",
             "indicator_core": {
                 "version": 1,
                 "minimum_data_coverage": 70.0,
                 "indicators": {
                     "smc_structure": {"enabled": True, "required": True, "weight": 40.0, "params": {}},
-                    "volume_delta": {"enabled": True, "required": False, "weight": 30.0, "params": {}},
+                    "volume_delta": {"enabled": True, "required": True, "weight": 30.0, "params": {}},
                     "squeeze_momentum": {"enabled": True, "required": False, "weight": 30.0, "params": {}},
                 },
             },
@@ -171,9 +144,9 @@ class AblationEngine:
             )
 
         # Baseline comparison
-        base = variant_results["SMC_ONLY"]
+        base = variant_results["SMC_CVD_BASE"]
         for key, res in variant_results.items():
-            if key != "SMC_ONLY":
+            if key != "SMC_CVD_BASE":
                 res.marginal_expectancy_delta_r = round(res.expectancy_r - base.expectancy_r, 4)
                 res.marginal_win_rate_delta_pct = round(res.win_rate_pct - base.win_rate_pct, 2)
 
@@ -182,24 +155,17 @@ class AblationEngine:
 
         # Generate findings
         findings: list[str] = []
-        full = variant_results["FULL_TRINITY"]
+        full = variant_results["SMC_CVD_SQZ_BONUS"]
         if full.expectancy_r > base.expectancy_r:
             findings.append(
-                f"Full Trinity outperforms baseline by +{full.marginal_expectancy_delta_r:.4f}R expectancy "
+                f"SQZ sizing bonus outperforms fixed-risk SMC+CVD by +{full.marginal_expectancy_delta_r:.4f}R expectancy "
                 f"(Win Rate: {base.win_rate_pct}% -> {full.win_rate_pct}%)"
             )
-        cvd = variant_results["SMC_CVD"]
-        if cvd.expectancy_r > base.expectancy_r:
-            findings.append(f"Volume Delta (CVD) provides +{cvd.marginal_expectancy_delta_r:.4f}R marginal alpha over pure SMC.")
-        sqz = variant_results["SMC_SQZ"]
-        if sqz.expectancy_r > base.expectancy_r:
-            findings.append(f"Squeeze Momentum (SQZ) timing provides +{sqz.marginal_expectancy_delta_r:.4f}R marginal alpha over pure SMC.")
-
         return AblationStudySummary(
             symbol=symbol,
             timeframe=timeframe,
             data_bars=len(market_data),
-            baseline_variant="SMC_ONLY",
+            baseline_variant="SMC_CVD_BASE",
             best_variant=best_key,
             variants=variant_results,
             key_findings=findings,

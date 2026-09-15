@@ -24,6 +24,11 @@ venv/
 *.db
 *.sqlite3
 backend/config/*.json.lock
+backend/config/*_store.json
+backend/config/paper_portfolio.json
+backend/config/runtime_settings.json
+backend/data/
+mobile/.dart-appdata/
 
 # Logs
 *.log
@@ -36,6 +41,7 @@ mobile/.flutter-plugins-dependencies
 mobile/.pub-cache/
 mobile/.pub/
 mobile/build/*
+
 !mobile/build/web/
 !mobile/build/web/**
 mobile/android/.gradle/
@@ -46,10 +52,13 @@ mobile/android/key.properties
 .pytest_cache/
 htmlcov/
 .coverage
+backend/.pytest_temp/
+backend/tests_tmp/
 
 # Docker
 *.override.yml
 
-# Binaries
+# Binaries & Screenshots
 *.apk
 *.aab
+/*.png

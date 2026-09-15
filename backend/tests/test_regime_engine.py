@@ -48,7 +48,12 @@ def _signal(**updates) -> SMCSignal:
         take_profit=103.0,
         risk_reward=3.0,
         volume_data_valid=True,
+        volume_quality="exchange_aggressor",
         volume_delta=250.0,
+        tri_core_setup={"actionable": True, "direction": "long", "grade": "A",
+                        "smc_confirmed": True, "cvd_confirmed": True,
+                        "flow_confirmed": True},
+        scenario={"scenario_id": "TEST_CONFIRMED", "actionable": True},
     )
     for key, value in updates.items():
         setattr(signal, key, value)
@@ -119,7 +124,7 @@ def test_insufficient_data_fails_closed():
     assert result["policy"]["entry_allowed"] is False
 
 
-def test_strategy_blocks_compression_and_requires_sweep_in_range():
+def test_strategy_treats_regime_as_risk_context_not_entry_gate():
     compression_signal = _signal(
         market_regime={
             "regime": "compression",
@@ -143,12 +148,10 @@ def test_strategy_blocks_compression_and_requires_sweep_in_range():
     range_signal.liquidity_swept = True
     range_with_sweep = StrategyEngine().evaluate(range_signal)
 
-    assert compression_result.approved is False
-    assert any("blocked" in reason for reason in compression_result.rejection_reasons)
-    assert range_result.approved is False
-    assert range_result.direction == "wait"
+    assert compression_result.approved is True
+    assert range_result.approved is True
+    assert range_result.direction == "long"
     assert range_result.setup_direction == "long"
-    assert any("Liquidity sweep" in reason for reason in range_result.rejection_reasons)
     assert range_with_sweep.approved is True
     assert range_with_sweep.direction == "long"
     assert range_with_sweep.setup_direction == "long"

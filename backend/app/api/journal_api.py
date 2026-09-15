@@ -99,10 +99,10 @@ async def create_entry(
         "updated_at": datetime.now(timezone.utc).isoformat(),
         **entry.model_dump(),
     }
-    def mutate(entries: dict[str, dict]) -> dict:
+    def mutate(entries: dict[str, dict]) -> None:
         entries[entry_id] = record
-        return dict(record)
-    return _mutate_journal(mutate)
+    _mutate_journal(mutate)
+    return record
 
 
 @router.get("/entries")
@@ -146,18 +146,22 @@ async def update_entry(
     if "tags" in data:
         data["tags"] = [str(tag).strip()[:50] for tag in data["tags"] if str(tag).strip()]
 
-    def mutate(entries: dict[str, dict]) -> Optional[dict]:
-        record = entries.get(entry_id)
-        if not record:
-            return None
-        record.update(data)
-        record["updated_at"] = datetime.now(timezone.utc).isoformat()
-        return dict(record)
+    updated_record: Optional[dict] = None
 
-    record = _mutate_journal(mutate)
-    if not record:
+    def mutate(entries: dict[str, dict]) -> bool:
+        nonlocal updated_record
+        target = entries.get(entry_id)
+        if not target:
+            return False
+        target.update(data)
+        target["updated_at"] = datetime.now(timezone.utc).isoformat()
+        updated_record = dict(target)
+        return True
+
+    found = _mutate_journal(mutate)
+    if not found or not updated_record:
         raise HTTPException(status_code=404, detail="Journal entry not found")
-    return record
+    return updated_record
 
 
 @router.delete("/entries/{entry_id}")
@@ -170,7 +174,6 @@ async def delete_entry(
         return entries.pop(entry_id, None) is not None
     if not _mutate_journal(mutate):
         raise HTTPException(status_code=404, detail="Journal entry not found")
-    return {"message": "Entry deleted", "id": entry_id}
 
 
 @router.get("/stats")

@@ -76,6 +76,15 @@ def _signal(timeframe: str, direction: str, *, trigger: bool = False) -> SMCSign
     signal.stop_loss = 97.0 if bullish else 103.0
     signal.take_profit = 104.0 if bullish else 96.0
     signal.risk_reward = 2.5
+    signal.volume_quality = "exchange_aggressor"
+    signal.tri_core_setup = {
+        "actionable": True,
+        "direction": direction,
+        "grade": "A",
+        "smc_confirmed": True,
+        "flow_confirmed": True,
+        "cvd_confirmed": True,
+    }
     signal.indicator_decision = {
         "ready": True,
         "coverage": 100.0,
@@ -83,6 +92,7 @@ def _signal(timeframe: str, direction: str, *, trigger: bool = False) -> SMCSign
         "layers": [],
     }
     signal.confluence = 80
+    signal.scenario = {"scenario_id": "TEST_CONFIRMED", "actionable": True}
     return signal
 
 
@@ -186,6 +196,13 @@ def test_timeframe_profiles_reject_inverted_hierarchy_and_new_indicator():
     with pytest.raises(ValueError, match="Unregistered indicators"):
         validate_timeframe_profiles(unknown)
 
+    non_15m_trigger = deepcopy(DEFAULT_TIMEFRAME_PROFILES)
+    non_15m_trigger["roles"]["bias"]["timeframe"] = "1d"
+    non_15m_trigger["roles"]["setup"]["timeframe"] = "4h"
+    non_15m_trigger["roles"]["trigger"]["timeframe"] = "1h"
+    with pytest.raises(ValueError, match="Execution trigger timeframe is strictly locked to '15m'"):
+        validate_timeframe_profiles(non_15m_trigger)
+
 
 @pytest.mark.anyio
 async def test_mtf_service_fetches_three_closed_windows_and_reuses_cache(monkeypatch):
@@ -214,7 +231,7 @@ async def test_mtf_service_fetches_three_closed_windows_and_reuses_cache(monkeyp
     )
 
     assert first is second
-    assert calls == [("4h", 180, True), ("1h", 300, True), ("15m", 300, True)]
+    assert calls == [("1d", 180, True), ("4h", 300, True), ("15m", 600, True)]
     assert first.metadata()["candle_policy"] == "closed_only"
 
 

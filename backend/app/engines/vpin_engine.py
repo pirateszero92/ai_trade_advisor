@@ -143,7 +143,8 @@ class VPINEngine:
 
         current_vpin = float(np.clip(rolling_vpin[-1], 0.0, 1.0))
         pct_toxicity = float((np.array(rolling_vpin) <= current_vpin).mean() * 100.0)
-        is_toxic = current_vpin >= self.toxicity_threshold
+        measured_flow = {"buy_volume", "sell_volume"}.issubset(df.columns)
+        is_toxic = measured_flow and current_vpin >= self.toxicity_threshold
 
         return VPINResult(
             vpin=round(current_vpin, 4),
@@ -152,4 +153,5 @@ class VPINEngine:
             bucket_size=round(bucket_size, 2),
             buckets_processed=len(bucket_imbalances),
             mean_imbalance=round(float(np.mean(imb_array[-self.window:])), 2),
+            status="ok" if measured_flow else "estimated_advisory",
         )

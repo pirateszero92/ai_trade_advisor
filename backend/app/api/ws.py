@@ -19,16 +19,11 @@ from loguru import logger
 from app.core.config import get_settings
 from app.core.security import is_valid_api_key
 from app.engines.ai_engine import AIEngine
-from app.engines.market_data import MarketDataEngine
 from app.engines.price_hub import price_hub
-from app.engines.smc_engine import SMCEngine
-from app.engines.strategy_engine import StrategyEngine
+from app.services.execution_analysis import execution_analyses, execution_entry_mode
 
 router = APIRouter()
-_smc = SMCEngine()
 _ai = AIEngine()
-_market = MarketDataEngine()
-_strategy = StrategyEngine()
 
 # Connection registry
 _connections: set[WebSocket] = set()
@@ -274,11 +269,10 @@ async def ws_signals(websocket: WebSocket):
     task: asyncio.Task | None = None
 
     async def stream_signals():
+        interval = 60
         while True:
             try:
                 sym = subscription.get("symbol", "BTC/USDT")
-                tf = subscription.get("timeframe", "1H")
-                bias = subscription.get("htf_bias", "neutral")
                 interval = max(5, min(3600, int(subscription.get("interval", 60))))
 
                 s_up = sym.upper().replace("/", "").replace("-", "")
@@ -291,16 +285,20 @@ async def ws_signals(websocket: WebSocket):
                 else:
                     m_type = "stock"
 
-                df = await _market.get_ohlcv(symbol=sym, timeframe=tf, market_type=m_type)
-                if not df.empty:
-                    signal = _smc.analyze(df, sym, tf, bias)
-                    strategy = _strategy.evaluate(signal)
+                execution = await execution_analyses.get(
+                    symbol=sym, market_type=m_type,
+                    exchange=subscription.get("exchange") or {
+                        "crypto": "binance", "forex": "mt5", "stock": "alpaca"
+                    }[m_type], entry_mode=execution_entry_mode(),
+                )
+                if not execution.frame.empty:
                     await _send_json(websocket, {
                         "type": "signal",
                         "data": {
-                            **signal.to_dict(),
-                            "strategy": strategy.to_dict(),
-                            "actionable": strategy.approved,
+                            **execution.signal.to_dict(),
+                            "strategy": execution.strategy.to_dict(),
+                            "actionable": execution.strategy.approved,
+                            "analysis_snapshot": execution.metadata(),
                         },
                     })
             except Exception as exc:
@@ -346,7 +344,7 @@ async def ws_signals(websocket: WebSocket):
                     continue
                 subscription = {
                     "symbol": symbol,
-                    "timeframe": timeframe,
+                    "timeframe": execution_analyses._config_snapshot()["timeframe_profiles"]["roles"]["trigger"]["timeframe"],
                     "market_type": market_type,
                     "htf_bias": htf_bias,
                     "interval": max(5, min(3600, interval)),
@@ -427,7 +425,10 @@ async def ws_chat(websocket: WebSocket):
 
             try:
                 response = await asyncio.wait_for(_ai.chat(messages), timeout=60.0)
-            except (ValueError, asyncio.TimeoutError) as exc:
+            except asyncio.TimeoutError:
+                await _send_json(websocket, {"type": "error", "message": "AI analysis timed out"})
+                continue
+            except ValueError as exc:
                 await _send_json(websocket, {"type": "error", "message": str(exc)})
                 continue
             except Exception as exc:

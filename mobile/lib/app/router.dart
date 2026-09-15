@@ -18,17 +18,26 @@ final routerProvider = Provider<GoRouter>((ref) {
         branches: [
           StatefulShellBranch(
             routes: [
-              GoRoute(path: '/chart', builder: (c, s) => const ChartScreen()),
+              GoRoute(
+                path: '/chart',
+                builder: (c, s) => ChartScreen(
+                  initialSymbol: s.uri.queryParameters['symbol'],
+                  initialMarket: s.uri.queryParameters['market'],
+                  initialExchange: s.uri.queryParameters['exchange'],
+                ),
+              ),
             ],
           ),
           StatefulShellBranch(
             routes: [
-              GoRoute(path: '/signals', builder: (c, s) => const SignalsScreen()),
+              GoRoute(
+                  path: '/signals', builder: (c, s) => const SignalsScreen()),
             ],
           ),
           StatefulShellBranch(
             routes: [
-              GoRoute(path: '/journal', builder: (c, s) => const JournalScreen()),
+              GoRoute(
+                  path: '/journal', builder: (c, s) => const JournalScreen()),
             ],
           ),
           StatefulShellBranch(
@@ -38,7 +47,8 @@ final routerProvider = Provider<GoRouter>((ref) {
           ),
           StatefulShellBranch(
             routes: [
-              GoRoute(path: '/settings', builder: (c, s) => const SettingsScreen()),
+              GoRoute(
+                  path: '/settings', builder: (c, s) => const SettingsScreen()),
             ],
           ),
         ],

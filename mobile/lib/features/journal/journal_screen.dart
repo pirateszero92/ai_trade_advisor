@@ -1274,6 +1274,9 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
     final takeProfit = (t['take_profit'] as num?)?.toDouble() ?? 0.0;
     final protectionStage =
         (t['protection_stage']?.toString() ?? 'initial').toLowerCase();
+    final trailingStop = t['trailing_stop'] == true;
+    final setupGrade = (t['setup_grade']?.toString() ?? '').toUpperCase();
+    final gradeProvenance = t['grade_provenance']?.toString() ?? '';
     final riskDistance = (entry - stopLoss).abs();
     final plannedRr =
         riskDistance > 0 ? (takeProfit - entry).abs() / riskDistance : 0.0;
@@ -1296,12 +1299,27 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
       currSym: currSym,
       stopLoss: currentStopLoss,
       protectionStage: protectionStage,
+      trailingStop: trailingStop,
+      setupGrade: setupGrade,
+      gradeProvenance: gradeProvenance,
       aiReview: aiReview,
       executionRating: executionRating,
       lessons: lessons,
       tags: tags,
       isClosing: _closingTradeIds.contains(id),
       onClose: () => _closeTrade(id),
+      onViewChart: () {
+        final market = (t['market_type'] ?? 'crypto').toString().toLowerCase();
+        final exchange = (t['exchange'] ?? '').toString().toLowerCase();
+        context.go(Uri(
+          path: '/chart',
+          queryParameters: {
+            'symbol': sym.toString(),
+            'market': market,
+            if (exchange.isNotEmpty) 'exchange': exchange,
+          },
+        ).toString());
+      },
       onAudit: () => _showTradeAuditModal(context, t),
     );
   }
@@ -2615,6 +2633,7 @@ class _TradeCard extends StatelessWidget {
       closeReason,
       aiReview,
       lessons;
+  final String setupGrade, gradeProvenance;
   final int executionRating;
   final List<String> tags;
   final bool isClosing;
@@ -2622,7 +2641,9 @@ class _TradeCard extends StatelessWidget {
   final double stopLoss;
   final String currSym;
   final String protectionStage;
+  final bool trailingStop;
   final VoidCallback onClose;
+  final VoidCallback onViewChart;
   final VoidCallback? onAudit;
 
   const _TradeCard({
@@ -2642,6 +2663,9 @@ class _TradeCard extends StatelessWidget {
     required this.date,
     required this.stopLoss,
     this.protectionStage = 'initial',
+    this.trailingStop = false,
+    this.setupGrade = '',
+    this.gradeProvenance = '',
     this.currSym = '\$',
     this.aiReview = '',
     this.executionRating = 0,
@@ -2649,6 +2673,7 @@ class _TradeCard extends StatelessWidget {
     this.tags = const [],
     this.isClosing = false,
     required this.onClose,
+    required this.onViewChart,
     this.onAudit,
   });
 
@@ -2739,10 +2764,29 @@ class _TradeCard extends StatelessWidget {
                                 fontSize: 11)),
                       ),
                       const SizedBox(width: 6),
-                      Text(
-                        symbol,
-                        style: const TextStyle(
-                            fontWeight: FontWeight.bold, fontSize: 14),
+                      InkWell(
+                        onTap: onViewChart,
+                        borderRadius: BorderRadius.circular(4),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 2),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                symbol,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                  color: Color(0xFF93C5FD),
+                                  decoration: TextDecoration.underline,
+                                ),
+                              ),
+                              const SizedBox(width: 3),
+                              const Icon(Icons.arrow_outward,
+                                  size: 11, color: Color(0xFF93C5FD)),
+                            ],
+                          ),
+                        ),
                       ),
                       const SizedBox(width: 6),
                       Container(
@@ -2801,6 +2845,42 @@ class _TradeCard extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  if (setupGrade == 'S' || setupGrade == 'A') ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 5, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: (setupGrade == 'S'
+                                ? const Color(0xFFFFD700)
+                                : const Color(0xFF00E5FF))
+                            .withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: setupGrade == 'S'
+                              ? const Color(0xFFFFD700)
+                              : const Color(0xFF00E5FF),
+                          width: 0.7,
+                        ),
+                      ),
+                      child: Text(
+                        setupGrade == 'S' ? '👑 SETUP S' : '💎 SETUP A',
+                        style: TextStyle(
+                          fontSize: 9,
+                          color: setupGrade == 'S'
+                              ? const Color(0xFFFFD700)
+                              : const Color(0xFF00E5FF),
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ] else if (gradeProvenance == 'legacy_unavailable') ...[
+                    const SizedBox(width: 6),
+                    const Text(
+                      'LEGACY · GRADE N/A',
+                      style: TextStyle(fontSize: 9, color: Colors.white38),
+                    ),
+                  ],
                   // Trailing Stop Status Badge (only for open positions with active protection)
                   if (isOpen && stopLoss > 0) ...[
                     const SizedBox(width: 6),
@@ -2816,22 +2896,29 @@ class _TradeCard extends StatelessWidget {
                         stageIcon = Icons.lock_outline;
                       } else if (stage == 'trail_1' ||
                           stage == 'trailing_1' ||
+                          stage == 'trailing_1_5r' ||
                           stage == 'locked_0_6r') {
-                        stageLabel = 'TS +0.6R';
+                        stageLabel = 'Trail +0.6R';
                         stageColor = const Color(0xFF4CAF50);
                         stageIcon = Icons.trending_up;
                       } else if (stage == 'trail_2' ||
                           stage == 'trailing_2' ||
+                          stage == 'trailing_2_0r' ||
                           stage == 'locked_1_2r') {
-                        stageLabel = 'TS +1.2R';
+                        stageLabel = 'Trail +1.2R';
                         stageColor = const Color(0xFF8BC34A);
                         stageIcon = Icons.trending_up;
                       } else if (stage == 'trail_3' ||
                           stage == 'trailing_3' ||
+                          stage == 'trailing_dynamic' ||
                           stage == 'dynamic') {
-                        stageLabel = 'TS DYN';
+                        stageLabel = 'Trail Dynamic';
                         stageColor = const Color(0xFFCDDC39);
                         stageIcon = Icons.auto_graph;
+                      } else if (trailingStop) {
+                        stageLabel = 'Trail Armed';
+                        stageColor = AppColors.bullish;
+                        stageIcon = Icons.rocket_launch_outlined;
                       } else {
                         stageLabel = 'SL';
                         stageColor = Colors.white38;
