@@ -169,3 +169,84 @@ def test_risk_engine_rejects_excessive_fee_to_risk_ratio():
     )
     assert res.approved is False
     assert "Execution cost too high relative to SL distance" in (res.rejection_reason or "")
+
+
+def test_risk_engine_cluster_forex_usdtry_not_crypto():
+    """Verify operator precedence fix: USDTRY (contains 'USDT') is forex, NOT crypto_l1."""
+    from app.engines.risk_engine import get_asset_cluster
+
+    # Forex pair containing 'USDT' substring must NOT be misclassified as crypto
+    assert get_asset_cluster("USDTRY") == "forex_majors"
+    assert get_asset_cluster("USD/TRY") == "forex_majors"
+    assert get_asset_cluster("EURUSD") == "forex_majors"
+    assert get_asset_cluster("GBPUSD") == "forex_majors"
+
+    # Crypto L1 with USDT or USD
+    assert get_asset_cluster("BTCUSDT") == "crypto_l1"
+    assert get_asset_cluster("ETHUSDT") == "crypto_l1"
+    assert get_asset_cluster("SOL/USDT") == "crypto_l1"
+
+
+def test_risk_engine_fail_closed_regime_gate():
+    """Verify that when market regime is provided but policy is missing or not ready, it fails closed."""
+    engine = RiskEngine()
+
+    # 1. Regime data provided but policy is missing/invalid -> fail closed
+    sig_missing_policy = SMCSignal(
+        symbol="BTC/USDT",
+        timeframe="15m",
+        bias="bullish",
+        direction="long",
+        entry=50000.0,
+        stop_loss=49500.0,
+        take_profit=51500.0,
+        risk_reward=3.0,
+        market_regime={"regime": "trending", "ready": True},  # missing policy dict
+    )
+    res = engine.evaluate(sig_missing_policy, account_balance=10000.0)
+    assert res.approved is False
+    assert "Market regime policy missing or incomplete" in (res.rejection_reason or "")
+
+    # 2. Regime data provided but ready is False -> fail closed
+    sig_not_ready = SMCSignal(
+        symbol="BTC/USDT",
+        timeframe="15m",
+        bias="bullish",
+        direction="long",
+        entry=50000.0,
+        stop_loss=49500.0,
+        take_profit=51500.0,
+        risk_reward=3.0,
+        market_regime={
+            "regime": "trending",
+            "ready": False,
+            "policy": {"entry_allowed": True, "risk_multiplier": 1.0},
+        },
+    )
+    res2 = engine.evaluate(sig_not_ready, account_balance=10000.0)
+    assert res2.approved is False
+    assert "New risk is blocked" in (res2.rejection_reason or "")
+
+
+def test_risk_engine_drawdown_constants_and_min_rr():
+    """Verify named drawdown constants and direct minimum_rr validation."""
+    engine = RiskEngine()
+    assert engine.DD_10_MULTIPLIER == 0.50
+    assert engine.DD_10_MAX_RISK_CAP_PCT == 0.50
+    assert engine.DD_5_MULTIPLIER == 0.75
+    assert engine.DD_5_MAX_RISK_CAP_PCT == 0.75
+
+    sig = SMCSignal(
+        symbol="BTC/USDT",
+        timeframe="15m",
+        bias="bullish",
+        direction="long",
+        entry=50000.0,
+        stop_loss=49500.0,
+        take_profit=51500.0,
+        risk_reward=3.0,
+    )
+    # Invalid minimum_rr out of bounds -> rejected directly
+    res_bad_rr = engine.evaluate(sig, minimum_rr=25.0)
+    assert res_bad_rr.approved is False
+    assert "Minimum R:R must be between 1 and 20" in (res_bad_rr.rejection_reason or "")

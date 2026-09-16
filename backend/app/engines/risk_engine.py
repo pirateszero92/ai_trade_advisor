@@ -81,9 +81,9 @@ def get_asset_cluster(symbol: str) -> str:
     for key, cluster in ASSET_CLUSTERS.items():
         if clean == key.upper().replace("/", ""):
             return cluster
-    if "USDT" in clean or "USD" in clean and any(c in clean for c in ("BTC", "ETH", "SOL", "BNB", "ADA")):
+    if ("USDT" in clean or "USD" in clean) and any(c in clean for c in ("BTC", "ETH", "SOL", "BNB", "ADA")):
         return "crypto_l1"
-    if any(fx in clean for fx in ("EUR", "GBP", "JPY", "AUD", "CAD")):
+    if any(fx in clean for fx in ("EUR", "GBP", "JPY", "AUD", "CAD", "TRY", "CHF", "NZD")):
         return "forex_majors"
     return "other"
 
@@ -159,6 +159,13 @@ class RiskEngine:
     MAX_FEE_TO_RISK_RATIO = 0.50  # Max ratio of per-unit execution cost to SL distance (50%)
     MAX_CLUSTER_POSITIONS = 2 # Max concurrent positions in same correlated cluster
 
+    # Drawdown risk throttling constants
+    DD_10_MULTIPLIER = 0.50
+    DD_10_MAX_RISK_CAP_PCT = 0.50
+    DD_5_MULTIPLIER = 0.75
+    DD_5_MAX_RISK_CAP_PCT = 0.75
+    DD_LIGHT_MULTIPLIER = 0.90
+
     def __init__(self):
         self.cfg = get_settings()
 
@@ -205,11 +212,17 @@ class RiskEngine:
             return assessment
 
         regime_data = getattr(signal, "market_regime", {})
-        regime_policy = (
-            regime_data.get("policy", {}) if isinstance(regime_data, dict) else {}
-        )
-        if regime_policy:
+        # Enforce fail-closed Market Regime Gate:
+        # If market_regime data is explicitly provided by upstream, it MUST be valid, ready,
+        # and contain an actionable policy. Empty dict {} indicates legacy/unaware callers.
+        if isinstance(regime_data, dict) and regime_data:
             assessment.market_regime = str(regime_data.get("regime", "unknown"))
+            regime_policy = regime_data.get("policy")
+            if not isinstance(regime_policy, dict) or not regime_policy:
+                assessment.rejection_reason = (
+                    f"Market regime policy missing or incomplete for {assessment.market_regime}; risk gate failed-closed"
+                )
+                return assessment
             assessment.regime_risk_multiplier = float(
                 regime_policy.get("risk_multiplier", 0.0)
             )
@@ -222,6 +235,8 @@ class RiskEngine:
                     f"New risk is blocked in {assessment.market_regime} regime"
                 )
                 return assessment
+        else:
+            regime_policy = {}
 
         # --- 1. Daily loss limit ---
         if daily_pnl_pct <= -self.cfg.max_daily_loss:
@@ -343,13 +358,17 @@ class RiskEngine:
         calculated_rr = net_reward_dist / all_in_risk_dist
         assessment.risk_reward = round(calculated_rr, 4)
         assessment.execution_cost_per_unit = round(execution_cost_per_unit, 10)
+        if minimum_rr is not None:
+            if not math.isfinite(float(minimum_rr)) or not 1 <= float(minimum_rr) <= 20:
+                assessment.rejection_reason = "Minimum R:R must be between 1 and 20"
+                return assessment
         effective_min_rr = max(
             self.MIN_RR,
             float(regime_policy.get("min_rr", self.MIN_RR)) if regime_policy else self.MIN_RR,
             float(minimum_rr) if minimum_rr is not None else self.MIN_RR,
         )
-        if not math.isfinite(effective_min_rr) or not 1 <= effective_min_rr <= 20:
-            assessment.rejection_reason = "Minimum R:R must be between 1 and 20"
+        if not math.isfinite(effective_min_rr):
+            assessment.rejection_reason = "Minimum R:R must be a finite number"
             return assessment
         if calculated_rr < effective_min_rr:
             assessment.rr_ok = False
@@ -437,21 +456,21 @@ class RiskEngine:
 
         if drawdown_pct >= 10:
             assessment.tone = "cautious"
-            adjusted = min(base * 0.5, 0.5)
+            adjusted = min(base * self.DD_10_MULTIPLIER, self.DD_10_MAX_RISK_CAP_PCT)
             assessment.warnings.append(
                 f"Drawdown {drawdown_pct:.1f}% — reducing risk to {adjusted:.2f}%"
             )
             return adjusted
         elif drawdown_pct >= 5:
             assessment.tone = "cautious"
-            adjusted = min(base * 0.75, 0.75)
+            adjusted = min(base * self.DD_5_MULTIPLIER, self.DD_5_MAX_RISK_CAP_PCT)
             assessment.warnings.append(
                 f"Drawdown {drawdown_pct:.1f}% — reducing risk to {adjusted:.2f}%"
             )
             return adjusted
         elif drawdown_pct > 0:
             assessment.tone = "cautious"
-            return round(base * 0.9, 2)
+            return round(base * self.DD_LIGHT_MULTIPLIER, 2)
         else:
             assessment.tone = "normal"
             return base

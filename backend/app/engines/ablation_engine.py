@@ -1,4 +1,4 @@
-﻿"""
+"""
 Ablation Testing Engine
 Measures SQZ sizing value on top of the mandatory SMC+CVD setup edge.
 """
@@ -101,7 +101,7 @@ class AblationEngine:
         risk_per_trade_pct: float = 1.0,
         oos_fraction: float = 0.70,
     ) -> AblationStudySummary:
-        """Run all 4 ablation variants and compute marginal statistical contribution."""
+        """Run all defined ablation variants (baseline vs sizing bonus) and compute marginal statistical contribution."""
         if market_data is None or market_data.empty:
             raise ValueError("Ablation study requires non-empty market data")
 
