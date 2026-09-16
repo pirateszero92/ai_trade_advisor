@@ -725,6 +725,9 @@ class SMCEngine:
         internal_obs: list[Zone] = []
         breaker_blocks: list[Zone] = []
         fvgs: list[Zone] = []
+        active_obs: list[Zone] = []
+        active_breakers: list[Zone] = []
+        active_fvgs: list[Zone] = []
         swing_structures: list[StructureBreak] = []
         internal_structures: list[StructureBreak] = []
 
@@ -961,19 +964,19 @@ class SMCEngine:
                     sub_highs = parsed_highs[internal_high_idx:i]
                     min_pos = int(np.argmin(sub_lows))
                     ob_idx = internal_high_idx + min_pos
-                    internal_obs.append(
-                        Zone(
-                            kind="ob",
-                            direction="bullish",
-                            top=float(sub_highs[min_pos]),
-                            bottom=float(sub_lows[min_pos]),
-                            index=ob_idx,
-                            timestamp=timestamps[ob_idx],
-                            source="internal",
-                            confirmed_index=i,
-                            confirmed_timestamp=timestamps[i],
-                        )
+                    new_ob = Zone(
+                        kind="ob",
+                        direction="bullish",
+                        top=float(sub_highs[min_pos]),
+                        bottom=float(sub_lows[min_pos]),
+                        index=ob_idx,
+                        timestamp=timestamps[ob_idx],
+                        source="internal",
+                        confirmed_index=i,
+                        confirmed_timestamp=timestamps[i],
                     )
+                    internal_obs.append(new_ob)
+                    active_obs.append(new_ob)
 
             if (
                 not np.isnan(internal_low_lvl)
@@ -1006,19 +1009,19 @@ class SMCEngine:
                     sub_lows = parsed_lows[internal_low_idx:i]
                     max_pos = int(np.argmax(sub_highs))
                     ob_idx = internal_low_idx + max_pos
-                    internal_obs.append(
-                        Zone(
-                            kind="ob",
-                            direction="bearish",
-                            top=float(sub_highs[max_pos]),
-                            bottom=float(sub_lows[max_pos]),
-                            index=ob_idx,
-                            timestamp=timestamps[ob_idx],
-                            source="internal",
-                            confirmed_index=i,
-                            confirmed_timestamp=timestamps[i],
-                        )
+                    new_ob = Zone(
+                        kind="ob",
+                        direction="bearish",
+                        top=float(sub_highs[max_pos]),
+                        bottom=float(sub_lows[max_pos]),
+                        index=ob_idx,
+                        timestamp=timestamps[ob_idx],
+                        source="internal",
+                        confirmed_index=i,
+                        confirmed_timestamp=timestamps[i],
                     )
+                    internal_obs.append(new_ob)
+                    active_obs.append(new_ob)
 
             # --- D. Structure Breakout & OB Creation (Swing) ---
             if (
@@ -1047,19 +1050,19 @@ class SMCEngine:
                     sub_highs = parsed_highs[swing_high_idx:i]
                     min_pos = int(np.argmin(sub_lows))
                     ob_idx = swing_high_idx + min_pos
-                    swing_obs.append(
-                        Zone(
-                            kind="ob",
-                            direction="bullish",
-                            top=float(sub_highs[min_pos]),
-                            bottom=float(sub_lows[min_pos]),
-                            index=ob_idx,
-                            timestamp=timestamps[ob_idx],
-                            source="swing",
-                            confirmed_index=i,
-                            confirmed_timestamp=timestamps[i],
-                        )
+                    new_ob = Zone(
+                        kind="ob",
+                        direction="bullish",
+                        top=float(sub_highs[min_pos]),
+                        bottom=float(sub_lows[min_pos]),
+                        index=ob_idx,
+                        timestamp=timestamps[ob_idx],
+                        source="swing",
+                        confirmed_index=i,
+                        confirmed_timestamp=timestamps[i],
                     )
+                    swing_obs.append(new_ob)
+                    active_obs.append(new_ob)
 
             if (
                 not np.isnan(swing_low_lvl)
@@ -1087,61 +1090,73 @@ class SMCEngine:
                     sub_lows = parsed_lows[swing_low_idx:i]
                     max_pos = int(np.argmax(sub_highs))
                     ob_idx = swing_low_idx + max_pos
-                    swing_obs.append(
-                        Zone(
-                            kind="ob",
-                            direction="bearish",
-                            top=float(sub_highs[max_pos]),
-                            bottom=float(sub_lows[max_pos]),
-                            index=ob_idx,
-                            timestamp=timestamps[ob_idx],
-                            source="swing",
-                            confirmed_index=i,
-                            confirmed_timestamp=timestamps[i],
-                        )
+                    new_ob = Zone(
+                        kind="ob",
+                        direction="bearish",
+                        top=float(sub_highs[max_pos]),
+                        bottom=float(sub_lows[max_pos]),
+                        index=ob_idx,
+                        timestamp=timestamps[ob_idx],
+                        source="swing",
+                        confirmed_index=i,
+                        confirmed_timestamp=timestamps[i],
                     )
+                    swing_obs.append(new_ob)
+                    active_obs.append(new_ob)
 
             # --- E. Order Block Mitigation (Deep Mitigation: Low/High violation) & Breaker Creation ---
-            for ob in swing_obs + internal_obs:
-                if not ob.mitigated and ob.index < i:
-                    if ob.direction == "bullish" and c_low < ob.bottom:
-                        ob.mitigated = True
-                        breaker_blocks.append(
-                            Zone(
-                                kind="breaker",
-                                direction="bearish",
-                                top=float(ob.top),
-                                bottom=float(ob.bottom),
-                                index=int(ob.index),
-                                timestamp=ob.timestamp,
-                                source=ob.source,
-                                confirmed_index=i,
-                                confirmed_timestamp=timestamps[i],
-                            )
-                        )
-                    elif ob.direction == "bearish" and c_high > ob.top:
-                        ob.mitigated = True
-                        breaker_blocks.append(
-                            Zone(
-                                kind="breaker",
-                                direction="bullish",
-                                top=float(ob.top),
-                                bottom=float(ob.bottom),
-                                index=int(ob.index),
-                                timestamp=ob.timestamp,
-                                source=ob.source,
-                                confirmed_index=i,
-                                confirmed_timestamp=timestamps[i],
-                            )
-                        )
+            rem_active_obs: list[Zone] = []
+            for ob in active_obs:
+                if ob.index >= i:
+                    rem_active_obs.append(ob)
+                    continue
+                if ob.direction == "bullish" and c_low < ob.bottom:
+                    ob.mitigated = True
+                    b = Zone(
+                        kind="breaker",
+                        direction="bearish",
+                        top=float(ob.top),
+                        bottom=float(ob.bottom),
+                        index=int(ob.index),
+                        timestamp=ob.timestamp,
+                        source=ob.source,
+                        confirmed_index=i,
+                        confirmed_timestamp=timestamps[i],
+                    )
+                    breaker_blocks.append(b)
+                    active_breakers.append(b)
+                elif ob.direction == "bearish" and c_high > ob.top:
+                    ob.mitigated = True
+                    b = Zone(
+                        kind="breaker",
+                        direction="bullish",
+                        top=float(ob.top),
+                        bottom=float(ob.bottom),
+                        index=int(ob.index),
+                        timestamp=ob.timestamp,
+                        source=ob.source,
+                        confirmed_index=i,
+                        confirmed_timestamp=timestamps[i],
+                    )
+                    breaker_blocks.append(b)
+                    active_breakers.append(b)
+                else:
+                    rem_active_obs.append(ob)
+            active_obs = rem_active_obs
 
             # Breaker Mitigation (invalidated when broken through on the other side)
-            for b in breaker_blocks:
-                if not b.mitigated and b.confirmed_index < i:
-                    if b.direction == "bullish" and c_low < b.bottom:
-                        b.mitigated = True
-                    elif b.direction == "bearish" and c_high > b.top:
-                        b.mitigated = True
+            rem_active_breakers: list[Zone] = []
+            for b in active_breakers:
+                if b.confirmed_index >= i:
+                    rem_active_breakers.append(b)
+                    continue
+                if b.direction == "bullish" and c_low < b.bottom:
+                    b.mitigated = True
+                elif b.direction == "bearish" and c_high > b.top:
+                    b.mitigated = True
+                else:
+                    rem_active_breakers.append(b)
+            active_breakers = rem_active_breakers
 
             # --- F. Fair Value Gaps (3-Bar Gap Detection & Mitigation) ---
             if i >= 2:
@@ -1164,18 +1179,18 @@ class SMCEngine:
                     fvg_top = float(lows[i])
                     fvg_bottom = float(highs[i - 2])
                     if fvg_top > fvg_bottom:
-                        fvgs.append(
-                            Zone(
-                                kind="fvg",
-                                direction="bullish",
-                                top=fvg_top,
-                                bottom=fvg_bottom,
-                                index=i - 1,
-                                timestamp=timestamps[i - 1],
-                                confirmed_index=i,
-                                confirmed_timestamp=timestamps[i],
-                            )
+                        new_fvg = Zone(
+                            kind="fvg",
+                            direction="bullish",
+                            top=fvg_top,
+                            bottom=fvg_bottom,
+                            index=i - 1,
+                            timestamp=timestamps[i - 1],
+                            confirmed_index=i,
+                            confirmed_timestamp=timestamps[i],
                         )
+                        fvgs.append(new_fvg)
+                        active_fvgs.append(new_fvg)
                 # Bearish FVG: current candle high < 2 bars ago low
                 elif (
                     highs[i] < lows[i - 2]
@@ -1185,26 +1200,32 @@ class SMCEngine:
                     fvg_top = float(lows[i - 2])
                     fvg_bottom = float(highs[i])
                     if fvg_top > fvg_bottom:
-                        fvgs.append(
-                            Zone(
-                                kind="fvg",
-                                direction="bearish",
-                                top=fvg_top,
-                                bottom=fvg_bottom,
-                                index=i - 1,
-                                timestamp=timestamps[i - 1],
-                                confirmed_index=i,
-                                confirmed_timestamp=timestamps[i],
-                            )
+                        new_fvg = Zone(
+                            kind="fvg",
+                            direction="bearish",
+                            top=fvg_top,
+                            bottom=fvg_bottom,
+                            index=i - 1,
+                            timestamp=timestamps[i - 1],
+                            confirmed_index=i,
+                            confirmed_timestamp=timestamps[i],
                         )
+                        fvgs.append(new_fvg)
+                        active_fvgs.append(new_fvg)
 
             # FVG Mitigation
-            for fvg_item in fvgs:
-                if not fvg_item.mitigated and fvg_item.index < i:
-                    if fvg_item.direction == "bullish" and c_low < fvg_item.bottom:
-                        fvg_item.mitigated = True
-                    elif fvg_item.direction == "bearish" and c_high > fvg_item.top:
-                        fvg_item.mitigated = True
+            rem_active_fvgs: list[Zone] = []
+            for fvg_item in active_fvgs:
+                if fvg_item.index >= i:
+                    rem_active_fvgs.append(fvg_item)
+                    continue
+                if fvg_item.direction == "bullish" and c_low < fvg_item.bottom:
+                    fvg_item.mitigated = True
+                elif fvg_item.direction == "bearish" and c_high > fvg_item.top:
+                    fvg_item.mitigated = True
+                else:
+                    rem_active_fvgs.append(fvg_item)
+            active_fvgs = rem_active_fvgs
 
         # --- Assign Outputs to SMCSignal ---
         signal.swing_highs = swing_highs_list if swing_highs_list else self._detect_swing_points(df, eff_swing_length)[0]
