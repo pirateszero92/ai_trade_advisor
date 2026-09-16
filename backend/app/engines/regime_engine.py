@@ -381,9 +381,9 @@ class MarketRegimeEngine:
         # Gaussian HMM dynamic regime estimation
         try:
             from app.engines.hmm_regime_engine import GaussianHMMRegimeEngine
-            if len(df) >= 30 and {"high", "low", "close", "volume"}.issubset(set(df.columns)):
+            if len(frame) >= 30 and {"high", "low", "close"}.issubset(set(frame.columns)):
                 hmm = GaussianHMMRegimeEngine(n_states=3, n_iter=10)
-                hmm_state = hmm.fit_predict(df)
+                hmm_state = hmm.fit_predict(frame)
                 metrics["hmm_dominant_state"] = hmm_state.dominant_state
                 metrics["hmm_probabilities"] = hmm_state.state_probabilities
                 prob = hmm_state.state_probabilities.get(hmm_state.dominant_state, 0.0)

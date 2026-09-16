@@ -241,3 +241,25 @@ def test_smc_analysis_serializes_market_regime():
     serialized = signal.to_dict()
     assert serialized["market_regime"]["regime"] == "trending"
     assert serialized["market_regime"]["policy"]["risk_multiplier"] == 1.0
+
+
+def test_regime_engine_handles_case_insensitivity_and_missing_volume_for_hmm():
+    signal = _signal()
+    # Create DataFrame with Title Case columns and WITHOUT volume column
+    frame_no_vol = _frame(np.linspace(100.0, 150.0, 140))
+    del frame_no_vol["volume"]
+    frame_no_vol.rename(
+        columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"},
+        inplace=True,
+    )
+
+    result = MarketRegimeEngine().classify(frame_no_vol, signal, _nonvolatile_config())
+    assert result["ready"] is True
+    # HMM dominant state should be successfully evaluated, not "unknown"
+    assert result["metrics"]["hmm_dominant_state"] in {
+        "bullish_trend",
+        "bearish_trend",
+        "ranging_chop",
+    }
+    assert len(result["metrics"]["hmm_probabilities"]) == 3
+
