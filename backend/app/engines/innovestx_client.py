@@ -38,6 +38,11 @@ class InnovestXClient:
     def is_configured(self) -> bool:
         return bool(self.api_key and self.api_secret)
 
+    @staticmethod
+    def _clean_symbol(s: str) -> str:
+        """Sanitize market symbol by stripping slashes, underscores, and dashes."""
+        return s.replace("/", "").replace("_", "").replace("-", "").upper()
+
     def _generate_signature(
         self,
         method: str,
@@ -132,7 +137,15 @@ class InnovestXClient:
                         "status_code": response.status_code,
                         "error": response.text,
                     }
-                return response.json()
+                try:
+                    return response.json()
+                except (json.JSONDecodeError, ValueError) as exc:
+                    logger.error(f"[InnovestX] Failed to parse JSON response on {path}: {exc}")
+                    return {
+                        "success": False,
+                        "status_code": response.status_code,
+                        "error": f"Invalid JSON response: {response.text[:200]}",
+                    }
             except httpx.RequestError as e:
                 logger.error(f"[InnovestX] Network error: {e}")
                 return {"success": False, "error": str(e)}
@@ -181,7 +194,7 @@ class InnovestXClient:
 
     async def get_orderbook(self, symbol: str) -> Dict[str, Any]:
         """Fetch Level 2 Orderbook for a symbol (e.g. BTCTHB, ETHTHB, XAUTTHB)."""
-        clean_symbol = symbol.replace("/", "").replace("_", "").replace("-", "").upper()
+        clean_symbol = self._clean_symbol(symbol)
         return await self._request("POST", "/api/v1/digital-asset/orderbook/lvl2", json_data={"symbol": clean_symbol})
 
     async def get_live_ticker(self, symbol: str) -> Optional[Dict[str, Any]]:
@@ -275,7 +288,7 @@ class InnovestXClient:
         Endpoint: POST /api/v1/digital-asset/order/fee/inquiry
         side: 0=Buy, 1=Sell
         """
-        clean_symbol = symbol.replace("/", "").replace("_", "").replace("-", "").upper()
+        clean_symbol = self._clean_symbol(symbol)
         is_buy = str(side).upper() == "BUY"
         payload = {
             "symbol": clean_symbol,
@@ -289,7 +302,7 @@ class InnovestXClient:
         """Fetch trade order history."""
         payload = {}
         if symbol:
-            payload["symbol"] = symbol.replace("/", "").replace("_", "").upper()
+            payload["symbol"] = self._clean_symbol(symbol)
         return await self._request("POST", "/api/v1/digital-asset/order/history/inquiry", json_data=payload)
 
     async def place_order(
@@ -307,7 +320,7 @@ class InnovestXClient:
         side: "BUY" or "SELL" (maps to 0=Buy, 1=Sell)
         order_type: "MARKET" or "LIMIT" (maps to 1=Market, 2=Limit)
         """
-        clean_symbol = symbol.replace("/", "").replace("_", "").upper()
+        clean_symbol = self._clean_symbol(symbol)
         is_buy = side.upper() == "BUY"
         is_market = order_type.upper() == "MARKET"
 

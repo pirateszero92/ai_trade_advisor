@@ -541,7 +541,7 @@ class MarketDataEngine:
                 if last_p > 0.0:
                     chg = ((last_p - prev_c) / prev_c) * 100 if prev_c > 0 else 0.0
                     if is_thb:
-                        rate = _USD_THB_CACHE[1] or 34.0
+                        rate = _get_usd_thb_rate_cached()
                         last_p = round(last_p * rate, 4 if last_p * rate < 100 else 2)
                         day_h = round(day_h * rate, 4 if day_h * rate < 100 else 2)
                         day_l = round(day_l * rate, 4 if day_l * rate < 100 else 2)
@@ -757,7 +757,7 @@ class MarketDataEngine:
             res_df = df[["open", "high", "low", "close", "volume"]].tail(limit).copy()
 
         if is_thb and not res_df.empty:
-            rate = _USD_THB_CACHE[1] or 34.0
+            rate = _get_usd_thb_rate_cached()
             for col in ["open", "high", "low", "close"]:
                 res_df[col] = res_df[col] * rate
             last_c = res_df["close"].iloc[-1]

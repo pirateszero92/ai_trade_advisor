@@ -74,15 +74,24 @@ class SentimentDerivativesEngine:
     _cache: dict[str, tuple[float, DerivativesSentimentResult]] = {}
     _cache_ttl_seconds: float = 60.0
     _client: httpx.AsyncClient | None = None
+    _lock: asyncio.Lock | None = None
+
+    @classmethod
+    def _get_lock(cls) -> asyncio.Lock:
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        return cls._lock
 
     @classmethod
     @asynccontextmanager
     async def _shared_client(cls):
         if cls._client is None or cls._client.is_closed:
-            cls._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(2.5, connect=1.0),
-                limits=httpx.Limits(max_connections=12, max_keepalive_connections=12),
-            )
+            async with cls._get_lock():
+                if cls._client is None or cls._client.is_closed:
+                    cls._client = httpx.AsyncClient(
+                        timeout=httpx.Timeout(2.5, connect=1.0),
+                        limits=httpx.Limits(max_connections=12, max_keepalive_connections=12),
+                    )
         yield cls._client
 
     @classmethod
@@ -153,6 +162,7 @@ class SentimentDerivativesEngine:
                     client.get(ratio_url),
                     return_exceptions=True,
                 )
+                parsed_payloads = []
                 for response in (res_oi, res_funding, res_ratio):
                     if isinstance(response, Exception):
                         raise ValueError("Incomplete derivatives response") from response
@@ -160,39 +170,36 @@ class SentimentDerivativesEngine:
                     payload = response.json()
                     if not isinstance(payload, list) or not payload:
                         raise ValueError("Missing derivatives observations")
-                if len(res_oi.json()) < 2:
+                    parsed_payloads.append(payload)
+
+                oi_data, funding_data, ratio_data = parsed_payloads[0], parsed_payloads[1], parsed_payloads[2]
+                if len(oi_data) < 2:
                     raise ValueError("Insufficient OI history")
 
                 oi_val = 0.0
                 oi_val_usd = 0.0
                 oi_delta_pct = 0.0
-                if not isinstance(res_oi, Exception) and res_oi.status_code == 200:
-                    oi_data = res_oi.json()
-                    if len(oi_data) >= 1:
-                        oi_val = float(oi_data[-1].get("sumOpenInterest", 0.0))
-                        oi_val_usd = float(oi_data[-1].get("sumOpenInterestValue", 0.0))
-                    if len(oi_data) >= 2:
-                        prev_oi = float(oi_data[-2].get("sumOpenInterest", 0.0))
-                        if prev_oi > 0:
-                            oi_delta_pct = ((oi_val - prev_oi) / prev_oi) * 100.0
+                if len(oi_data) >= 1:
+                    oi_val = float(oi_data[-1].get("sumOpenInterest", 0.0))
+                    oi_val_usd = float(oi_data[-1].get("sumOpenInterestValue", 0.0))
+                if len(oi_data) >= 2:
+                    prev_oi = float(oi_data[-2].get("sumOpenInterest", 0.0))
+                    if prev_oi > 0:
+                        oi_delta_pct = ((oi_val - prev_oi) / prev_oi) * 100.0
 
                 funding_rate = 0.0
-                if not isinstance(res_funding, Exception) and res_funding.status_code == 200:
-                    funding_data = res_funding.json()
-                    if funding_data and len(funding_data) > 0:
-                        funding_rate = float(funding_data[-1].get("fundingRate", 0.0))
+                if funding_data and len(funding_data) > 0:
+                    funding_rate = float(funding_data[-1].get("fundingRate", 0.0))
 
                 annualized_funding = funding_rate * 3 * 365 * 100.0
 
                 top_long = 0.50
                 top_short = 0.50
                 ls_ratio = 1.0
-                if not isinstance(res_ratio, Exception) and res_ratio.status_code == 200:
-                    ratio_data = res_ratio.json()
-                    if ratio_data and len(ratio_data) > 0:
-                        top_long = float(ratio_data[-1].get("longAccount", 0.50))
-                        top_short = float(ratio_data[-1].get("shortAccount", 0.50))
-                        ls_ratio = float(ratio_data[-1].get("longShortRatio", 1.0))
+                if ratio_data and len(ratio_data) > 0:
+                    top_long = float(ratio_data[-1].get("longAccount", 0.50))
+                    top_short = float(ratio_data[-1].get("shortAccount", 0.50))
+                    ls_ratio = float(ratio_data[-1].get("longShortRatio", 1.0))
 
                 return DerivativesSentimentResult(
                     symbol=original_symbol,

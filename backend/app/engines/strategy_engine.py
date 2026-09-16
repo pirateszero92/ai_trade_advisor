@@ -160,7 +160,7 @@ class StrategyEngine:
         ):
             if value:
                 result.warnings.append(label)
-        result.score = int(getattr(signal, "confluence_score", 0))
+        result.score = int(getattr(signal, "confluence_score", getattr(signal, "confluence", 0)))
         result.passed_checks.extend(["Causal SMC setup confirmed", "Exchange-derived CVD confirmation aligned",
                                      f"Structural R:R {signal.risk_reward:.2f} OK"])
         result.direction = direction if not result.rejection_reasons else "wait"
@@ -172,7 +172,11 @@ class StrategyEngine:
         logger.info(f"[Strategy] Reloaded: {self._strategy.get('name')}")
 
     # ------------------------------------------------------------------
-    # Direction checks
+    # Legacy heuristic checks (DEPRECATED - Phase 1-3 Remediation)
+    #
+    # The methods below are retained for backward compatibility and offline
+    # simulation studies. In the live/canonical pipeline, TriCoreSetupEngine
+    # (tri_core_engine.py) is the sole deterministic execution authority.
     # ------------------------------------------------------------------
 
     @staticmethod

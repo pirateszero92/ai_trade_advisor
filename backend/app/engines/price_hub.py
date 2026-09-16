@@ -271,34 +271,37 @@ class PriceHub:
 
         if event.event_type == "trade":
             clean = event.norm_symbol
-            flow = self._order_flow.setdefault(clean, {
-                "symbol": event.symbol,
-                "norm_symbol": clean,
-                "buy_volume": 0.0,
-                "sell_volume": 0.0,
-                "volume_delta": 0.0,
-                "delta_ratio": 0.0,
-                "cvd": 0.0,
-                "trade_count": 0,
-                "source": "binance_aggressor_trade",
-                "first_exchange_timestamp": event.exchange_timestamp_ms / 1000.0,
-            })
             quantity = float(event.quantity or 0.0)
             signed_quantity = quantity if event.aggressor_side == "buy" else -quantity
-            if signed_quantity >= 0:
-                flow["buy_volume"] += quantity
-            else:
-                flow["sell_volume"] += quantity
-            flow["volume_delta"] = flow["buy_volume"] - flow["sell_volume"]
-            total = flow["buy_volume"] + flow["sell_volume"]
-            flow["delta_ratio"] = flow["volume_delta"] / total if total > 0 else 0.0
-            flow["cvd"] += signed_quantity
-            flow["trade_count"] += 1
-            flow["last_sequence"] = event.sequence
-            flow["last_exchange_timestamp"] = event.exchange_timestamp_ms / 1000.0
-            flow["last_received_timestamp"] = event.received_timestamp_ms / 1000.0
-            flow["recovered_events"] = int(flow.get("recovered_events", 0)) + int(event.recovered)
-            previous = self._prices.get(clean, {})
+            with self._lock:
+                flow = self._order_flow.setdefault(clean, {
+                    "symbol": event.symbol,
+                    "norm_symbol": clean,
+                    "buy_volume": 0.0,
+                    "sell_volume": 0.0,
+                    "volume_delta": 0.0,
+                    "delta_ratio": 0.0,
+                    "cvd": 0.0,
+                    "trade_count": 0,
+                    "source": "binance_aggressor_trade",
+                    "first_exchange_timestamp": event.exchange_timestamp_ms / 1000.0,
+                })
+                if signed_quantity >= 0:
+                    flow["buy_volume"] += quantity
+                else:
+                    flow["sell_volume"] += quantity
+                flow["volume_delta"] = flow["buy_volume"] - flow["sell_volume"]
+                total = flow["buy_volume"] + flow["sell_volume"]
+                flow["delta_ratio"] = flow["volume_delta"] / total if total > 0 else 0.0
+                flow["cvd"] += signed_quantity
+                flow["trade_count"] += 1
+                flow["last_sequence"] = event.sequence
+                flow["last_exchange_timestamp"] = event.exchange_timestamp_ms / 1000.0
+                flow["last_received_timestamp"] = event.received_timestamp_ms / 1000.0
+                flow["recovered_events"] = int(flow.get("recovered_events", 0)) + int(event.recovered)
+                flow_copy = dict(flow)
+                previous = dict(self._prices.get(clean, {}))
+
             self.update_price(
                 event.symbol,
                 float(event.price or 0),
@@ -311,10 +314,10 @@ class PriceHub:
                 extra={
                     "aggressor_side": event.aggressor_side,
                     "last_trade_quantity": quantity,
-                    "volume_delta": flow["volume_delta"],
-                    "delta_ratio": flow["delta_ratio"],
-                    "cvd": flow["cvd"],
-                    "flow_source": flow["source"],
+                    "volume_delta": flow_copy["volume_delta"],
+                    "delta_ratio": flow_copy["delta_ratio"],
+                    "cvd": flow_copy["cvd"],
+                    "flow_source": flow_copy["source"],
                 },
             )
             return
@@ -340,19 +343,20 @@ class PriceHub:
             "is_closed": event.is_closed,
             "source": event.source,
         }
-        self._live_candles[key] = candle
-        if event.is_closed and event.candle_open_time_ms is not None:
-            candles = self._closed_candles.setdefault(key, OrderedDict())
-            previous_cvd = next(reversed(candles.values())).get("cvd", 0.0) if candles else 0.0
-            existing = candles.get(event.candle_open_time_ms)
-            candle["cvd"] = (
-                existing.get("cvd", previous_cvd + float(event.volume_delta or 0.0))
-                if existing else previous_cvd + float(event.volume_delta or 0.0)
-            )
-            candles[event.candle_open_time_ms] = candle
-            candles.move_to_end(event.candle_open_time_ms)
-            while len(candles) > self._max_closed_candles:
-                candles.popitem(last=False)
+        with self._lock:
+            self._live_candles[key] = candle
+            if event.is_closed and event.candle_open_time_ms is not None:
+                candles = self._closed_candles.setdefault(key, OrderedDict())
+                previous_cvd = next(reversed(candles.values())).get("cvd", 0.0) if candles else 0.0
+                existing = candles.get(event.candle_open_time_ms)
+                candle["cvd"] = (
+                    existing.get("cvd", previous_cvd + float(event.volume_delta or 0.0))
+                    if existing else previous_cvd + float(event.volume_delta or 0.0)
+                )
+                candles[event.candle_open_time_ms] = candle
+                candles.move_to_end(event.candle_open_time_ms)
+                while len(candles) > self._max_closed_candles:
+                    candles.popitem(last=False)
 
     def _crypto_symbols(self) -> set[str]:
         return {symbol for symbol in self._active_symbols if is_binance_spot_symbol(symbol)}
