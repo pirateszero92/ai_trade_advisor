@@ -155,6 +155,8 @@ class RiskEngine:
 
     MIN_RR = 1.5              # Minimum acceptable risk-reward ratio
     SL_MAX_PCT = 0.05         # Maximum SL distance as % of entry (5 %)
+    SL_MIN_PCT = 0.0025       # Minimum SL distance as % of entry (0.25 %) to avoid fee explosion & 1-tick noise
+    MAX_FEE_TO_RISK_RATIO = 0.50  # Max ratio of per-unit execution cost to SL distance (50%)
     MAX_CLUSTER_POSITIONS = 2 # Max concurrent positions in same correlated cluster
 
     def __init__(self):
@@ -310,6 +312,25 @@ class RiskEngine:
                 f"SL is too wide ({sl_pct*100:.2f}% of entry; max {effective_max_stop_pct*100:.2f}%)"
             )
             return assessment
+
+        if sl_pct < self.SL_MIN_PCT:
+            assessment.sl_valid = False
+            assessment.approved = False
+            assessment.rejection_reason = (
+                f"SL is too tight ({sl_pct*100:.3f}% of entry; min {self.SL_MIN_PCT*100:.2f}%); "
+                "market noise and execution costs exceed structural risk margin"
+            )
+            return assessment
+
+        if execution_cost_per_unit > 0 and sl_dist > 0:
+            fee_to_risk = execution_cost_per_unit / sl_dist
+            if fee_to_risk > self.MAX_FEE_TO_RISK_RATIO:
+                assessment.approved = False
+                assessment.rejection_reason = (
+                    f"Execution cost too high relative to SL distance "
+                    f"({fee_to_risk*100:.1f}% > {self.MAX_FEE_TO_RISK_RATIO*100:.0f}%)"
+                )
+                return assessment
 
         # --- 5. R:R check ---
         # Costs belong in both sides of the expectancy equation: they increase
