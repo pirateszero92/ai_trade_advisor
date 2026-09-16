@@ -496,7 +496,7 @@ async def test_auto_be_exit_covers_modeled_fee_and_slippage(tmp_path, direction)
 
     assert closed["status"] == "closed"
     assert "Breakeven Shield" in closed["close_reason"]
-    assert closed["realized_pnl_net"] >= -0.00001
+    assert closed["realized_pnl_net"] > 0
     await oms.stop()
     await engine.dispose()
 
@@ -663,5 +663,69 @@ async def test_trailing_stop_exits_do_not_trip_stop_loss_circuit_breaker(tmp_pat
 
     await oms.stop()
     await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("direction", ["long", "short"])
+async def test_order_auto_assigns_tp1_and_locks_profit_before_breakeven(tmp_path, direction):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6AUTOTP1{direction.upper()}{uuid.uuid4().hex[:4]}/USDT"
+    payload = _order_payload(direction=direction, symbol=symbol)
+    entry = 100.0
+    sl = 95.0 if direction == "long" else 105.0
+    tp = 120.0 if direction == "long" else 80.0
+    payload.update({
+        "entry": entry,
+        "stop_loss": sl,
+        "take_profit": tp,
+        "position_size": 10.0,
+        "auto_be": True,
+    })
+    # Do NOT pass take_profit_1 explicitly — verify it is auto-assigned at 1.0R
+    opened = await oms.place_order(payload)
+    assert opened["status"] == "open"
+    expected_tp1 = 105.0 if direction == "long" else 95.0
+    assert opened["take_profit_1"] == pytest.approx(expected_tp1, abs=0.01)
+    assert opened["tp1_filled"] is False
+
+    # 1. Price touches auto-assigned TP1 -> 50% partial close occurs
+    tick1 = (await oms.process_market_tick({
+        "symbol": symbol,
+        "price": expected_tp1,
+        "bid": expected_tp1 if direction == "long" else expected_tp1 - 0.01,
+        "ask": expected_tp1 + 0.01 if direction == "long" else expected_tp1,
+        "sequence": 601,
+        "source": "test_ws",
+        "received_timestamp": 1_787_776_601.0,
+    }))[0]
+
+    assert tick1["status"] == "open"
+    assert tick1["remaining_quantity"] == pytest.approx(5.0, abs=0.01)
+    assert tick1["tp1_filled"] is True
+    # Realized profit from TP1 must be locked into cash immediately!
+    assert tick1["realized_pnl_net"] > 0
+    # Stop loss should be advanced to Breakeven Shield
+    assert tick1["protection_stage"] == "breakeven"
+
+    # 2. Market bounces back to Breakeven SL -> Remaining 50% exits with guaranteed positive net profit
+    be_sl = tick1["stop_loss"]
+    closed = (await oms.process_market_tick({
+        "symbol": symbol,
+        "price": be_sl,
+        "bid": be_sl if direction == "long" else be_sl - 0.01,
+        "ask": be_sl + 0.01 if direction == "long" else be_sl,
+        "sequence": 602,
+        "source": "test_ws",
+        "received_timestamp": 1_787_776_602.0,
+    }))[0]
+
+    assert closed["status"] == "closed"
+    assert "Breakeven Shield" in closed["close_reason"]
+    # Total trade Net PnL must be strictly positive (profit in the bank)!
+    assert closed["realized_pnl_net"] > 0
+
+    await oms.stop()
+    await engine.dispose()
+
 
 

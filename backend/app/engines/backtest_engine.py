@@ -452,7 +452,7 @@ def simulate_execution(
                     assumptions.fee_bps * 2.0
                     + assumptions.spread_bps
                     + assumptions.slippage_bps * 2.0
-                ) / 10_000.0
+                ) / 10_000.0 + (risk_per_unit * 0.05)
                 candidate = (
                     average_entry + round_trip_cost
                     if direction == "long"

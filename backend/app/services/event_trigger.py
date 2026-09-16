@@ -389,10 +389,10 @@ class MarketMonitor:
                                 note = "📈 Trailing Stop (Locked +0.6R Profit)"
                         # Tier 1: Auto Breakeven Shield (at >= 1.0R)
                         elif auto_be and (r_multiple >= 1.0 or (tp > entry and current_price >= entry + (tp - entry) * 0.5)):
-                            cand_sl = round(entry * 1.0005, 6)
+                            cand_sl = round(entry * 1.0025, 6)
                             if cand_sl > sl:
                                 new_sl = cand_sl
-                                note = "🛡️ Breakeven Shield (1.0R Reached)"
+                                note = "🛡️ Breakeven Shield (1.0R Reached + Profit Buffer)"
 
                         if new_sl > sl and note:
                             if use_paper_oms:
@@ -439,10 +439,10 @@ class MarketMonitor:
                                 note = "📈 Trailing Stop (Locked +0.6R Profit)"
                         # Tier 1: Auto Breakeven Shield (at >= 1.0R)
                         elif auto_be and (r_multiple >= 1.0 or (tp < entry and current_price <= entry - (entry - tp) * 0.5)):
-                            cand_sl = round(entry * 0.9995, 6)
+                            cand_sl = round(entry * 0.9975, 6)
                             if cand_sl < sl or sl <= 0:
                                 new_sl = cand_sl
-                                note = "🛡️ Breakeven Shield (1.0R Reached)"
+                                note = "🛡️ Breakeven Shield (1.0R Reached + Profit Buffer)"
 
                         if (new_sl < sl or sl <= 0) and note:
                             if use_paper_oms:

@@ -64,7 +64,11 @@ class Settings(BaseSettings):
     paper_oms_max_volume_participation: float = Field(default=0.01, gt=0.0, le=1.0)
     paper_oms_fallback_partial_fill_ratio: float = Field(default=0.35, gt=0.0, le=1.0)
     paper_oms_auto_be_trigger_r: float = Field(default=1.0, ge=0.5, le=5.0)
+    paper_oms_auto_be_buffer_r: float = Field(default=0.05, ge=0.0, le=0.5)
     paper_oms_trailing_min_step_r: float = Field(default=0.05, ge=0.01, le=1.0)
+    paper_oms_tp1_enabled: bool = Field(default=True)
+    paper_oms_tp1_ratio: float = Field(default=0.50, gt=0.0, le=1.0)
+    paper_oms_tp1_trigger_r: float = Field(default=1.0, ge=0.5, le=5.0)
 
     innovestx_api_key: str = ""
     innovestx_api_secret: str = ""

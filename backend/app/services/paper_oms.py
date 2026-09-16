@@ -728,6 +728,29 @@ class PaperOMS:
                         f"exceeds the 5x paper leverage limit ({float(equity * Decimal('5')):.2f})"
                     )
 
+                # Auto-assign Take Profit 1 (TP1) if enabled and not explicitly specified
+                assigned_tp1: float | None = None
+                if payload.get("take_profit_1") is not None:
+                    assigned_tp1 = float(payload["take_profit_1"])
+                elif payload.get("tp1") is not None:
+                    assigned_tp1 = float(payload["tp1"])
+                elif (
+                    isinstance(payload.get("source_payload"), dict)
+                    and payload.get("source_payload", {}).get("take_profit_1") is not None
+                ):
+                    assigned_tp1 = float(payload.get("source_payload", {}).get("take_profit_1"))
+                elif payload.get("tp1_enabled", cfg.paper_oms_tp1_enabled):
+                    risk_dist = abs(entry - stop_loss)
+                    tp_dist = abs(take_profit - entry)
+                    target_dist = min(
+                        risk_dist * _decimal(cfg.paper_oms_tp1_trigger_r),
+                        tp_dist * Decimal("0.5"),
+                    )
+                    if target_dist > EPSILON:
+                        assigned_tp1 = float(
+                            entry + target_dist if direction == "long" else entry - target_dist
+                        )
+
                 position_id = str(uuid.uuid4())
                 position = PaperOMSPosition(
                     id=position_id,
@@ -777,20 +800,8 @@ class PaperOMS:
                         "entry_policy": str(payload.get("entry_policy", ""))[:40],
                         "policy_version": str(payload.get("policy_version", ""))[:80],
                         "calibration_status": str(payload.get("calibration_status", ""))[:40],
-                        "take_profit_1": (
-                            float(payload["take_profit_1"])
-                            if payload.get("take_profit_1") is not None
-                            else (
-                                float(payload["tp1"])
-                                if payload.get("tp1") is not None
-                                else (
-                                    float(payload.get("source_payload", {}).get("take_profit_1"))
-                                    if isinstance(payload.get("source_payload"), dict)
-                                    and payload.get("source_payload", {}).get("take_profit_1") is not None
-                                    else None
-                                )
-                            )
-                        ),
+                        "take_profit_1": assigned_tp1,
+                        "tp1_filled": False,
                     },
                 )
                 session.add(position)
@@ -1356,6 +1367,7 @@ class PaperOMS:
         if price <= ZERO:
             return []
         changed_ids: set[str] = set()
+        cfg = get_settings()
         async with self._session_factory() as session:
             try:
                 account = await self._active_account(session, lock=True)
@@ -1430,7 +1442,8 @@ class PaperOMS:
                     if tp1_price > ZERO and not tp1_filled:
                         tp1_hit = (bid >= tp1_price) if position.direction == "long" else (ask <= tp1_price)
                         if tp1_hit:
-                            tp1_qty = _decimal(position.remaining_quantity) * Decimal("0.5")
+                            tp1_ratio = _decimal(cfg.paper_oms_tp1_ratio)
+                            tp1_qty = _decimal(position.remaining_quantity) * tp1_ratio
                             if tp1_qty > EPSILON:
                                 # Cancel any active entry remainder before TP1 partial reduce
                                 active_entry = await self._active_entry_order(session, account.id, position.id, lock=True)
@@ -1455,7 +1468,7 @@ class PaperOMS:
                                     requested_quantity=tp1_qty,
                                     filled_quantity=ZERO,
                                     remaining_quantity=tp1_qty,
-                                    close_reason="Take Profit 1 (TP1 50% Hit) 🎯",
+                                    close_reason=f"Take Profit 1 (TP1 {int(float(cfg.paper_oms_tp1_ratio)*100)}% Hit) 🎯",
                                     submitted_at=_utcnow(),
                                     updated_at=_utcnow(),
                                     source_payload={
@@ -1627,21 +1640,28 @@ class PaperOMS:
             stage = "trailing_1_5r"
             note = "Trailing tier 1.5R: locked +0.6R (Structure-adaptive)"
         elif force_be or (position.auto_be and r_multiple >= _decimal(cfg.paper_oms_auto_be_trigger_r)):
-            # Universal Auto-BE: lock breakeven covering fee/slippage at +1.0R target
+            # Universal Auto-BE: lock breakeven covering fee/slippage/spread + guaranteed profit buffer
             opened = max(_decimal(position.opened_quantity), EPSILON)
             entry_fee_per_unit = _decimal(position.fees_total) / opened
             fee_rate = _decimal(cfg.paper_oms_fee_bps) / Decimal("10000")
             slippage_rate = _decimal(cfg.paper_oms_slippage_bps) / Decimal("10000")
+            half_spread = _decimal(cfg.paper_oms_spread_bps) / Decimal("20000")
+            buffer_r = _decimal(cfg.paper_oms_auto_be_buffer_r)
+            profit_buffer_per_unit = (risk * buffer_r) / opened if opened > ZERO else ZERO
+            # Guarantee profit buffer is at least 0.05% of entry (minimum 5 bps) so Net PnL is strictly positive
+            profit_buffer_per_unit = max(profit_buffer_per_unit, entry * Decimal("0.0005"))
+            unit_buffer = entry_fee_per_unit + (entry * half_spread) + profit_buffer_per_unit
+
             if position.direction == "long":
-                candidate = (entry + entry_fee_per_unit) / (
+                candidate = (entry + unit_buffer) / (
                     (Decimal("1") - slippage_rate) * (Decimal("1") - fee_rate)
                 )
             else:
-                candidate = (entry - entry_fee_per_unit) / (
+                candidate = (entry - unit_buffer) / (
                     (Decimal("1") + slippage_rate) * (Decimal("1") + fee_rate)
                 )
             stage = "breakeven"
-            note = "Auto-Breakeven: modeled fee/slippage covered"
+            note = f"Auto-Breakeven: fee/slippage covered + {float(buffer_r):.2f}R profit buffer"
         else:
             return False
 
