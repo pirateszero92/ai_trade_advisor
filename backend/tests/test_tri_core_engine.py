@@ -663,4 +663,77 @@ def test_nearest_target_selects_closest_obstacle():
     assert target_short == 95.0, f"Expected closest obstacle 95.0, got {target_short}"
 
 
+def test_range_opposing_target_locks_to_major_boundaries():
+    from app.engines.tri_core_engine import _range_opposing_target
+
+    signal = _signal()
+    # For Long, minor high is 105.0, but major supply order block is 135.0-140.0
+    signal.swing_highs = [
+        SwingPoint(index=5, price=105.0, kind="high", timestamp=pd.Timestamp.now(tz="UTC")),
+    ]
+    signal.order_blocks = [
+        Zone(kind="ob", direction="bearish", top=140.0, bottom=135.0, index=2, confirmed_index=3, source="swing"),
+    ]
+    target_long = _range_opposing_target(signal, "long", 100.0)
+    assert target_long == 135.0, f"Expected major supply boundary 135.0, got {target_long}"
+
+    # For Short, minor low is 95.0, but major demand order block is 70.0-75.0
+    signal.swing_lows = [
+        SwingPoint(index=5, price=95.0, kind="low", timestamp=pd.Timestamp.now(tz="UTC")),
+    ]
+    signal.order_blocks = [
+        Zone(kind="ob", direction="bullish", top=75.0, bottom=70.0, index=2, confirmed_index=3, source="swing"),
+    ]
+    target_short = _range_opposing_target(signal, "short", 100.0)
+    assert target_short == 75.0, f"Expected major demand boundary 75.0, got {target_short}"
+
+
+def test_range_boundary_ping_pong_long_creates_actionable_setup():
+    signal = _signal()
+    signal.liquidity_swept = False
+    signal.market_regime = {"regime": "ranging"}
+    signal.in_discount = True
+    signal.delta_ratio = 0.05
+    signal.cvd_divergence = "none"
+
+    # Bullish demand OB at 98.0-100.0
+    demand_ob = Zone(kind="ob", direction="bullish", top=100.0, bottom=98.0, index=10, confirmed_index=11, source="swing")
+    # Bearish supply OB at 120.0-125.0
+    supply_ob = Zone(kind="ob", direction="bearish", top=125.0, bottom=120.0, index=5, confirmed_index=6, source="swing")
+    signal.order_blocks = [demand_ob, supply_ob]
+
+    frame = _frame()
+    setup = TriCoreSetupEngine.evaluate(signal, frame, {"ping_pong_enabled": True, "minimum_rr": 2.0})
+    assert setup.actionable is True
+    assert setup.direction == "long"
+    assert setup.setup_type == "range_boundary_ping_pong"
+    assert setup.take_profit == 120.0
+    assert setup.stop_loss < 98.0
+    assert setup.risk_reward >= 2.0
+
+
+def test_range_boundary_ping_pong_short_creates_actionable_setup():
+    signal = _signal()
+    signal.liquidity_swept = False
+    signal.market_regime = {"regime": "ranging"}
+    signal.in_premium = True
+    signal.delta_ratio = -0.05
+    signal.cvd_divergence = "none"
+
+    # Bullish demand OB at 80.0-85.0
+    demand_ob = Zone(kind="ob", direction="bullish", top=85.0, bottom=80.0, index=5, confirmed_index=6, source="swing")
+    # Bearish supply OB at 100.0-102.0
+    supply_ob = Zone(kind="ob", direction="bearish", top=102.0, bottom=100.0, index=10, confirmed_index=11, source="swing")
+    signal.order_blocks = [demand_ob, supply_ob]
+
+    frame = _frame()
+    setup = TriCoreSetupEngine.evaluate(signal, frame, {"ping_pong_enabled": True, "minimum_rr": 2.0})
+    assert setup.actionable is True
+    assert setup.direction == "short"
+    assert setup.setup_type == "range_boundary_ping_pong"
+    assert setup.take_profit == 85.0
+    assert setup.stop_loss > 102.0
+    assert setup.risk_reward >= 2.0
+
+
 

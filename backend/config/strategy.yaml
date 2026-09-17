@@ -20,6 +20,8 @@ tri_core_policy:
   no_chase_max_extension_atr: 0.60
   zone_approach_distance_atr: 0.50
   minimum_rr: 2.0
+  ping_pong_enabled: true
+  target_anchor_mode: "opposing_boundary"
 
 # Canonical decision input used by both Chart and Proactive Scanner. Strategy
 # calculations must use completed candles only; the live quote is display and
@@ -179,6 +181,7 @@ regime_policy:
       require_liquidity_sweep: true
       require_volume_confirmation: false
       require_squeeze_fire: false
+      ping_pong_enabled: true
     volatile:
       entry_allowed: true
       min_confluence: 82

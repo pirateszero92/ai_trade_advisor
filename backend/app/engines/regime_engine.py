@@ -57,6 +57,7 @@ DEFAULT_REGIME_POLICY: dict[str, Any] = {
             "require_liquidity_sweep": False,
             "require_volume_confirmation": False,
             "require_squeeze_fire": False,
+            "ping_pong_enabled": False,
         },
         "ranging": {
             "entry_allowed": True,
@@ -67,6 +68,7 @@ DEFAULT_REGIME_POLICY: dict[str, Any] = {
             "require_liquidity_sweep": True,
             "require_volume_confirmation": False,
             "require_squeeze_fire": False,
+            "ping_pong_enabled": True,
         },
         "volatile": {
             "entry_allowed": True,
@@ -77,6 +79,7 @@ DEFAULT_REGIME_POLICY: dict[str, Any] = {
             "require_liquidity_sweep": False,
             "require_volume_confirmation": True,
             "require_squeeze_fire": False,
+            "ping_pong_enabled": False,
         },
         "compression": {
             "entry_allowed": False,
@@ -87,6 +90,7 @@ DEFAULT_REGIME_POLICY: dict[str, Any] = {
             "require_liquidity_sweep": False,
             "require_volume_confirmation": False,
             "require_squeeze_fire": True,
+            "ping_pong_enabled": False,
         },
         "unknown": {
             "entry_allowed": False,
@@ -97,6 +101,7 @@ DEFAULT_REGIME_POLICY: dict[str, Any] = {
             "require_liquidity_sweep": False,
             "require_volume_confirmation": False,
             "require_squeeze_fire": False,
+            "ping_pong_enabled": False,
         },
     },
 }
@@ -195,7 +200,7 @@ def validate_regime_policy_config(raw: Any) -> dict[str, Any]:
         for flag in (
             "entry_allowed", "require_direction_alignment",
             "require_liquidity_sweep", "require_volume_confirmation",
-            "require_squeeze_fire",
+            "require_squeeze_fire", "ping_pong_enabled",
         ):
             if not isinstance(merged[flag], bool):
                 raise ValueError(f"{regime}.{flag} must be boolean")
@@ -222,6 +227,7 @@ def validate_regime_policy_config(raw: Any) -> dict[str, Any]:
             "require_liquidity_sweep": merged["require_liquidity_sweep"],
             "require_volume_confirmation": merged["require_volume_confirmation"],
             "require_squeeze_fire": merged["require_squeeze_fire"],
+            "ping_pong_enabled": merged.get("ping_pong_enabled", False),
         }
     return {"version": 1, "classification": classification, "policies": policies}
 

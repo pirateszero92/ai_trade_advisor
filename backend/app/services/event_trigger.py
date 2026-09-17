@@ -658,6 +658,12 @@ class MarketMonitor:
             if not strat_res.approved:
                 reasons = "; ".join(strat_res.rejection_reasons[:3]) or "Strategy Gate rejected setup"
                 structure_summary = f"WAIT — {reasons}"
+            elif setup_type == "range_boundary_ping_pong":
+                target_str = f"${tp:.{price_decimals}f}" if tp > 0 else "กรอบตรงข้าม"
+                if direction == "long":
+                    structure_summary = f"กลยุทธ์ Ping-Pong ขา Long เข้าที่แนวรับ Demand โซน Discount มุ่งเป้าแนวต้านใหญ่ {target_str}"
+                else:
+                    structure_summary = f"กลยุทธ์ Ping-Pong ขา Short เข้าที่แนวต้าน Supply โซน Premium มุ่งเป้าแนวรับใหญ่ {target_str}"
             elif ltf_sig.liquidity_swept and ltf_sig.in_premium:
                 structure_summary = "เกิดการ Sweep สภาพคล่องเหนือ High ล่าสุดในโซน Premium (จุดกลับตัว Short-term)"
             elif ltf_sig.liquidity_swept and ltf_sig.in_discount:
