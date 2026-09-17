@@ -446,6 +446,53 @@ async def place_order(
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Unable to validate limit order against live price") from exc
 
+    # Pre-validate risk and account limits against trade snapshot prior to execution simulation
+    current_trades = await get_all_trades_async()
+    if req.idempotency_key:
+        existing = next(
+            (item for item in current_trades.values() if item.get("idempotency_key") == req.idempotency_key),
+            None,
+        )
+        if existing:
+            return dict(existing)
+
+    open_count = sum(1 for trade in current_trades.values() if trade.get("mode", "paper") == effective_mode and trade.get("status") in {"open", "pending"})
+    if open_count >= cfg.max_open_positions:
+        raise HTTPException(status_code=409, detail="Maximum open/pending position limit reached")
+
+    paper_cfg = _load_paper_config()
+    initial_capital = float(paper_cfg.get("initial_capital", 100000.0))
+    realized = sum(
+        float(trade.get("pnl", 0.0)) for trade in current_trades.values()
+        if trade.get("mode", "paper") == "paper" and trade.get("status") == "closed"
+    )
+    equity = max(initial_capital + realized, 0.0)
+    today_utc = datetime.now(timezone.utc).date()
+    daily_realized = 0.0
+    for trade in current_trades.values():
+        if trade.get("mode", "paper") != "paper" or trade.get("status") != "closed":
+            continue
+        try:
+            closed_at = datetime.fromisoformat(str(trade["closed_at"]).replace("Z", "+00:00"))
+            if closed_at.astimezone(timezone.utc).date() == today_utc:
+                daily_realized += float(trade.get("pnl", 0.0))
+        except (KeyError, TypeError, ValueError):
+            continue
+    daily_loss_limit = initial_capital * cfg.max_daily_loss / 100.0
+    if daily_realized <= -daily_loss_limit:
+        raise HTTPException(status_code=409, detail="Daily loss limit reached; new orders are disabled")
+
+    allowed_risk_pct = min(req.risk_pct, cfg.default_risk_per_trade)
+    allowed_risk = equity * allowed_risk_pct / 100.0
+    estimated_loss = abs(entry - sl) * effective_size
+    if estimated_loss > allowed_risk * 1.001:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Position risks {estimated_loss:.2f}, above allowed {allowed_risk:.2f} ({allowed_risk_pct:.2f}%)",
+        )
+    if entry * effective_size > equity * 5.0:
+        raise HTTPException(status_code=400, detail="Position notional exceeds the 5x paper leverage limit")
+
     try:
         result = await _paper_execution.place_order(
             symbol=req.symbol,
@@ -810,7 +857,7 @@ async def get_account_portfolio(
                             non_zero_assets.append({"symbol": prod, "amount": amt, "hold": hld})
 
                     total_equity = thb_cash + thb_hold
-                    masked_id = f"INVX-{innovestx_key[:6].upper()}...{innovestx_key[-4:].upper()}"
+                    masked_id = f"INVX-...{innovestx_key[-4:].upper()}"
 
                     # Filter ONLY Live InnovestX trades
                     live_closed = [t for t in trades_snapshot.values() if t.get("status") == "closed" and str(t.get("mode", "")).lower() == "live" and str(t.get("broker", "")).lower() == "innovestx"]

@@ -35,8 +35,21 @@ MAX_WS_MESSAGE_BYTES = 64 * 1024
 ALLOWED_CHANNELS = {"tickers", "trades", "signals"}
 
 
+_connection_lock = asyncio.Lock()
+
+
 def _at_connection_limit() -> bool:
     return len(_connections | _stream_clients | _chat_clients) >= MAX_WS_CONNECTIONS
+
+
+async def _try_acquire_connection_slot(websocket: WebSocket, client_set: set[WebSocket]) -> bool:
+    """Atomically check connection limit and register client to eliminate TOCTOU race."""
+    async with _connection_lock:
+        if len(_connections | _stream_clients | _chat_clients) >= MAX_WS_CONNECTIONS:
+            return False
+        client_set.add(websocket)
+        _send_locks[websocket] = asyncio.Lock()
+        return True
 
 
 def _remove_client(websocket: WebSocket) -> None:
@@ -121,14 +134,18 @@ async def ws_stream(websocket: WebSocket):
         await websocket.accept()
         await websocket.close(code=4001, reason="Unauthorized")
         return
-    if _at_connection_limit():
+    acquired = await _try_acquire_connection_slot(websocket, _stream_clients)
+    if not acquired:
         await websocket.accept(subprotocol=auth_protocol)
         await websocket.close(code=1013, reason="Server connection limit reached")
         return
 
-    await websocket.accept(subprotocol=auth_protocol)
-    _send_locks[websocket] = asyncio.Lock()
-    _stream_clients.add(websocket)
+    try:
+        await websocket.accept(subprotocol=auth_protocol)
+    except Exception:
+        _remove_client(websocket)
+        raise
+
     logger.info(f"[WS-Stream] Client connected. Total streaming clients: {len(_stream_clients)}")
 
     subscribed_channels: set[str] = {"tickers", "trades", "signals"}
@@ -255,14 +272,18 @@ async def ws_signals(websocket: WebSocket):
         await websocket.accept()
         await websocket.close(code=4001, reason="Unauthorized")
         return
-    if _at_connection_limit():
+    acquired = await _try_acquire_connection_slot(websocket, _connections)
+    if not acquired:
         await websocket.accept(subprotocol=auth_protocol)
         await websocket.close(code=1013, reason="Server connection limit reached")
         return
 
-    await websocket.accept(subprotocol=auth_protocol)
-    _send_locks[websocket] = asyncio.Lock()
-    _connections.add(websocket)
+    try:
+        await websocket.accept(subprotocol=auth_protocol)
+    except Exception:
+        _remove_client(websocket)
+        raise
+
     logger.info(f"[WS] Signals client connected. Total: {len(_connections)}")
 
     subscription: dict = {}
@@ -378,14 +399,18 @@ async def ws_chat(websocket: WebSocket):
         await websocket.accept()
         await websocket.close(code=4001, reason="Unauthorized")
         return
-    if _at_connection_limit():
+    acquired = await _try_acquire_connection_slot(websocket, _chat_clients)
+    if not acquired:
         await websocket.accept(subprotocol=auth_protocol)
         await websocket.close(code=1013, reason="Server connection limit reached")
         return
 
-    await websocket.accept(subprotocol=auth_protocol)
-    _send_locks[websocket] = asyncio.Lock()
-    _chat_clients.add(websocket)
+    try:
+        await websocket.accept(subprotocol=auth_protocol)
+    except Exception:
+        _remove_client(websocket)
+        raise
+
     logger.info("[WS] Chat client connected")
     try:
         last_message_at = 0.0
