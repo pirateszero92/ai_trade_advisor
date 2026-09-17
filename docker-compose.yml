@@ -33,6 +33,7 @@ services:
       APP_ENV: production
     volumes:
       - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
       - ./backend/config:/app/config
       - ./backend/data:/app/data
       - ./backend/prompts:/app/prompts
