@@ -1008,8 +1008,8 @@ def evaluate_release_gate(
         {
             "name": "out_of_sample",
             "value": metrics.get("evaluation_mode"),
-            "operator": "==",
-            "threshold": "chronological_out_of_sample",
+            "operator": "in",
+            "threshold": "anchored_out_of_sample_replay | rolling_walk_forward_oos",
             "passed": (
                 not criteria.require_out_of_sample
                 or metrics.get("evaluation_mode") in {
@@ -1044,7 +1044,7 @@ def evaluate_release_gate(
                 not criteria.require_validated_policy
                 or str((metrics.get("tri_core_policy") or {}).get(
                     "calibration_status", "missing"
-                )) in {"walk_forward_validated", "draft_unvalidated"}
+                )) == "walk_forward_validated"
             ),
         },
         {

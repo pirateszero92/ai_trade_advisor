@@ -1,9 +1,10 @@
-﻿"""
+"""
 Unit tests validating Phase 1, Phase 2, and Phase 3 remediations from the 12-point audit.
 """
 
 from __future__ import annotations
 
+from copy import deepcopy
 from decimal import Decimal
 import uuid
 import pandas as pd
@@ -100,8 +101,8 @@ def test_backtest_engine_start_index_parameter():
     assert result["evaluation_mode"] == "anchored_out_of_sample_replay"
 
 
-def test_backtest_release_gate_allows_candidate_draft_unvalidated():
-    """Issue #9: evaluate_release_gate allows candidate draft_unvalidated policy calibration."""
+def test_backtest_release_gate_calibration_enforcement():
+    """Release gate strictly enforces walk_forward_validated when require_validated_policy=True."""
     metrics = {
         "completed_trades": 120,
         "expectancy_r": 0.35,
@@ -118,10 +119,28 @@ def test_backtest_release_gate_allows_candidate_draft_unvalidated():
         "data_readiness": {"coverage": 95.0, "history_days": 180.0},
         "tri_core_policy": {"calibration_status": "draft_unvalidated"},
     }
-    gate = evaluate_release_gate(metrics, ReleaseCriteria())
-    assert gate["passed"] is True
-    policy_check = next(c for c in gate["checks"] if c["name"] == "policy_calibration")
-    assert policy_check["passed"] is True
+    # 1. When require_validated_policy=False, candidate draft_unvalidated is accepted
+    candidate_criteria = ReleaseCriteria(require_validated_policy=False)
+    gate_candidate = evaluate_release_gate(metrics, candidate_criteria)
+    assert gate_candidate["passed"] is True
+    candidate_check = next(c for c in gate_candidate["checks"] if c["name"] == "policy_calibration")
+    assert candidate_check["passed"] is True
+
+    # 2. When require_validated_policy=True (default), draft_unvalidated MUST fail release gate
+    strict_criteria = ReleaseCriteria(require_validated_policy=True)
+    gate_strict = evaluate_release_gate(metrics, strict_criteria)
+    assert gate_strict["passed"] is False
+    strict_check = next(c for c in gate_strict["checks"] if c["name"] == "policy_calibration")
+    assert strict_check["passed"] is False
+
+    # 3. When policy is walk_forward_validated, strict release gate passes
+    metrics_validated = deepcopy(metrics)
+    metrics_validated["tri_core_policy"]["calibration_status"] = "walk_forward_validated"
+    gate_validated = evaluate_release_gate(metrics_validated, strict_criteria)
+    assert gate_validated["passed"] is True
+    validated_check = next(c for c in gate_validated["checks"] if c["name"] == "policy_calibration")
+    assert validated_check["passed"] is True
+
 
 
 def test_simulate_execution_conservative_same_bar_limit_fill():
