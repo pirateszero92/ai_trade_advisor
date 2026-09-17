@@ -6,6 +6,7 @@ Providers: Local (LM Studio / Ollama / OpenAI-compat) -> Gemini -> OpenRouter
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
@@ -106,6 +107,30 @@ class AIEngine:
         self.active_provider: str = runtime_provider if runtime_provider in FALLBACK_CHAIN else "local"
         self._system_prompt: Optional[str] = None
         self._active_prompt_file: Optional[str] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
+        self._http_lock: Optional[asyncio.Lock] = None
+
+    def _get_http_lock(self) -> asyncio.Lock:
+        if self._http_lock is None:
+            self._http_lock = asyncio.Lock()
+        return self._http_lock
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or lazily create a pooled httpx.AsyncClient."""
+        if self._http_client is None or self._http_client.is_closed:
+            async with self._get_http_lock():
+                if self._http_client is None or self._http_client.is_closed:
+                    self._http_client = httpx.AsyncClient(
+                        timeout=httpx.Timeout(connect=5.0, read=45.0, write=15.0, pool=10.0),
+                        limits=httpx.Limits(max_keepalive_connections=15, max_connections=30),
+                    )
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Explicitly close the underlying pooled HTTP client."""
+        if self._http_client is not None and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -533,30 +558,30 @@ class AIEngine:
     async def discover_local_models(self) -> dict:
         """Discover active local models from Ollama (11434) and LM Studio (1234)."""
         results = {"ollama": [], "lmstudio": []}
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            # Check Ollama
-            for base in ["http://host.docker.internal:11434", "http://127.0.0.1:11434"]:
-                try:
-                    r = await client.get(f"{base}/api/tags")
-                    if r.status_code == 200:
-                        models = [m.get("name") for m in r.json().get("models", [])]
-                        results["ollama"] = models
-                        results["ollama_endpoint"] = base
-                        break
-                except Exception:
-                    pass
+        client = await self._get_client()
+        # Check Ollama
+        for base in ["http://host.docker.internal:11434", "http://127.0.0.1:11434"]:
+            try:
+                r = await client.get(f"{base}/api/tags", timeout=3.0)
+                if r.status_code == 200:
+                    models = [m.get("name") for m in r.json().get("models", [])]
+                    results["ollama"] = models
+                    results["ollama_endpoint"] = base
+                    break
+            except Exception:
+                pass
 
-            # Check LM Studio
-            for base in ["http://host.docker.internal:1234/v1", "http://127.0.0.1:1234/v1"]:
-                try:
-                    r = await client.get(f"{base}/models")
-                    if r.status_code == 200:
-                        models = [m.get("id") for m in r.json().get("data", [])]
-                        results["lmstudio"] = models
-                        results["lmstudio_endpoint"] = base
-                        break
-                except Exception:
-                    pass
+        # Check LM Studio
+        for base in ["http://host.docker.internal:1234/v1", "http://127.0.0.1:1234/v1"]:
+            try:
+                r = await client.get(f"{base}/models", timeout=3.0)
+                if r.status_code == 200:
+                    models = [m.get("id") for m in r.json().get("data", [])]
+                    results["lmstudio"] = models
+                    results["lmstudio_endpoint"] = base
+                    break
+            except Exception:
+                pass
 
         return results
 
@@ -685,59 +710,59 @@ class AIEngine:
         # the client's 120 second request budget, while avoiding the previous
         # false offline response after only 12 seconds.
         timeout = httpx.Timeout(connect=5.0, read=45.0, write=15.0, pool=5.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(api_url, json=payload)
-            if r.status_code == 200:
-                resp_data = r.json()
-                if is_ollama_native:
-                    msg = resp_data.get("message", {})
+        client = await self._get_client()
+        r = await client.post(api_url, json=payload)
+        if r.status_code == 200:
+            resp_data = r.json()
+            if is_ollama_native:
+                msg = resp_data.get("message", {})
+                content = msg.get("content", "")
+                # Thinking models (e.g. gpt-oss:120b-cloud) put reply in 'thinking' when content is empty
+                if not content:
+                    content = msg.get("thinking", "")
+                if content:
+                    return content
+            else:
+                choices = resp_data.get("choices", [])
+                if choices:
+                    msg = choices[0].get("message", {})
                     content = msg.get("content", "")
-                    # Thinking models (e.g. gpt-oss:120b-cloud) put reply in 'thinking' when content is empty
                     if not content:
                         content = msg.get("thinking", "")
                     if content:
                         return content
-                else:
-                    choices = resp_data.get("choices", [])
-                    if choices:
-                        msg = choices[0].get("message", {})
-                        content = msg.get("content", "")
-                        if not content:
-                            content = msg.get("thinking", "")
-                        if content:
-                            return content
-            elif r.status_code == 404 and is_ollama_native:
-                # If /api/chat gave 404, fallback to /v1/chat/completions
-                parsed = urlparse(api_url)
-                native_suffix = "/api/chat"
-                base_path = parsed.path[:-len(native_suffix)] if parsed.path.endswith(native_suffix) else ""
-                fallback_url = urlunparse(
-                    (
-                        parsed.scheme,
-                        parsed.netloc,
-                        f"{base_path}/v1/chat/completions",
-                        "",
-                        "",
-                        "",
-                    )
+        elif r.status_code == 404 and is_ollama_native:
+            # If /api/chat gave 404, fallback to /v1/chat/completions
+            parsed = urlparse(api_url)
+            native_suffix = "/api/chat"
+            base_path = parsed.path[:-len(native_suffix)] if parsed.path.endswith(native_suffix) else ""
+            fallback_url = urlunparse(
+                (
+                    parsed.scheme,
+                    parsed.netloc,
+                    f"{base_path}/v1/chat/completions",
+                    "",
+                    "",
+                    "",
                 )
-                fallback_payload = {
-                    "model": target_model,
-                    "messages": messages,
-                    "temperature": 0.3,
-                    "max_tokens": CHAT_OUTPUT_TOKEN_BUDGET,
-                    "stream": False,
-                }
-                r2 = await client.post(fallback_url, json=fallback_payload)
-                if r2.status_code == 200:
-                    choices = r2.json().get("choices", [])
-                    if choices:
-                        content = choices[0].get("message", {}).get("content", "")
-                        if content:
-                            return content
-                raise ValueError(f"Ollama returned 404 on model '{target_model}'. Status {r.status_code}")
-            else:
-                raise ValueError(f"AI provider returned HTTP {r.status_code}")
+            )
+            fallback_payload = {
+                "model": target_model,
+                "messages": messages,
+                "temperature": 0.3,
+                "max_tokens": CHAT_OUTPUT_TOKEN_BUDGET,
+                "stream": False,
+            }
+            r2 = await client.post(fallback_url, json=fallback_payload)
+            if r2.status_code == 200:
+                choices = r2.json().get("choices", [])
+                if choices:
+                    content = choices[0].get("message", {}).get("content", "")
+                    if content:
+                        return content
+            raise ValueError(f"Ollama returned 404 on model '{target_model}'. Status {r.status_code}")
+        else:
+            raise ValueError(f"AI provider returned HTTP {r.status_code}")
 
         raise ValueError(f"Could not get response from Local LLM at {api_url}")
 
@@ -768,16 +793,16 @@ class AIEngine:
         if system_text:
             payload["systemInstruction"] = {"parts": [{"text": system_text}]}
 
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            r = await client.post(url, headers=headers, json=payload)
-            r.raise_for_status()
-            data = r.json()
-            candidates = data.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts and "text" in parts[0]:
-                    return parts[0]["text"]
-            raise ValueError("Gemini returned empty candidate content or was blocked by safety filters")
+        client = await self._get_client()
+        r = await client.post(url, headers=headers, json=payload)
+        r.raise_for_status()
+        data = r.json()
+        candidates = data.get("candidates", [])
+        if candidates:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            if parts and "text" in parts[0]:
+                return parts[0]["text"]
+        raise ValueError("Gemini returned empty candidate content or was blocked by safety filters")
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4))
     async def _call_openrouter(self, messages: list[dict]) -> str:
@@ -798,15 +823,15 @@ class AIEngine:
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": "https://ai-trade-advisor",
         }
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            r = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                json=payload,
-                headers=headers,
-            )
-            r.raise_for_status()
-            data = r.json()
-            return data["choices"][0]["message"]["content"]
+        client = await self._get_client()
+        r = await client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            json=payload,
+            headers=headers,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
 
     def _build_context_message(
         self,
