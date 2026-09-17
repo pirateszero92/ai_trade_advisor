@@ -92,10 +92,6 @@ class NotificationService:
             ])
 
         text_lines.extend([
-                "",
-            ])
-
-        text_lines.extend([
             "Analysis:",
             f"{message}",
             "",
@@ -146,18 +142,8 @@ class NotificationService:
                 )
                 if resp.status_code == 200:
                     return True
-
-                # 2. Fallback to Legacy LINE Notify (Sunset by LINE Corp on March 31, 2025)
-                legacy_resp = await client.post(
-                    "https://notify-api.line.me/api/notify",
-                    headers={"Authorization": f"Bearer {token}"},
-                    data={"message": f"\n{line_msg}"},
-                )
-                if legacy_resp.status_code == 200:
-                    return True
                 logger.warning(
-                    f"[LINE] Notification failed: Messaging API HTTP {resp.status_code}, "
-                    f"Legacy Notify HTTP {legacy_resp.status_code}"
+                    f"[LINE] Messaging API broadcast failed with HTTP {resp.status_code}: {resp.text}"
                 )
                 return False
         except Exception as e:
@@ -169,26 +155,10 @@ class NotificationService:
         if not server_key:
             return False
 
-        try:
-            # Format payload for FCM with stringified data map
-            str_data = {str(k): str(v) for k, v in data.items()}
-            payload = {
-                "to": "/topics/signals",
-                "notification": {"title": title, "body": body},
-                "data": str_data,
-            }
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    "https://fcm.googleapis.com/fcm/send",
-                    headers={"Authorization": f"key={server_key}"},
-                    json=payload,
-                )
-                if resp.status_code == 200:
-                    return True
-                logger.warning(
-                    f"[FCM] Push response status {resp.status_code} (Legacy HTTP API sunset by Google in June 2024): {resp.text}"
-                )
-                return False
-        except Exception as e:
-            logger.error(f"[FCM] Failed to send push: {e}")
-            return False
+        # Google decommissioned the legacy FCM HTTP API (fcm.googleapis.com/fcm/send) in June 2024.
+        # Mobile push delivery requires Firebase HTTP v1 API using OAuth2 service account tokens.
+        logger.warning(
+            "[FCM] Push skipped: Legacy FCM Server Key API was sunset by Google. "
+            "Please migrate to Firebase HTTP v1 API with service account credentials."
+        )
+        return False

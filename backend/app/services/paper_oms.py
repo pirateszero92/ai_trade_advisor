@@ -1049,6 +1049,28 @@ class PaperOMS:
                 if position.direction == "short" and not (new_tp < new_sl and new_tp < entry):
                     raise PaperOMSValidation("Invalid SHORT protection levels")
 
+                quote = self._current_quote(position.symbol, fallback_price=None)
+                current_price = _decimal(quote.get("price")) if quote and quote.get("price") else None
+                if current_price is not None and current_price > ZERO:
+                    if position.direction == "long":
+                        if new_sl >= current_price:
+                            raise PaperOMSValidation(
+                                f"Stop loss {float(new_sl):.4f} cannot be set at or above current market price {float(current_price):.4f}"
+                            )
+                        if new_tp <= current_price:
+                            raise PaperOMSValidation(
+                                f"Take profit {float(new_tp):.4f} cannot be set at or below current market price {float(current_price):.4f}"
+                            )
+                    elif position.direction == "short":
+                        if new_sl <= current_price:
+                            raise PaperOMSValidation(
+                                f"Stop loss {float(new_sl):.4f} cannot be set at or below current market price {float(current_price):.4f}"
+                            )
+                        if new_tp >= current_price:
+                            raise PaperOMSValidation(
+                                f"Take profit {float(new_tp):.4f} cannot be set at or above current market price {float(current_price):.4f}"
+                            )
+
                 # Verify that loosening SL does not exceed account risk budget
                 current_sl = _decimal(position.stop_loss)
                 positions = (await session.execute(

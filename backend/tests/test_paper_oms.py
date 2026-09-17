@@ -728,4 +728,56 @@ async def test_order_auto_assigns_tp1_and_locks_profit_before_breakeven(tmp_path
     await engine.dispose()
 
 
+@pytest.mark.anyio
+async def test_update_protection_market_price_validation(tmp_path):
+    from app.services.paper_oms import PaperOMSValidation
+    from app.engines.price_hub import price_hub
+
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6PROT{uuid.uuid4().hex[:6]}/USDT"
+    payload = _order_payload(direction="long", order_type="limit", symbol=symbol)
+    payload["entry"] = 100.0
+    payload["stop_loss"] = 90.0
+    payload["take_profit"] = 130.0
+
+    created = await oms.place_order(payload)
+    pos_id = created["id"]
+
+    # Fill the limit order so status becomes open
+    await oms.process_market_tick({
+        "symbol": symbol,
+        "price": 99.5,
+        "sequence": 1,
+        "source": "test",
+        "received_timestamp": 1000.0,
+    })
+
+    # Set price_hub ticker to 110.0
+    price_hub.update_price(
+        symbol,
+        110.0,
+        bid=109.9,
+        ask=110.1,
+        source="test_ws",
+        transport="websocket",
+        data_quality="test",
+    )
+
+    # 1. Setting SL above current market price (110.0) must be rejected
+    with pytest.raises(PaperOMSValidation, match="Stop loss .* cannot be set at or above current market price"):
+        await oms.update_protection(pos_id, stop_loss=115.0)
+
+    # 2. Setting TP below current market price (110.0) must be rejected
+    with pytest.raises(PaperOMSValidation, match="Take profit .* cannot be set at or below current market price"):
+        await oms.update_protection(pos_id, take_profit=105.0)
+
+    # 3. Setting valid trailing stop (e.g. 105.0, which is above entry 100.0 but below price 110.0) succeeds!
+    updated = await oms.update_protection(pos_id, stop_loss=105.0)
+    assert updated["stop_loss"] == 105.0
+
+    await oms.stop()
+    await engine.dispose()
+
+
+
 
