@@ -15,8 +15,6 @@ from app.models.paper_oms import (
     PaperOMSPosition,
     PaperOMSRiskHalt,
 )
-from app.models.signal import Signal
-from app.models.trade import Trade
 
 __all__ = [
     "BacktestRun",
@@ -31,7 +29,5 @@ __all__ = [
     "PaperOMSPosition",
     "PaperOMSRiskHalt",
     "ReleaseGateEvaluation",
-    "Signal",
-    "Trade",
     "TradeLedgerRecord",
 ]
