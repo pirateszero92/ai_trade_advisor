@@ -22,6 +22,7 @@ tri_core_policy:
   minimum_rr: 2.0
   ping_pong_enabled: true
   target_anchor_mode: "opposing_boundary"
+  counter_trend_filter_enabled: true
 
 # Canonical decision input used by both Chart and Proactive Scanner. Strategy
 # calculations must use completed candles only; the live quote is display and

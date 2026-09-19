@@ -33,6 +33,7 @@ class TriCorePolicy:
     minimum_rr: float = 2.0
     ping_pong_enabled: bool = False
     target_anchor_mode: str = "opposing_boundary"
+    counter_trend_filter_enabled: bool = True
 
     @classmethod
     def from_mapping(cls, raw: Any) -> "TriCorePolicy":
@@ -53,6 +54,9 @@ class TriCorePolicy:
             minimum_rr=float(values.get("minimum_rr", cls.minimum_rr)),
             ping_pong_enabled=bool(values.get("ping_pong_enabled", cls.ping_pong_enabled)),
             target_anchor_mode=str(values.get("target_anchor_mode", cls.target_anchor_mode)),
+            counter_trend_filter_enabled=bool(values.get(
+                "counter_trend_filter_enabled", cls.counter_trend_filter_enabled
+            )),
         )
         if policy.calibration_status not in {"draft_unvalidated", "walk_forward_validated"}:
             raise ValueError("Invalid Tri-Core calibration status")
@@ -596,7 +600,29 @@ class TriCoreSetupEngine:
         saw_bound_flow = False
         zone = None
 
+        regime_data = getattr(signal, "market_regime", {}) or {}
+        regime_label = str(regime_data.get("regime", "")).lower()
+        trend_direction = str(regime_data.get("direction", "")).lower()
+        htf_bias = str(getattr(signal, "htf_bias", "neutral") or "neutral").lower()
+        is_ranging = (regime_label == "ranging") or (policy.ping_pong_enabled and regime_label != "trending")
+
         for side in ("long", "short"):
+            if policy.counter_trend_filter_enabled:
+                if regime_label == "trending":
+                    if trend_direction == "bullish" and side == "short":
+                        rejected.append("Counter-trend SHORT rejected: Market regime is trending bullish")
+                        continue
+                    if trend_direction == "bearish" and side == "long":
+                        rejected.append("Counter-trend LONG rejected: Market regime is trending bearish")
+                        continue
+                if regime_label != "ranging":
+                    if htf_bias == "bullish" and side == "short":
+                        rejected.append("Counter-trend SHORT rejected: HTF bias is bullish")
+                        continue
+                    if htf_bias == "bearish" and side == "long":
+                        rejected.append("Counter-trend LONG rejected: HTF bias is bearish")
+                        continue
+
             expected_sweep = "low" if side == "long" else "high"
             if (getattr(signal, "liquidity_swept", False)
                     and getattr(signal, "sweep_direction", "none") == expected_sweep):
@@ -632,7 +658,7 @@ class TriCoreSetupEngine:
                             candidate_entry = float(limit_zone.mid)
                         target_val = (
                             _range_opposing_target(signal, side, candidate_entry)
-                            if (policy.ping_pong_enabled or getattr(signal, "market_regime", {}).get("regime") == "ranging")
+                            if is_ranging
                             else _nearest_target(signal, side, candidate_entry)
                         ) if extreme > 0 else None
                         result = _candidate(
@@ -709,7 +735,7 @@ class TriCoreSetupEngine:
 
                     disp_target = (
                         _range_opposing_target(signal, side, entry)
-                        if (policy.ping_pong_enabled or getattr(signal, "market_regime", {}).get("regime") == "ranging")
+                        if is_ranging
                         else _nearest_target(signal, side, entry)
                     )
                     result = _candidate(
@@ -729,8 +755,6 @@ class TriCoreSetupEngine:
                     rejected.extend(result.rejection_reasons)
 
             # --- Range Boundary Ping-Pong Resolver ---
-            regime_label = getattr(signal, "market_regime", {}).get("regime", "")
-            is_ranging = regime_label == "ranging" or policy.ping_pong_enabled
             if is_ranging and non_opposing_flow:
                 if side == "long":
                     bullish_obs = [

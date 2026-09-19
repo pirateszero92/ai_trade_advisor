@@ -736,4 +736,116 @@ def test_range_boundary_ping_pong_short_creates_actionable_setup():
     assert setup.risk_reward >= 2.0
 
 
+def _short_signal() -> SMCSignal:
+    signal = SMCSignal(
+        symbol="BTC/USDT",
+        timeframe="1h",
+        volume_quality="exchange_aggressor",
+        cvd_divergence="bearish",
+        liquidity_swept=True,
+        sweep_direction="high",
+        liquidity_sweep={
+            "candle_index": 19,
+            "reference_index": 8,
+            "extreme": 103.0,
+            "reclaim_close": 100.5,
+            "event_type": "single_bar_sweep",
+        },
+    )
+    signal.cvd_divergence_evidence = {
+        "reference_index": 8,
+        "reference_cvd": 1500.0,
+        "current_cvd": 500.0,
+        "reclaim_close_price": 100.5,
+        "price_excursion_atr": 0.7,
+        "cvd_efficiency": 0.2,
+    }
+    signal.cvd = 500.0
+    signal.swing_lows = [
+        SwingPoint(8, 90.0, "low", pd.Timestamp("2026-09-01 08:00", tz="UTC"), 10)
+    ]
+    return signal
+
+
+def test_counter_trend_short_rejected_in_trending_bullish_regime():
+    signal = _short_signal()
+    signal.market_regime = {"regime": "trending", "direction": "bullish"}
+    setup = TriCoreSetupEngine.evaluate(signal, _frame())
+    assert not setup.actionable
+    assert any("Counter-trend SHORT rejected: Market regime is trending bullish" in r for r in setup.rejection_reasons)
+
+
+def test_trend_aligned_long_accepted_in_trending_bullish_regime():
+    signal = _signal()
+    signal.market_regime = {"regime": "trending", "direction": "bullish"}
+    setup = TriCoreSetupEngine.evaluate(signal, _frame())
+    assert setup.actionable
+    assert setup.direction == "long"
+
+
+def test_counter_trend_long_rejected_in_trending_bearish_regime():
+    signal = _signal()
+    signal.market_regime = {"regime": "trending", "direction": "bearish"}
+    setup = TriCoreSetupEngine.evaluate(signal, _frame())
+    assert not setup.actionable
+    assert any("Counter-trend LONG rejected: Market regime is trending bearish" in r for r in setup.rejection_reasons)
+
+
+def test_counter_trend_short_rejected_by_htf_bullish_bias():
+    signal = _short_signal()
+    signal.market_regime = {"regime": "unknown", "direction": "neutral"}
+    signal.htf_bias = "bullish"
+    setup = TriCoreSetupEngine.evaluate(signal, _frame())
+    assert not setup.actionable
+    assert any("Counter-trend SHORT rejected: HTF bias is bullish" in r for r in setup.rejection_reasons)
+
+
+def test_ranging_regime_allows_both_sides_ping_pong_regardless_of_htf():
+    # Ping-Pong short works in ranging market even if HTF bias is bullish
+    signal = _signal()
+    signal.liquidity_swept = False
+    signal.market_regime = {"regime": "ranging", "direction": "bullish"}
+    signal.htf_bias = "bullish"
+    signal.in_premium = True
+    signal.delta_ratio = -0.05
+    signal.cvd_divergence = "none"
+
+    demand_ob = Zone(kind="ob", direction="bullish", top=85.0, bottom=80.0, index=5, confirmed_index=6, source="swing")
+    supply_ob = Zone(kind="ob", direction="bearish", top=102.0, bottom=100.0, index=10, confirmed_index=11, source="swing")
+    signal.order_blocks = [demand_ob, supply_ob]
+
+    frame = _frame()
+    setup = TriCoreSetupEngine.evaluate(signal, frame, {"ping_pong_enabled": True, "minimum_rr": 2.0})
+    assert setup.actionable is True
+    assert setup.direction == "short"
+    assert setup.setup_type == "range_boundary_ping_pong"
+
+
+def test_trending_regime_suppresses_counter_trend_ping_pong():
+    # In trending bullish market, supply ping-pong short must be suppressed
+    signal = _signal()
+    signal.liquidity_swept = False
+    signal.market_regime = {"regime": "trending", "direction": "bullish"}
+    signal.in_premium = True
+    signal.delta_ratio = -0.05
+    signal.cvd_divergence = "none"
+
+    demand_ob = Zone(kind="ob", direction="bullish", top=85.0, bottom=80.0, index=5, confirmed_index=6, source="swing")
+    supply_ob = Zone(kind="ob", direction="bearish", top=102.0, bottom=100.0, index=10, confirmed_index=11, source="swing")
+    signal.order_blocks = [demand_ob, supply_ob]
+
+    frame = _frame()
+    setup = TriCoreSetupEngine.evaluate(signal, frame, {"ping_pong_enabled": True, "minimum_rr": 2.0})
+    assert not setup.actionable
+
+
+def test_counter_trend_filter_disabled_allows_short():
+    signal = _short_signal()
+    signal.market_regime = {"regime": "trending", "direction": "bullish"}
+    setup = TriCoreSetupEngine.evaluate(signal, _frame(), {"counter_trend_filter_enabled": False})
+    assert setup.actionable
+    assert setup.direction == "short"
+
+
+
 
