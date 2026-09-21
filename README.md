@@ -19,13 +19,13 @@ Survival in the financial markets does **not** come from stacking 10 indicator f
 ```mermaid
 flowchart TD
     subgraph EDGE["🏛️ Core Decision Engine"]
-        SMC["1. SMC (Map & Location)<br/>Liquidity Sweep + Return to FVG/OB<br/>Defines Invalidation (SL) at Extreme"]
+        SMC["1. SMC (Map & Location)<br/>Liquidity Sweep + Return to FVG/OB/Breaker<br/>Defines Invalidation (SL) at Extreme"]
         CVD["2. CVD (The Lie Detector)<br/>Institutional Absorption & Aggressor Delta<br/>Reveals Real Money Direction"]
         SQZ["3. SQZ Bonus (Momentum Gear)<br/>Volatility Expansion Catalyst<br/>Boosts Sizing / Conviction (Never Blocks)"]
     end
 
-    subgraph COPILOT["🤖 Intelligence Layer"]
-        AI["AI Co-Pilot<br/>Advisory coherence check only<br/>No direction, price, size or order authority"]
+    subgraph COPILOT["🤖 Intelligence & Execution Gate"]
+        AI["AI Day-Trade Scalper Gate<br/>Order Flow Discipline & Trap Detection<br/>Veto Authority: CONFLICT / VETO_BLOCKED halts order"]
     end
 
     subgraph SURVIVAL["🛡️ Risk Engine (True Survival)"]
@@ -34,8 +34,9 @@ flowchart TD
 
     SMC --> CVD
     CVD --> SQZ
-    SQZ --> RISK
-    CVD -. deterministic setup snapshot .-> AI
+    SQZ --> AI
+    AI -->|⛔ VETOED: CONFLICT| HALT["🛑 Order Suppressed (Veto Logged)"]
+    AI -->|⚡ APPROVED: ENTER_NOW| RISK
     RISK --> EXEC["🚀 Execute Order (Paper OMS / Live)"]
 ```
 
@@ -44,22 +45,29 @@ flowchart TD
 | Dimension | Legacy Architecture (Over-Filtered) | Tri-Core Architecture (Apex AI) |
 | :--- | :--- | :--- |
 | **Core Philosophy** | Defensive Avoidance (Looking for reasons to NOT trade) | Decisive Confluence (Identify institutional sweep + absorption) |
-| **SMC Role** | Rigid multi-rule constraint (BOS, OB, FVG, IDM all required) | **Map & Location**: Liquidity Sweep + Retracement to FVG/OB |
+| **SMC Role** | Rigid multi-rule constraint (BOS, OB, FVG, IDM all required) | **Map & Location**: Liquidity Sweep, OB/FVG Retest, Breaker Blocks |
 | **CVD Role** | Restrictive pass/fail filter | **The Lie Detector**: Confirms absorption or aggressor flow |
 | **Squeeze Role** | Mandatory negative gate (No squeeze = No trade) | **Positive Bonus & Sizing Multiplier** (Never blocks entry) |
-| **AI Role** | Paranoid Gatekeeper (Prompted to find reasons to WAIT) | **Advisory Co-Pilot**: ตรวจ coherence เท่านั้น ไม่มี order authority |
+| **AI Role** | Paranoid Gatekeeper (Prompted to find reasons to WAIT) | **Day-Trade Scalper Gate**: Senior Order Flow Scalper ตรวจสอบโครงสร้าง, ดักทาง Trap OB, และมีอำนาจ Veto ระงับคำสั่ง Auto-Pilot |
 | **Survival Strategy** | Fear of entry (0 trades taken) | **Risk Engine**: 0.75–1.00%, Auto-BE at 1.0R, durable 24h halt |
 | **Actionable Scenarios** | Artificial observation-only locks (S4/S8 blocked) | Actionable whenever Tri-Core confluence + $R:R \ge 2.0$ exists |
 
 ---
 
-Scanner AI rollout: [แผนและ flow AI SMC+CVD](docs/ai-scanner-plan.md) — เรียก LLM เฉพาะเมื่อ deterministic Tri-Core มี setup จริง ผล AI เป็น `COHERENT/CONFLICT/UNAVAILABLE` สำหรับคำอธิบายและบริหารสถานะเท่านั้น ไม่เปลี่ยน Strategy Gate หรือคำสั่งซื้อขาย
+Scanner AI rollout: [แผนและ flow AI SMC+CVD](docs/ai-scanner-plan.md) — โมเดล AI ทำหน้าที่เป็น **Institutional Day-Trade Scalper Gate**: เมื่อ Tri-Core พบ setup ที่พร้อมเทรด AI จะตรวจ order flow, delta และ trap OB หาก AI ระบุ `CONFLICT` หรือ `VETO_BLOCKED` ระบบ Auto-Pilot จะระงับคำสั่งทันที (Vetoed) หากระบุ `COHERENT` และ `ENTER_NOW` คำสั่งจะได้รับอนุมัติพร้อมบันทึก AI audit trail ลง PostgreSQL
 
 Migration/validation contract: [Canonical 15M migration](docs/canonical-15m-migration.md) — threshold ปัจจุบันเป็น `draft_unvalidated`, ระบุ data-readiness, lifecycle, Entry Engine และ rolling chronological OOS promotion gate
 
-อัปเดต 2026-09-09: Execution TF ปัจจุบันคือ **15M** ตาม `backend/config/strategy.yaml` → `timeframe_profiles.roles.trigger.timeframe` ทุกเส้นทางตัดสินใจใช้ closed execution snapshot และ deterministic entry policy ร่วมกัน; TF อื่นเป็น research/display เท่านั้น ไม่มีผลต่อคะแนน คำแนะนำ หรือขนาดสถานะ
+อัปเดต 2026-09-21: Execution TF ปัจจุบันคือ **15M** ตาม `backend/config/strategy.yaml` → `timeframe_profiles.roles.trigger.timeframe` ทุกเส้นทางตัดสินใจใช้ closed execution snapshot และ deterministic entry policy ร่วมกัน
 
-`TriCoreSetupEngine` อนุมัติเฉพาะ (1) sweep + reclaim + CVD divergence/absorption ที่ผูกกับ swing และ reclaim เดียวกัน หรือ (2) displacement ที่ break structure + **first retest** ของ OB/FVG จาก lineage เดียวกัน + aggressor delta ระบบวาง SL หลัง extreme ของ breach window ทั้งชุด, เลือก TP ที่ opposing obstacle ใกล้ที่สุดโดยห้ามข้ามไปหาเป้าไกลเพื่อแต่ง R:R และอนุมัติเฉพาะเมื่อ $R:R \ge 2.0$ ส่วน Scenario S1–S9 เป็น analytics label เท่านั้น
+`TriCoreSetupEngine` รองรับรูปแบบเข้าเทรดระดับสถาบัน:
+1. **Sweep Reversal**: sweep + reclaim + CVD divergence/absorption ที่ผูกกับ swing และ reclaim เดียวกัน
+2. **Displacement Continuation**: displacement break structure + first retest ของ OB/FVG จาก lineage เดียวกัน
+3. **Breaker Block Retest**: การทดสอบ Breaker Block ที่กลับทิศทาง (Flip) พร้อมการยืนยัน non-opposing flow
+4. **Trend-Day Shallow Retest**: FVG 50% Consequent Encroachment (CE) และ Breaker front-run buffer (`<= 0.15 ATR`) ในวันที่มีแนวโน้มแรง
+5. **Macro Counter-Trend Veto Gate**: ในสภาวะ Trending Bullish หรือ HTF Bullish จะทำการ Veto สัญญาณฝั่ง Short สวนเทรนด์ทุกประเภทเพื่อป้องกันการติดกับดักในรอบกระทิงใหญ่
+
+ระบบวาง SL หลัง extreme ของ breach window ทั้งชุด, เลือก TP ที่ opposing obstacle ใกล้ที่สุด และอนุมัติเฉพาะเมื่อ $R:R \ge 2.0$ โดยมี AI Day-Trade Scalper เป็นด่านตรวจสุดท้ายก่อนยิงออเดอร์ ส่วน Scenario S1–S9 เป็น analytics label เท่านั้น
 
 Client ไม่มี API key สำรองใน source/bundle อีกต่อไป ตั้งค่า key ใน Settings จาก `APP_SECRET_KEY` ของ backend ที่ผู้ดูแลจัดเตรียมให้ หลังหมุน key ต้องตั้งค่าบนอุปกรณ์ใหม่ ห้ามส่ง key ผ่าน URL หรือ commit ลง Git
 
@@ -118,8 +126,10 @@ Dependency สำหรับ Linux/Python 3.12 deployment ถูกตรึง
 
 ### AI, Journal และ Evidence
 
-- Apex AI Chat ใช้บริบทจาก execution timeframe และ Strategy Gate
-- AI อธิบายตลาดได้ แต่ไม่มีสิทธิ์อนุมัติคำสั่งแทน deterministic engines
+- Apex AI Chat & AI Day-Trade Scalper Gate:
+  - **Auto-Pilot Execution Gatekeeper**: ทำหน้าที่เป็น Senior Order Flow Scalper ตรวจสอบความสอดคล้องของ Taker Delta, ดักทาง Trap Order Block, ป้องกันการ Chasing เข้าแนวต้าน/แนวรับสำคัญ
+  - **Veto Authority**: มีอำนาจยับยั้งคำสั่ง Auto-Pilot ทันทีเมื่อเกิด `CONFLICT` หรือ `VETO_BLOCKED`
+  - **Audit Trail**: บันทึก `ai_scalper_approved`, `ai_scalper_verdict`, `ai_scalper_action` และ `ai_scalper_reason` ลงใน PostgreSQL ทุกออเดอร์
 - AI ปฏิเสธการใช้ MTF/HTF เพื่อคำนวณหรือยืนยันคำแนะนำ
 - Provider fallback: Local/Ollama/LM Studio → Gemini → OpenRouter
 - Ollama native adapter รองรับโมเดล reasoning และ output budget 2,048 tokens เพื่อป้องกันประโยคถูกตัด
@@ -135,16 +145,17 @@ flowchart TB
     FEED[Market feeds] --> HUB[Price Hub + Market Data Engine]
     HUB --> CLOSED[Closed execution TF candles]
     CLOSED --> EXEC[ExecutionAnalysisService]
-    EXEC --> SMC[SMC Engine]
+    EXEC --> SMC[SMC Engine: Swings, Breakers, OBs, FVGs]
     SMC --> CORE[Tri-Core setup: SMC + exchange-derived CVD]
-    SMC --> REGIME[Market Regime Policy]
+    SMC --> REGIME[Market Regime Policy + Counter-Trend Gate]
     CORE --> STRATEGY[Strategy Gate]
     SMC -. analytics only .-> SCENARIO[Scenario Matrix]
     REGIME -. risk context .-> RISK
-    CORE -. advisory snapshot .-> AI[AI Co-Pilot]
-
-    STRATEGY -->|WAIT / rejected| UI[Chart + Signals + AI explanation]
-    STRATEGY -->|approved| RISK[Risk Engine]
+    
+    STRATEGY -->|WAIT / rejected| UI[Chart + Signals + Explanation]
+    STRATEGY -->|approved| AIGATE[AI Day-Trade Scalper Gate]
+    AIGATE -->|⛔ VETOED: CONFLICT| UI
+    AIGATE -->|⚡ APPROVED: ENTER_NOW| RISK[Risk Engine]
     RISK -->|rejected| UI
     RISK -->|approved| QUOTE[Fresh bid/ask + Instrument Rules]
     QUOTE --> OMS[PostgreSQL Paper OMS]
@@ -233,27 +244,34 @@ Setup จะออกจาก `WAIT` เมื่อ `tri_core_setup.actionable
 
 คะแนน Evidence ไม่มี threshold สำหรับเปิดออเดอร์และ **คะแนน 60, 70 หรือ 90 ไม่ได้ทำให้ AI หรือระบบเข้าเทรดโดยอัตโนมัติ** ตัวอย่างเช่น `L8/S66` หมายถึงหลักฐานเอน Short แต่หากแนวรับใกล้เกินไปจน R:R ต่ำ ระบบยังต้อง WAIT
 
-### ระบบจะเรียก AI เมื่อใด
+### ระบบจะเรียก AI เมื่อใด และ AI SCALPER GATE ทำงานอย่างไร
 
 AI บนหน้า Scanner ถูกเรียกเมื่อครบทั้งสองข้อ:
 
 1. `tri_core_setup.actionable == true`
 2. `strategy.approved == true`
 
-หากยังไม่มี deterministic setup จะแสดง `AI ADVISORY • ยังไม่เรียก AI` และเหตุผล `No deterministic Tri-Core setup; AI was not requested` นี่เป็นพฤติกรรมที่ตั้งใจไว้ ไม่ใช่ปัญหาการเชื่อมต่อ AI เพราะ AI มีหน้าที่ตรวจความสอดคล้องของ setup ที่ระบบยืนยันแล้ว ไม่ได้ใช้คะแนน Evidence เพื่อเดาทิศทางหรือแก้ R:R
+- หากยังไม่มี deterministic setup จะแสดงสถานะ `AI ADVISORY & SCALPER GATE • ยังไม่เรียก AI` พร้อมคำชี้แจง:
+  `AI SCALPER GATE: ตรวจสอบความถูกต้องของออเดอร์ก่อนอนุมัติเข้าเทรดสไตล์ Day Trade / Scalp` และ `No deterministic Tri-Core setup; AI was not requested` นี่เป็นพฤติกรรมที่ตั้งใจไว้ ไม่ใช่ปัญหาการเชื่อมต่อ AI เพราะ AI Scalper มีหน้าที่ตรวจความเสี่ยงของ setup ที่ผ่านเกณฑ์ทางสถิติแล้ว ไม่ได้ใช้คะแนน Evidence ลอยๆ เพื่อเดาทิศทาง
+- เมื่อมี Setup เกิดขึ้น AI จะถูกเรียกเพื่อทำหน้าที่เป็น **Execution Gate**:
+  - ⛔ `AI SCALPER GATE: คำสั่งถูกยับยั้งโดย AI Day Trader (Vetoed)`: หากพบ Taker Delta สวนทาง, ตลาดกำลังขยายตัวฝืนทิศทาง, หรือเป็น Trap Order Block ระบบ Auto-Pilot จะระงับการเข้าเทรดทันที
+  - ⚡ `AI SCALPER GATE: ได้รับการอนุมัติโดย AI Day Trader (Approved)`: หากโครงสร้างและ Order Flow สอดคล้องกัน AI จะอนุมัติและระบุ action `ENTER_NOW` หรือ `LIMIT_RETEST` เพื่อส่งต่อให้ Risk Engine คำนวณขนาดไม้
 
-ลำดับการตัดสินใจจริง:
+ลำดับการตัดสินใจจริง (Execution Flow):
 
 ```text
 Evidence L/S
-  → causal SMC pattern
+  → causal SMC pattern (Swings, Breaker Blocks, OB/FVG Retest, Shallow Retests)
   → exchange-derived aggressor CVD confirmation
   → nearest opposing target และ R:R ≥ 2.00
+  → Macro Regime Counter-Trend Gate (บล็อก Short ในสภาวะ Trending Bullish)
   → Tri-Core actionable
   → Strategy approved
-  → AI advisory
+  → AI Day-Trade Scalper Gate (Senior Scalper ตรวจ Order Flow & Trap OB)
+      ├─ ⛔ VETO_BLOCKED / CONFLICT → ระงับการเข้าเทรด (Vetoed)
+      └─ ⚡ ENTER_NOW / COHERENT    → อนุมัติส่งต่อ (Approved)
   → Risk Engine / portfolio guardrails
-  → Paper order
+  → Paper order (PostgreSQL OMS)
 ```
 
 ### รูปแบบเข้าเทรดที่อนุญาต
@@ -458,33 +476,48 @@ pip install -r requirements.txt
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Flutter
+### Flutter Web & Mobile
 
 ```powershell
 cd mobile
 flutter pub get
+
+# รันแบบ Development ในเครื่อง:
 flutter run
-flutter build apk --debug
+
+# บิลด์ Web สำหรับ Production (Nginx Container พอร์ต 3000):
+flutter build web --release
+Copy-Item -Path "build\web\*" -Destination "..\web_dist" -Recurse -Force
+docker restart ai_trade_web
+
+# บิลด์ Android Release APK:
+flutter build apk --release
 ```
 
-Debug APK: `mobile/build/app/outputs/flutter-apk/app-debug.apk`
+> **📌 ข้อควรทราบเกี่ยวกับ Web Browser PWA Cache:**
+> Flutter Web ใช้ PWA Service Worker (`flutter_service_worker.js`) ที่เก็บไฟล์ลง Cache Storage ของเบราว์เซอร์ หากหลังอัปเดตแล้วยังแสดงผลหน้าเดิม ให้เปิด **หน้าต่างที่ไม่ระบุตัวตน (Incognito: `Ctrl + Shift + N`)** หรือกด `F12` -> ไปที่แท็บ `Application` -> `Storage` -> กด **"Clear site data"** แล้วกดรีเฟรชหน้าเว็บ
 
 ## Verification
 
 คำสั่งตรวจสอบหลัก:
 
 ```powershell
-.\.backend-test-venv\Scripts\python.exe -m pytest backend/tests -q
+# รันชุดทดสอบ Backend ทั้งหมดบน Docker:
+docker exec ai_trade_backend pytest -v
+
+# หรือรันเฉพาะโมดูล AI และ Auto-Pilot:
+docker exec ai_trade_backend pytest tests/test_scanner_ai.py tests/test_auto_pilot.py -v
+
+# รันชุดทดสอบ Flutter บนเครื่อง:
 cd mobile
-dart analyze
 flutter test
 ```
 
-สถานะชุดทดสอบล่าสุด ณ 2026-08-31:
+สถานะชุดทดสอบล่าสุด ณ 2026-09-21:
 
-- Backend: 186 passed, 2 skipped
-- Flutter: 13 passed
-- Dart analyzer: no issues found
+- **Backend Pytest Suite**: **342 passed, 2 skipped, 0 failed (100% pass rate)**
+- **Flutter Widget/Unit Tests**: **All tests passed (100% pass rate)**
+- **Dart analyzer**: no issues found
 
 ## Security Notes
 
@@ -498,17 +531,19 @@ flutter test
 
 | Area | Status |
 | --- | --- |
-| Single-timeframe execution TF decision core | Deployed |
-| Clean SMC + Scenario Matrix | Deployed |
-| execution TF Support/Resistance Reaction + bounded entry window | Deployed |
-| AI Reaction Context + Strategy Gate Guard | Deployed |
-| Real-time Binance data | Deployed |
-| PostgreSQL Paper OMS | Deployed |
+| Single-timeframe 15M execution TF decision core | Deployed |
+| Clean SMC + Tri-Core Setup Engine (Sweep, Retest, Breakers) | Deployed |
+| Trend-Day Shallow Retest (FVG 50% CE & 0.15 ATR Front-Run Buffer) | Deployed |
+| Macro Trend-Day Counter-Trend Veto Gate | Deployed |
+| AI Day-Trade Scalper Execution Authority & Auto-Pilot Veto Gate | Deployed |
+| Real-time Binance data & In-memory Price Hub | Deployed |
+| PostgreSQL Paper OMS & Hardened Protection (Trailing/BE Shield) | Deployed |
 | Evidence/replay/backtest core | Implemented; collecting validation samples |
-| Auto-Pilot | Locked OFF pending release evidence |
+| Auto-Pilot | Active in Paper mode with AI Scalper Gate |
 | Live OMS | Guarded; new exposure not production-approved |
 | News risk intelligence | Planned |
 
 ## License
 
 Repository ปัจจุบันยังไม่มีไฟล์ `LICENSE` จึงไม่ควรถือว่าได้รับอนุญาตภายใต้ MIT หรือ license อื่นจนกว่าเจ้าของโครงการจะเพิ่มเงื่อนไขการใช้งานอย่างเป็นทางการ
+
