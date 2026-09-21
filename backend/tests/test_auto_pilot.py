@@ -42,6 +42,13 @@ def mock_mtf():
         risk_reward=4.0,
         scenario={"scenario_id": "TEST_CONFIRMED", "actionable": True},
         volume_quality="exchange_aggressor",
+        ai_review={
+            "status": "reviewed",
+            "verdict": "COHERENT",
+            "execution_action": "ENTER_NOW",
+            "scalper_bias": "BULLISH_SCALP",
+            "reason": "Delta absorption confirmed at discount",
+        },
         indicator_decision={"ready": True, "squeeze_bonus": 10, "squeeze_bonus_max": 10},
         tri_core_setup={"actionable": True, "direction": "long", "grade": "S",
                         "setup_type": "sweep_reversal",
@@ -115,6 +122,9 @@ async def test_auto_pilot_executes_grade_s(mock_mtf):
         assert call_args["setup_type"] == "sweep_reversal"
         assert call_args["decision_snapshot_id"] == "a1b2c3d4e5f60718293a4b5c"
         assert call_args["setup_timeframe"] == "15m"
+        assert call_args["ai_scalper_approved"] is True
+        assert call_args["ai_scalper_verdict"] == "COHERENT"
+        assert call_args["ai_scalper_action"] == "ENTER_NOW"
 
 
 @pytest.mark.asyncio
@@ -245,3 +255,75 @@ async def test_auto_pilot_counts_pending_positions_and_prevents_duplicate(mock_m
 
     assert result is None
     mock_create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_pilot_vetoed_by_ai_scalper_conflict(mock_mtf):
+    service = MarketMonitor()
+    mock_mtf.trigger_signal.ai_review = {
+        "status": "reviewed",
+        "verdict": "CONFLICT",
+        "execution_action": "VETO_BLOCKED",
+        "scalper_bias": "NO_TRADE",
+        "conflicts": ["Delta positive divergence into resistance zone", "Trap OB detected"],
+    }
+
+    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+        "auto_trade_enabled": True,
+        "auto_trade_require_ai_approval": True,
+        "auto_trade_min_grade": "A",
+    }), patch("app.services.paper_oms.paper_oms.ready", True), \
+       patch("app.services.paper_oms.paper_oms.place_order", AsyncMock()) as mock_create:
+
+        result = await service._evaluate_and_execute_auto_pilot(
+            symbol="MSFT",
+            direction="long",
+            m_type="stock",
+            ex="alpaca",
+            ltf_sig=mock_mtf.trigger_signal,
+            live_price=500.0,
+            strat_res=mock_mtf.strategy,
+            confluence=85,
+            entry_mode="limit",
+            decision_snapshot_id="a1b2c3d4e5f60718293a4b5c",
+            setup_timeframe="15m",
+        )
+
+        assert result is None
+        mock_create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_pilot_vetoed_by_ai_scalper_action_blocked(mock_mtf):
+    service = MarketMonitor()
+    mock_mtf.trigger_signal.ai_review = {
+        "status": "reviewed",
+        "verdict": "COHERENT",
+        "execution_action": "VETO_BLOCKED",
+        "scalper_bias": "NO_TRADE",
+        "reason": "AI Scalper identified structural trap; execution blocked",
+    }
+
+    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+        "auto_trade_enabled": True,
+        "auto_trade_require_ai_approval": True,
+        "auto_trade_min_grade": "A",
+    }), patch("app.services.paper_oms.paper_oms.ready", True), \
+       patch("app.services.paper_oms.paper_oms.place_order", AsyncMock()) as mock_create:
+
+        result = await service._evaluate_and_execute_auto_pilot(
+            symbol="MSFT",
+            direction="long",
+            m_type="stock",
+            ex="alpaca",
+            ltf_sig=mock_mtf.trigger_signal,
+            live_price=500.0,
+            strat_res=mock_mtf.strategy,
+            confluence=85,
+            entry_mode="limit",
+            decision_snapshot_id="a1b2c3d4e5f60718293a4b5c",
+            setup_timeframe="15m",
+        )
+
+        assert result is None
+        mock_create.assert_not_awaited()

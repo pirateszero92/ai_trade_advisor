@@ -120,3 +120,19 @@ def test_proposal_accepts_optional_management_note():
     })
     assert p.verdict == "COHERENT"
     assert p.management_note is None
+
+
+def test_proposal_ai_scalper_execution_fields():
+    analysis = snapshot()
+    prop = Proposal.model_validate({
+        "verdict": "COHERENT",
+        "reason": "Closed candle confirms recovery",
+        "conflicts": [],
+        "evidence": ["recovery"],
+        "execution_action": "ENTER_NOW",
+        "scalper_bias": "BULLISH_SCALP",
+    })
+    review = validate_advisory(prop, build_context(analysis), analysis)
+    assert review["ai_scalper_approved"] is True
+    assert review["execution_action"] == "ENTER_NOW"
+    assert review["scalper_bias"] == "BULLISH_SCALP"

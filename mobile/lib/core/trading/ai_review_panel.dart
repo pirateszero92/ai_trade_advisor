@@ -40,11 +40,49 @@ class AiReviewPanel extends StatelessWidget {
           Text(
               'SMC+CVD evidence L$longEvidence/S$shortEvidence • selected $coreScore/100 • SQZ bonus +$squeezeBonus/10',
               style: const TextStyle(color: Colors.cyanAccent)),
-          Text('AI ADVISORY • $label',
-              style: const TextStyle(
-                  color: Colors.lightBlueAccent, fontWeight: FontWeight.bold)),
-          const Text(
-              'AI ไม่มีสิทธิ์เลือกทิศทาง ราคา ขนาดไม้ หรืออนุมัติคำสั่ง'),
+          Text('AI ADVISORY & SCALPER GATE • $label',
+              style: TextStyle(
+                  color: verdict == 'CONFLICT'
+                      ? Colors.redAccent
+                      : (verdict == 'COHERENT'
+                          ? Colors.greenAccent
+                          : Colors.lightBlueAccent),
+                  fontWeight: FontWeight.bold)),
+          if (verdict == 'CONFLICT')
+            Container(
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.red.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: Colors.redAccent),
+              ),
+              child: const Text(
+                '⛔ AI SCALPER GATE: คำสั่งถูกยับยั้งโดย AI Day Trader (Vetoed)',
+                style: TextStyle(
+                    color: Colors.redAccent, fontWeight: FontWeight.bold),
+              ),
+            )
+          else if (verdict == 'COHERENT')
+            Container(
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: Colors.greenAccent),
+              ),
+              child: const Text(
+                '⚡ AI SCALPER GATE: ได้รับการอนุมัติโดย AI Day Trader (Approved)',
+                style: TextStyle(
+                    color: Colors.greenAccent, fontWeight: FontWeight.bold),
+              ),
+            )
+          else
+            const Text(
+              'AI SCALPER GATE: ตรวจสอบความถูกต้องของออเดอร์ก่อนอนุมัติเข้าเทรดสไตล์ Day Trade / Scalp',
+              style: TextStyle(color: Colors.amberAccent),
+            ),
           if (review['reason'] != null) Text('${review['reason']}'),
           if (review['conflicts'] is List &&
               (review['conflicts'] as List).isNotEmpty)

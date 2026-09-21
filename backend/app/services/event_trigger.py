@@ -962,6 +962,36 @@ class MarketMonitor:
         if setup.get("actionable") is not True:
             return None
 
+        # 2.1 AI Day-Trade Scalper Execution Gate:
+        # Enforce AI Scalper Decision authority: NO trade is entered if AI Scalper returns CONFLICT or VETO_BLOCKED.
+        require_ai_approval = bool(r_cfg.get("auto_trade_require_ai_approval", True))
+        if require_ai_approval:
+            ai_rev = getattr(ltf_sig, "ai_review", {}) or {}
+            if not ai_rev or ai_rev.get("status") != "reviewed":
+                try:
+                    from app.services.scanner_ai import scanner_ai
+                    from app.services.execution_analysis import execution_analyses
+                    exec_analysis = await execution_analyses.get(
+                        symbol=symbol,
+                        market_type=m_type,
+                        exchange=ex,
+                        entry_mode=entry_mode,
+                    )
+                    reviewed_analysis = await scanner_ai.review(exec_analysis, "paper")
+                    ai_rev = reviewed_analysis.signal.ai_review
+                    ltf_sig.ai_review = ai_rev
+                except Exception as ai_err:
+                    logger.warning(f"[Auto-Pilot] AI Scalper review check exception: {ai_err}")
+
+            ai_verdict = str(ai_rev.get("verdict", "")).upper()
+            ai_action = str(ai_rev.get("execution_action", "")).upper()
+            if ai_verdict == "CONFLICT" or ai_action == "VETO_BLOCKED":
+                reasons = ai_rev.get("conflicts", []) or [ai_rev.get("reason", "AI Scalper identified structural/flow conflict")]
+                logger.warning(
+                    f"[Auto-Pilot] ⛔ AI Day-Trade Scalper VETOED order for {symbol} {direction}: {'; '.join(str(r) for r in reasons)}"
+                )
+                return None
+
         setup_grade = str(setup.get("grade", "WAIT")).upper()
         is_grade_s = setup_grade == "S"
         is_grade_a = setup_grade in {"A", "S"}
@@ -1176,6 +1206,10 @@ class MarketMonitor:
             "calibration_status": str(setup.get("calibration_status", "")),
             "decision_snapshot_id": decision_snapshot_id,
             "setup_timeframe": setup_timeframe,
+            "ai_scalper_approved": True,
+            "ai_scalper_verdict": str((getattr(ltf_sig, "ai_review", {}) or {}).get("verdict", "COHERENT")),
+            "ai_scalper_action": str((getattr(ltf_sig, "ai_review", {}) or {}).get("execution_action", "ENTER_NOW")),
+            "ai_scalper_reason": str((getattr(ltf_sig, "ai_review", {}) or {}).get("reason", ""))[:400],
             "idempotency_key": (
                 f"auto-{decision_snapshot_id}"
                 if decision_snapshot_id

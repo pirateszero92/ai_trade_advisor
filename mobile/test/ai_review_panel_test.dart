@@ -18,9 +18,27 @@ void main() {
         'management_note': 'Move BE at 1R'
       },
     ))));
-    expect(find.textContaining('AI ADVISORY'), findsOneWidget);
-    expect(find.textContaining('ไม่มีสิทธิ์เลือกทิศทาง'), findsOneWidget);
+    expect(find.textContaining('AI ADVISORY & SCALPER GATE'), findsOneWidget);
+    expect(find.textContaining('AI SCALPER GATE: ได้รับการอนุมัติโดย AI Day Trader (Approved)'), findsOneWidget);
     expect(find.textContaining('SQZ bonus +0/10'), findsOneWidget);
     expect(find.textContaining('Move BE at 1R'), findsOneWidget);
+  });
+
+  testWidgets('AI Scalper Gate displays veto message when CONFLICT',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(
+            body: AiReviewPanel(
+      coreScore: 70,
+      squeezeBonus: 0,
+      review: {
+        'mode': 'shadow',
+        'status': 'reviewed',
+        'verdict': 'CONFLICT',
+        'reason': 'Chasing high into resistance with positive delta exhaustion',
+      },
+    ))));
+    expect(find.textContaining('AI ADVISORY & SCALPER GATE • ตรวจแล้ว: CONFLICT'), findsOneWidget);
+    expect(find.textContaining('AI SCALPER GATE: คำสั่งถูกยับยั้งโดย AI Day Trader (Vetoed)'), findsOneWidget);
   });
 }

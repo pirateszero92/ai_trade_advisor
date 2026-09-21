@@ -802,6 +802,10 @@ class PaperOMS:
                         "calibration_status": str(payload.get("calibration_status", ""))[:40],
                         "take_profit_1": assigned_tp1,
                         "tp1_filled": False,
+                        "ai_scalper_approved": bool(payload.get("ai_scalper_approved", False)),
+                        "ai_scalper_verdict": str(payload.get("ai_scalper_verdict", ""))[:40],
+                        "ai_scalper_action": str(payload.get("ai_scalper_action", ""))[:40],
+                        "ai_scalper_reason": str(payload.get("ai_scalper_reason", ""))[:400],
                     },
                 )
                 session.add(position)
