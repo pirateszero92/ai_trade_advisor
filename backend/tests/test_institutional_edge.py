@@ -179,7 +179,7 @@ def test_tri_core_edge_overrides_observation_only_scenario():
 
     result = StrategyEngine().evaluate(_enable_tri_core(sig))
     assert result.approved is True
-    assert any("Causal SMC setup" in check for check in result.passed_checks)
+    assert any("Tri-Core candidate is actionable" in check for check in result.passed_checks)
 
 
 def test_liquidity_swept_overrides_inducement_trap():

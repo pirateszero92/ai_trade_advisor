@@ -18,6 +18,7 @@ class SettingsState {
   final String aiProvider; // 'local' | 'gemini' | 'openrouter'
   final String lmStudioEndpoint;
   final String lmStudioModel;
+  final String lmStudioApiKey;
   final String geminiKey;
   final String geminiModel;
   final String openRouterKey;
@@ -39,6 +40,10 @@ class SettingsState {
   final String autoTradeMinGrade;
   final String autoTradeEntryType;
   final int autoTradeCooldownSeconds;
+  final bool btcAnchorFilterEnabled;
+  final double btcAnchorDumpThresholdPct;
+  final bool clusterLossCooldownEnabled;
+  final int clusterLossCooldownMinutes;
   final bool mtfHierarchyRequired;
 
   const SettingsState({
@@ -46,6 +51,7 @@ class SettingsState {
     this.aiProvider = 'local',
     this.lmStudioEndpoint = 'http://host.docker.internal:11434',
     this.lmStudioModel = 'gpt-oss:120b-cloud',
+    this.lmStudioApiKey = '',
     this.geminiKey = '',
     this.geminiModel = 'gemini-2.0-flash',
     this.openRouterKey = '',
@@ -67,6 +73,10 @@ class SettingsState {
     this.autoTradeMinGrade = 'A',
     this.autoTradeEntryType = 'momentum_market',
     this.autoTradeCooldownSeconds = 300,
+    this.btcAnchorFilterEnabled = true,
+    this.btcAnchorDumpThresholdPct = 1.0,
+    this.clusterLossCooldownEnabled = true,
+    this.clusterLossCooldownMinutes = 30,
     this.mtfHierarchyRequired = false,
   });
 
@@ -75,6 +85,7 @@ class SettingsState {
     String? aiProvider,
     String? lmStudioEndpoint,
     String? lmStudioModel,
+    String? lmStudioApiKey,
     String? geminiKey,
     String? geminiModel,
     String? openRouterKey,
@@ -96,6 +107,10 @@ class SettingsState {
     String? autoTradeMinGrade,
     String? autoTradeEntryType,
     int? autoTradeCooldownSeconds,
+    bool? btcAnchorFilterEnabled,
+    double? btcAnchorDumpThresholdPct,
+    bool? clusterLossCooldownEnabled,
+    int? clusterLossCooldownMinutes,
     bool? mtfHierarchyRequired,
   }) {
     return SettingsState(
@@ -103,6 +118,7 @@ class SettingsState {
       aiProvider: aiProvider ?? this.aiProvider,
       lmStudioEndpoint: lmStudioEndpoint ?? this.lmStudioEndpoint,
       lmStudioModel: lmStudioModel ?? this.lmStudioModel,
+      lmStudioApiKey: lmStudioApiKey ?? this.lmStudioApiKey,
       geminiKey: geminiKey ?? this.geminiKey,
       geminiModel: geminiModel ?? this.geminiModel,
       openRouterKey: openRouterKey ?? this.openRouterKey,
@@ -125,6 +141,14 @@ class SettingsState {
       autoTradeEntryType: autoTradeEntryType ?? this.autoTradeEntryType,
       autoTradeCooldownSeconds:
           autoTradeCooldownSeconds ?? this.autoTradeCooldownSeconds,
+      btcAnchorFilterEnabled:
+          btcAnchorFilterEnabled ?? this.btcAnchorFilterEnabled,
+      btcAnchorDumpThresholdPct:
+          btcAnchorDumpThresholdPct ?? this.btcAnchorDumpThresholdPct,
+      clusterLossCooldownEnabled:
+          clusterLossCooldownEnabled ?? this.clusterLossCooldownEnabled,
+      clusterLossCooldownMinutes:
+          clusterLossCooldownMinutes ?? this.clusterLossCooldownMinutes,
       mtfHierarchyRequired: mtfHierarchyRequired ?? this.mtfHierarchyRequired,
     );
   }
@@ -160,9 +184,10 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     final lineToken = await _storage.read(key: 'line_token') ??
         prefs.getString('line_token') ??
         '';
-    // A previous app version persisted this switch. Remove it permanently:
-    // every process starts in Paper and Live requires a fresh backend session.
+    // Previous versions persisted switches that are no longer authoritative.
+    // Live always requires a fresh backend session and MTF is context-only.
     await prefs.remove('is_paper_mode');
+    await prefs.remove('mtf_hierarchy_required');
     state = state.copyWith(
       apiBaseUrl: prefs.getString('api_base_url') ?? state.apiBaseUrl,
       aiProvider: prefs.getString('ai_provider') ?? state.aiProvider,
@@ -194,8 +219,19 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
           prefs.getString('auto_trade_entry_type') ?? state.autoTradeEntryType,
       autoTradeCooldownSeconds: prefs.getInt('auto_trade_cooldown_seconds') ??
           state.autoTradeCooldownSeconds,
-      mtfHierarchyRequired:
-          prefs.getBool('mtf_hierarchy_required') ?? state.mtfHierarchyRequired,
+      btcAnchorFilterEnabled: prefs.getBool('btc_anchor_filter_enabled') ??
+          state.btcAnchorFilterEnabled,
+      btcAnchorDumpThresholdPct:
+          prefs.getDouble('btc_anchor_dump_threshold_pct') ??
+              state.btcAnchorDumpThresholdPct,
+      clusterLossCooldownEnabled:
+          prefs.getBool('cluster_loss_cooldown_enabled') ??
+              state.clusterLossCooldownEnabled,
+      clusterLossCooldownMinutes:
+          prefs.getInt('cluster_loss_cooldown_minutes') ??
+              state.clusterLossCooldownMinutes,
+      mtfHierarchyRequired: false,
+      lmStudioApiKey: await _storage.read(key: 'lm_studio_api_key') ?? '',
       geminiKey: await _storage.read(key: 'gemini_key') ?? '',
       openRouterKey: await _storage.read(key: 'openrouter_key') ?? '',
     );
@@ -239,7 +275,16 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     await prefs.setInt(
         'auto_trade_cooldown_seconds', safeState.autoTradeCooldownSeconds);
     await prefs.setBool(
-        'mtf_hierarchy_required', safeState.mtfHierarchyRequired);
+        'btc_anchor_filter_enabled', safeState.btcAnchorFilterEnabled);
+    await prefs.setDouble(
+        'btc_anchor_dump_threshold_pct', safeState.btcAnchorDumpThresholdPct);
+    await prefs.setBool(
+        'cluster_loss_cooldown_enabled', safeState.clusterLossCooldownEnabled);
+    await prefs.setInt(
+        'cluster_loss_cooldown_minutes', safeState.clusterLossCooldownMinutes);
+    await prefs.remove('mtf_hierarchy_required');
+    await _storage.write(
+        key: 'lm_studio_api_key', value: safeState.lmStudioApiKey);
     await _storage.write(key: 'gemini_key', value: safeState.geminiKey);
     await _storage.write(key: 'openrouter_key', value: safeState.openRouterKey);
   }
@@ -358,6 +403,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   late TextEditingController _backendApiKeyCtrl;
   late TextEditingController _lmEndpointCtrl;
   late TextEditingController _lmModelCtrl;
+  late TextEditingController _lmApiKeyCtrl;
   late TextEditingController _geminiKeyCtrl;
   late TextEditingController _geminiModelCtrl;
   late TextEditingController _openRouterKeyCtrl;
@@ -393,6 +439,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     _backendApiKeyCtrl = TextEditingController();
     _lmEndpointCtrl = TextEditingController();
     _lmModelCtrl = TextEditingController();
+    _lmApiKeyCtrl = TextEditingController();
     _geminiKeyCtrl = TextEditingController();
     _geminiModelCtrl = TextEditingController();
     _openRouterKeyCtrl = TextEditingController();
@@ -439,6 +486,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         'http://home3.netbird.cloud:11434';
     _lmModelCtrl.text =
         prefs.getString('lm_studio_model') ?? 'gpt-oss:120b-cloud';
+    _lmApiKeyCtrl.text =
+        await _secureStorage.read(key: 'lm_studio_api_key') ?? '';
     _geminiModelCtrl.text =
         prefs.getString('gemini_model') ?? 'gemini-2.0-flash';
     _openRouterModelCtrl.text =
@@ -477,8 +526,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       final data = resp.data as Map<String, dynamic>;
       if (mounted) {
         setState(() {
+          final backendProvider =
+              (data['provider'] as String? ?? 'local').toLowerCase();
+          final providerIndex = {
+                'local': 0,
+                'lmstudio': 0,
+                'openai': 0,
+                'gemini': 1,
+                'openrouter': 2,
+              }[backendProvider] ??
+              0;
+          if (_aiTabController.index != providerIndex) {
+            _aiTabController.animateTo(providerIndex);
+          }
+
           final ep = data['local_endpoint'] as String?;
           final m = data['local_model'] as String?;
+          final lk = data['local_key'] as String?;
           final gk = data['gemini_key'] as String?;
           final gm = data['gemini_model'] as String?;
           final ok = data['openrouter_key'] as String?;
@@ -489,6 +553,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           }
           if (_lmModelCtrl.text.isEmpty && m != null && m.isNotEmpty) {
             _lmModelCtrl.text = m;
+          }
+          if (_lmApiKeyCtrl.text.isEmpty &&
+              lk != null &&
+              lk.isNotEmpty &&
+              !lk.contains('*')) {
+            _lmApiKeyCtrl.text = lk;
           }
           if (_geminiKeyCtrl.text.isEmpty &&
               gk != null &&
@@ -582,6 +652,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             _alpacaBaseUrlCtrl.text = bData['alpaca_base_url'].toString();
           }
         });
+      }
+
+      // Fetch live runtime & Auto-Pilot settings
+      final rResp = await dio.get(AppApi.url('/api/v1/settings/runtime'));
+      final rData = rResp.data is Map ? (rResp.data['config'] as Map<String, dynamic>? ?? {}) : <String, dynamic>{};
+      if (rData.isNotEmpty) {
+        final current = ref.read(settingsProvider);
+        ref.read(settingsProvider.notifier).save(
+              current.copyWith(
+                autoTradeEnabled: rData['auto_trade_enabled'] as bool? ?? current.autoTradeEnabled,
+                autoTradeMinGrade: rData['auto_trade_min_grade']?.toString() ?? current.autoTradeMinGrade,
+                autoTradeEntryType: rData['auto_trade_entry_type']?.toString() ?? current.autoTradeEntryType,
+                autoTradeCooldownSeconds: (rData['auto_trade_cooldown_seconds'] as num?)?.toInt() ?? current.autoTradeCooldownSeconds,
+                autoSlTp: rData['auto_sl_tp'] as bool? ?? current.autoSlTp,
+                autoInvalidation: rData['auto_invalidation'] as bool? ?? current.autoInvalidation,
+              ),
+            );
       }
     } catch (_) {}
   }
@@ -1434,6 +1521,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     _backendApiKeyCtrl.dispose();
     _lmEndpointCtrl.dispose();
     _lmModelCtrl.dispose();
+    _lmApiKeyCtrl.dispose();
     _geminiKeyCtrl.dispose();
     _geminiModelCtrl.dispose();
     _openRouterKeyCtrl.dispose();
@@ -1470,6 +1558,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       aiProvider: selectedProvider,
       lmStudioEndpoint: _lmEndpointCtrl.text.trim(),
       lmStudioModel: _lmModelCtrl.text.trim(),
+      lmStudioApiKey: _lmApiKeyCtrl.text.trim(),
       geminiKey: _geminiKeyCtrl.text.trim(),
       geminiModel: _geminiModelCtrl.text.trim(),
       openRouterKey: _openRouterKeyCtrl.text.trim(),
@@ -1507,6 +1596,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'provider': selectedProvider,
           'local_endpoint': _lmEndpointCtrl.text.trim(),
           'local_model': _lmModelCtrl.text.trim(),
+          'local_key': _lmApiKeyCtrl.text.trim(),
+          'local_api_key': _lmApiKeyCtrl.text.trim(),
           'gemini_key': _geminiKeyCtrl.text.trim(),
           'gemini_api_key': _geminiKeyCtrl.text.trim(),
           'gemini_model': _geminiModelCtrl.text.trim(),
@@ -1552,6 +1643,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'auto_trade_min_grade': current.autoTradeMinGrade,
           'auto_trade_entry_type': current.autoTradeEntryType,
           'auto_trade_cooldown_seconds': current.autoTradeCooldownSeconds,
+          'btc_anchor_filter_enabled': current.btcAnchorFilterEnabled,
+          'btc_anchor_dump_threshold_pct': current.btcAnchorDumpThresholdPct,
+          'cluster_loss_cooldown_enabled': current.clusterLossCooldownEnabled,
+          'cluster_loss_cooldown_minutes': current.clusterLossCooldownMinutes,
           'mtf_hierarchy_required': current.mtfHierarchyRequired,
         },
       );
@@ -1644,6 +1739,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           endpoint = null;
           model = _openRouterModelCtrl.text.trim();
           apiKey = _openRouterKeyCtrl.text.trim();
+        } else {
+          apiKey = _lmApiKeyCtrl.text.trim();
         }
 
         final resp = await dio.post(
@@ -2156,7 +2253,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             TabBar(
               controller: _aiTabController,
               tabs: const [
-                Tab(text: 'OpenAI'),
+                Tab(text: 'Local / OpenAI'),
                 Tab(text: 'Gemini'),
                 Tab(text: 'OpenRouter'),
               ],
@@ -2165,7 +2262,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               indicatorColor: AppColors.bullish,
             ),
             SizedBox(
-              height: 200,
+              height: 265,
               child: TabBarView(
                 controller: _aiTabController,
                 children: [
@@ -2177,10 +2274,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                         _textField('Endpoint (Ollama / LM Studio / OpenAI)',
                             _lmEndpointCtrl,
                             hint:
-                                'http://10.0.2.2:11434 หรือ http://10.0.2.2:1234/v1'),
+                                'http://10.0.2.2:11434 หรือ https://ollama.com'),
                         const SizedBox(height: 8),
                         _textField('Model Name', _lmModelCtrl,
-                            hint: 'gpt-oss:120b-cloud หรือ gpt-4o-mini'),
+                            hint: 'gpt-oss:120b-cloud หรือ gemma4:31b'),
+                        const SizedBox(height: 8),
+                        _textField('API Key (Optional / Ollama Cloud / OpenAI)',
+                            _lmApiKeyCtrl,
+                            hint: 'Bearer token หรือ API Key (ถ้ามี)',
+                            obscure: true),
                         const SizedBox(height: 8),
                         _testBtn('OpenAI'),
                       ],
@@ -2393,7 +2495,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               suffix: '%',
             ),
             _riskSlider(
-              label: 'Target Risk:Reward (R:R)',
+              label: 'Minimum Executable R:R',
               value: settings.targetRr,
               min: 1.0,
               max: 4.0,
@@ -2437,6 +2539,65 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               suffix: '',
               isInt: true,
             ),
+            const Divider(color: Colors.white12, height: 20),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('BTC Systemic-Risk Anchor',
+                  style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600)),
+              subtitle: const Text(
+                  'พักการส่งคำสั่ง Altcoin เมื่อ BTC สวนทางรุนแรง โดยไม่เปลี่ยนเกรดหรือทิศของ TriCore',
+                  style: TextStyle(fontSize: 11, color: Colors.white54)),
+              value: settings.btcAnchorFilterEnabled,
+              activeThumbColor: AppColors.bullish,
+              onChanged: (v) => ref.read(settingsProvider.notifier).save(
+                    settings.copyWith(btcAnchorFilterEnabled: v),
+                  ),
+            ),
+            if (settings.btcAnchorFilterEnabled)
+              _riskSlider(
+                label: 'BTC Dump/Rally Threshold',
+                value: settings.btcAnchorDumpThresholdPct,
+                min: 0.2,
+                max: 3.0,
+                divisions: 14,
+                onChanged: (v) => ref.read(settingsProvider.notifier).save(
+                      settings.copyWith(btcAnchorDumpThresholdPct: v),
+                    ),
+                suffix: '% / 1H',
+              ),
+            const Divider(color: Colors.white12, height: 20),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Directional Cluster Cooldown',
+                  style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600)),
+              subtitle: const Text(
+                  'หลังโดน SL ให้พักสินทรัพย์กลุ่มเดียวกันเฉพาะทิศเดิม; ทิศตรงข้ามยังพิจารณาได้',
+                  style: TextStyle(fontSize: 11, color: Colors.white54)),
+              value: settings.clusterLossCooldownEnabled,
+              activeThumbColor: AppColors.bullish,
+              onChanged: (v) => ref.read(settingsProvider.notifier).save(
+                    settings.copyWith(clusterLossCooldownEnabled: v),
+                  ),
+            ),
+            if (settings.clusterLossCooldownEnabled)
+              _riskSlider(
+                label: 'Cluster Cooldown',
+                value: settings.clusterLossCooldownMinutes.toDouble(),
+                min: 5,
+                max: 120,
+                divisions: 23,
+                onChanged: (v) => ref.read(settingsProvider.notifier).save(
+                      settings.copyWith(clusterLossCooldownMinutes: v.round()),
+                    ),
+                suffix: ' นาที',
+                isInt: true,
+              ),
           ]),
 
           const SizedBox(height: 16),
@@ -2452,7 +2613,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                       fontWeight: FontWeight.bold,
                       fontSize: 14)),
               subtitle: const Text(
-                  'เข้าเทรดอัตโนมัติทันที พร้อมระบบ Auto-BE Shield (+1.0R) + Multi-tier Trailing Stop',
+                  'เข้าเทรดเมื่อผ่านครบ 7 ด่าน (Tri-Core + AI Review + Risk Guard) • ปัจจุบันรันใน Paper Mode เพื่อความปลอดภัย',
                   style: TextStyle(color: Colors.white60, fontSize: 12)),
               value: settings.autoTradeEnabled,
               activeThumbColor: AppColors.bullish,
@@ -2463,7 +2624,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 try {
                   await AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'),
                       data: {'auto_trade_enabled': v});
-                } catch (_) {}
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        backgroundColor: AppColors.bearish,
+                        content: Text('บันทึกสถานะ Auto-Pilot ไม่สำเร็จ: $e'),
+                      ),
+                    );
+                  }
+                }
               },
             ),
             if (settings.autoTradeEnabled) ...[
@@ -2477,10 +2647,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               const ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: Icon(Icons.speed, color: AppColors.bullish),
-                title: Text('1H Execution Only',
+                title: Text('15M Canonical Execution',
                     style: TextStyle(color: Colors.white)),
                 subtitle: Text(
-                    'MTF แสดงเป็นข้อมูลประกอบเท่านั้น ไม่มีผลต่อคะแนนหรือการตัดสินใจ',
+                    '4H/1H เป็นบริบทวิจัยเท่านั้น ไม่มีสิทธิ์ approve/reject; คำสั่งใช้ snapshot 15M เดียวกัน',
                     style: TextStyle(color: Colors.white54, fontSize: 12)),
               ),
               const SizedBox(height: 12),
@@ -2494,69 +2664,107 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 children: [
                   Expanded(
                     child: _modeButton(
-                      label: 'Grade S Only\n(Confluence ≥ 85 / Fire)',
+                      label: 'Grade S Only\n(Strong Sweep + CVD)',
                       icon: Icons.workspace_premium,
                       selected: settings.autoTradeMinGrade == 'S',
                       color: const Color(0xFFFFD700),
-                      onTap: () {
+                      onTap: () async {
                         ref
                             .read(settingsProvider.notifier)
                             .save(settings.copyWith(autoTradeMinGrade: 'S'));
+                        try {
+                          await AppApi.dio.post(
+                              AppApi.url('/api/v1/settings/runtime'),
+                              data: {'auto_trade_min_grade': 'S'});
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                backgroundColor: AppColors.bearish,
+                                content: Text('บันทึกเกรดไม่สำเร็จ: $e'),
+                              ),
+                            );
+                          }
+                        }
                       },
                     ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: _modeButton(
-                      label: 'Grade S & A\n(Confluence ≥ 70)',
+                      label: 'Grade S & A\n(Causal SMC + Flow)',
                       icon: Icons.diamond_outlined,
                       selected: settings.autoTradeMinGrade == 'A',
                       color: AppColors.bullish,
-                      onTap: () {
+                      onTap: () async {
                         ref
                             .read(settingsProvider.notifier)
                             .save(settings.copyWith(autoTradeMinGrade: 'A'));
+                        try {
+                          await AppApi.dio.post(
+                              AppApi.url('/api/v1/settings/runtime'),
+                              data: {'auto_trade_min_grade': 'A'});
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                backgroundColor: AppColors.bearish,
+                                content: Text('บันทึกเกรดไม่สำเร็จ: $e'),
+                              ),
+                            );
+                          }
+                        }
                       },
                     ),
                   ),
                 ],
               ),
               const SizedBox(height: 12),
-              const Text('Auto-Pilot Entry Style:',
+              const Text('Auto-Pilot Entry Architecture:',
                   style: TextStyle(
                       color: Colors.white70,
                       fontSize: 13,
                       fontWeight: FontWeight.w600)),
               const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: _modeButton(
-                      label: '⚡ Momentum Market\n(เข้าทันที SL ชิด 1H)',
-                      icon: Icons.flash_on,
-                      selected:
-                          settings.autoTradeEntryType == 'momentum_market',
-                      color: AppColors.bullish,
-                      onTap: () {
-                        ref.read(settingsProvider.notifier).save(settings
-                            .copyWith(autoTradeEntryType: 'momentum_market'));
-                      },
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF161F2E),
+                  borderRadius: const BorderRadius.all(Radius.circular(8)),
+                  border: Border.all(color: const Color(0x662E82FE)),
+                ),
+                child: const Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.auto_awesome, color: Color(0xFF00E5FF), size: 18),
+                    SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'SMC & Revalidator Controlled (Dynamic Market / Limit)',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          SizedBox(height: 4),
+                          Text(
+                            'ประเภทคำสั่งถูกตัดสินโดย Tri-Core ร่วมกับ Revalidator: หากราคาขยับหนีเกิน 0.25 ATR ระบบจะเปลี่ยนเป็น Limit Retest โซน OB/FVG ทันที เพื่อป้องกันการไล่ราคา (No-Chase Policy)',
+                            style: TextStyle(
+                              color: Colors.white60,
+                              fontSize: 11,
+                              height: 1.35,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _modeButton(
-                      label: '🎯 Limit Pullback\n(ตั้งรอ Order Block)',
-                      icon: Icons.schedule,
-                      selected: settings.autoTradeEntryType == 'limit_pullback',
-                      color: AppColors.neutral,
-                      onTap: () {
-                        ref.read(settingsProvider.notifier).save(settings
-                            .copyWith(autoTradeEntryType: 'limit_pullback'));
-                      },
-                    ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ],
           ]),

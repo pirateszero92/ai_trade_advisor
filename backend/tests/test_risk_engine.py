@@ -2,6 +2,38 @@ from app.engines.risk_engine import RiskEngine
 from app.engines.smc_engine import SMCSignal
 
 
+def test_risk_engine_uses_atr_envelope_for_structural_stop():
+    engine = RiskEngine()
+    signal = SMCSignal(
+        symbol="NEAR/USDT",
+        timeframe="15m",
+        direction="long",
+        entry=100.0,
+        stop_loss=98.4,
+        take_profit=104.0,
+        risk_reward=2.5,
+    )
+
+    fixed = engine.evaluate(
+        signal,
+        account_balance=10_000.0,
+        max_stop_distance_pct=1.0,
+    )
+    adaptive = engine.evaluate(
+        signal,
+        account_balance=10_000.0,
+        max_stop_distance_pct=1.0,
+        atr_pct=1.62,
+    )
+
+    assert fixed.approved is False
+    assert "SL is too wide" in (fixed.rejection_reason or "")
+    assert adaptive.approved is True
+    assert adaptive.stop_policy == "atr_aware_candidate_seed"
+    assert adaptive.stop_distance_atr is not None
+    assert adaptive.position_size > 0
+
+
 def test_risk_engine_approval():
     engine = RiskEngine()
     signal = SMCSignal(
@@ -187,11 +219,10 @@ def test_risk_engine_cluster_forex_usdtry_not_crypto():
     assert get_asset_cluster("SOL/USDT") == "crypto_l1"
 
 
-def test_risk_engine_fail_closed_regime_gate():
-    """Verify that when market regime is provided but policy is missing or not ready, it fails closed."""
+def test_risk_engine_regime_is_sizing_context_not_entry_gate():
+    """Regime may scale risk, but may not independently create/veto entry eligibility."""
     engine = RiskEngine()
 
-    # 1. Regime data provided but policy is missing/invalid -> fail closed
     sig_missing_policy = SMCSignal(
         symbol="BTC/USDT",
         timeframe="15m",
@@ -201,14 +232,14 @@ def test_risk_engine_fail_closed_regime_gate():
         stop_loss=49500.0,
         take_profit=51500.0,
         risk_reward=3.0,
-        market_regime={"regime": "trending", "ready": True},  # missing policy dict
+        market_regime={"regime": "trending", "ready": False},
     )
     res = engine.evaluate(sig_missing_policy, account_balance=10000.0)
-    assert res.approved is False
-    assert "Market regime policy missing or incomplete" in (res.rejection_reason or "")
+    assert res.approved is True
+    assert res.regime_risk_multiplier == 1.0
+    assert any("Regime policy unavailable" in warning for warning in res.warnings)
 
-    # 2. Regime data provided but ready is False -> fail closed
-    sig_not_ready = SMCSignal(
+    sig_entry_blocked = SMCSignal(
         symbol="BTC/USDT",
         timeframe="15m",
         bias="bullish",
@@ -220,12 +251,12 @@ def test_risk_engine_fail_closed_regime_gate():
         market_regime={
             "regime": "trending",
             "ready": False,
-            "policy": {"entry_allowed": True, "risk_multiplier": 1.0},
+            "policy": {"entry_allowed": False, "risk_multiplier": 0.5},
         },
     )
-    res2 = engine.evaluate(sig_not_ready, account_balance=10000.0)
-    assert res2.approved is False
-    assert "New risk is blocked" in (res2.rejection_reason or "")
+    res2 = engine.evaluate(sig_entry_blocked, account_balance=10000.0)
+    assert res2.approved is True
+    assert res2.regime_risk_multiplier == 0.5
 
 
 def test_risk_engine_drawdown_constants_and_min_rr():
@@ -250,3 +281,234 @@ def test_risk_engine_drawdown_constants_and_min_rr():
     res_bad_rr = engine.evaluate(sig, minimum_rr=25.0)
     assert res_bad_rr.approved is False
     assert "Minimum R:R must be between 1 and 20" in (res_bad_rr.rejection_reason or "")
+
+
+def test_risk_engine_separates_structural_and_executable_rr():
+    engine = RiskEngine()
+    signal = SMCSignal(
+        symbol="BTC/USDT",
+        timeframe="15m",
+        direction="long",
+        entry=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        risk_reward=3.0,
+    )
+
+    res = engine.evaluate(
+        signal,
+        account_balance=10000.0,
+        execution_cost_per_unit=0.10,
+        minimum_rr=2.0,
+    )
+
+    assert res.approved is True
+    assert res.structural_rr == 3.0
+    assert res.executable_rr == res.risk_reward
+    assert res.executable_rr < res.structural_rr
+    assert res.minimum_executable_rr == 2.0
+
+
+def test_regime_min_rr_does_not_create_second_execution_rr_gate():
+    engine = RiskEngine()
+    signal = SMCSignal(
+        symbol="BTC/USDT",
+        timeframe="15m",
+        direction="long",
+        entry=100.0,
+        stop_loss=99.0,
+        take_profit=102.0,
+        risk_reward=2.0,
+        market_regime={
+            "regime": "volatile",
+            "ready": True,
+            "policy": {
+                "entry_allowed": True,
+                "risk_multiplier": 0.4,
+                "min_rr": 10.0,
+            },
+        },
+    )
+
+    res = engine.evaluate(
+        signal,
+        account_balance=10000.0,
+        minimum_rr=1.5,
+    )
+
+    assert res.approved is True
+    assert res.executable_rr == 2.0
+    assert res.minimum_executable_rr == 1.5
+    assert res.regime_risk_multiplier == 0.4
+
+
+def test_sqz_risk_scaling_is_disabled_by_default(monkeypatch):
+    from app.engines.risk_engine import squeeze_adjusted_risk_pct
+
+    engine = RiskEngine()
+    monkeypatch.setattr(engine.cfg, "sqz_risk_scaling_enabled", False)
+    signal = SMCSignal(
+        symbol="BTC/USDT",
+        timeframe="15m",
+        direction="long",
+        entry=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        risk_reward=3.0,
+        indicator_decision={"squeeze_bonus": 10, "squeeze_bonus_max": 10},
+    )
+
+    assert squeeze_adjusted_risk_pct(signal) == min(
+        float(engine.cfg.tri_core_base_risk_pct),
+        float(engine.cfg.default_risk_per_trade),
+        1.0,
+    )
+
+
+def test_sqz_risk_scaling_requires_explicit_enable(monkeypatch):
+    from app.engines.risk_engine import squeeze_adjusted_risk_pct
+
+    engine = RiskEngine()
+    monkeypatch.setattr(engine.cfg, "sqz_risk_scaling_enabled", True)
+    signal = SMCSignal(
+        symbol="BTC/USDT",
+        timeframe="15m",
+        direction="long",
+        entry=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        risk_reward=3.0,
+        indicator_decision={"squeeze_bonus": 10, "squeeze_bonus_max": 10},
+    )
+
+    assert squeeze_adjusted_risk_pct(signal) == min(
+        max(
+            min(float(engine.cfg.tri_core_base_risk_pct), float(engine.cfg.default_risk_per_trade), 1.0),
+            float(engine.cfg.tri_core_max_risk_pct),
+        ),
+        1.0,
+    )
+
+
+def test_risk_engine_never_mutates_trade_plan_or_direction():
+    engine = RiskEngine()
+    signal = SMCSignal(
+        symbol="BTC/USDT",
+        timeframe="15m",
+        bias="bullish",
+        direction="long",
+        entry=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        risk_reward=3.0,
+        market_regime={
+            "regime": "volatile",
+            "ready": False,
+            "policy": {"entry_allowed": False, "risk_multiplier": 0.5},
+        },
+    )
+    before = (
+        signal.direction,
+        signal.entry,
+        signal.stop_loss,
+        signal.take_profit,
+        signal.risk_reward,
+    )
+
+    result = engine.evaluate(
+        signal,
+        account_balance=10000.0,
+        minimum_rr=1.5,
+    )
+
+    assert result.approved is True
+    assert (
+        signal.direction,
+        signal.entry,
+        signal.stop_loss,
+        signal.take_profit,
+        signal.risk_reward,
+    ) == before
+
+
+def test_ai_confidence_and_score_cannot_change_risk_sizing():
+    engine = RiskEngine()
+    base = SMCSignal(
+        symbol="BTC/USDT",
+        timeframe="15m",
+        direction="long",
+        entry=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        risk_reward=3.0,
+        indicator_decision={"squeeze_bonus": 0, "squeeze_bonus_max": 10},
+    )
+    with_ai = SMCSignal(
+        symbol="BTC/USDT",
+        timeframe="15m",
+        direction="long",
+        entry=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        risk_reward=3.0,
+        indicator_decision={"squeeze_bonus": 0, "squeeze_bonus_max": 10},
+        ai_review={
+            "status": "reviewed",
+            "verdict": "COHERENT",
+            "confidence": 0.99,
+            "score": 100,
+            "risk_pct": 5.0,
+            "position_size": 999999,
+            "leverage": 50,
+        },
+    )
+
+    a = engine.evaluate(
+        base,
+        account_balance=10000.0,
+        risk_per_trade_pct=0.75,
+        minimum_rr=1.5,
+    )
+    b = engine.evaluate(
+        with_ai,
+        account_balance=10000.0,
+        risk_per_trade_pct=0.75,
+        minimum_rr=1.5,
+    )
+
+    assert a.approved is True and b.approved is True
+    assert b.position_size == a.position_size
+    assert b.risk_pct == a.risk_pct
+    assert b.risk_amount == a.risk_amount
+
+
+def test_ai_conflict_or_unavailable_does_not_rescale_risk_engine_math():
+    engine = RiskEngine()
+    results = []
+    for review in (
+        {"status": "reviewed", "verdict": "COHERENT", "confidence": 0.95},
+        {"status": "reviewed", "verdict": "CONFLICT", "confidence": 0.95},
+        {"status": "error", "verdict": "UNAVAILABLE", "confidence": 0.0},
+    ):
+        signal = SMCSignal(
+            symbol="BTC/USDT",
+            timeframe="15m",
+            direction="long",
+            entry=100.0,
+            stop_loss=99.0,
+            take_profit=103.0,
+            risk_reward=3.0,
+            ai_review=review,
+        )
+        results.append(
+            engine.evaluate(
+                signal,
+                account_balance=10000.0,
+                risk_per_trade_pct=0.75,
+                minimum_rr=1.5,
+            )
+        )
+
+    assert len({r.position_size for r in results}) == 1
+    assert len({r.risk_pct for r in results}) == 1
+    assert len({r.risk_amount for r in results}) == 1

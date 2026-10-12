@@ -77,8 +77,8 @@ async def lifespan(app: FastAPI):
         from app.engines.market_data import close_shared_http_client, shutdown_executors
         await close_shared_http_client()
         shutdown_executors()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(f"[SHUTDOWN] Shared HTTP/executor cleanup incomplete: {exc}")
     logger.info("Shutting down cleanly.")
 
 
@@ -115,11 +115,22 @@ def create_app() -> FastAPI:
     app.include_router(evidence_api.router, prefix="/api/v1/evidence", tags=["evidence-replay"])
     app.include_router(backtest_api.router, prefix="/api/v1/backtests", tags=["backtests-release-gates"])
     app.include_router(market_data_api.router, prefix="/api/v1/market-data", tags=["real-time-market-data"])
+    # Note: Greenfield /api/v1/opportunities archived under backend/archive/greenfield_v2 per "Evolve, not Revolve" directive.
     app.include_router(ws_router, prefix="/ws", tags=["websocket"])
 
     @app.get("/health")
     async def health():
         return {"status": "ok", "version": app.version}
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics():
+        from fastapi.responses import PlainTextResponse
+        from app.services.observability import observability
+
+        return PlainTextResponse(
+            observability.render_prometheus(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     @app.get("/ready")
     async def ready():

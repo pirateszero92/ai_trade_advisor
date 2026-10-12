@@ -201,6 +201,7 @@ class SMCSignal:
     premium_zone: dict[str, float] = field(default_factory=dict)
     discount_zone: dict[str, float] = field(default_factory=dict)
     equilibrium_zone: dict[str, float] = field(default_factory=dict)
+    range_zones: dict[str, Any] = field(default_factory=dict)
     equilibrium: float = 0.0
     current_price: float = 0.0
 
@@ -310,6 +311,7 @@ class SMCSignal:
             "premium_zone": self.premium_zone,
             "discount_zone": self.discount_zone,
             "equilibrium_zone": self.equilibrium_zone,
+            "range_zones": self.range_zones,
             "equilibrium": self.equilibrium,
             "current_price": self.current_price,
             "confluence": self.confluence,
@@ -550,6 +552,8 @@ class SMCEngine:
                         signal.flow_granularity = "kline_derived"
                     elif vd.flow_source == "binance_aggressor_trade":
                         signal.flow_granularity = "aggtrade_derived"
+                    elif vd.flow_source == "alpaca_quote_classified":
+                        signal.flow_granularity = "trade_quote_derived"
                     elif vd.source == "estimated_candle_anatomy":
                         signal.flow_granularity = "estimated"
                     signal.volume_spike = vd.volume_spike
@@ -567,7 +571,22 @@ class SMCEngine:
                     if signal.volume_quality == "exchange_aggressor" and sweep:
                         reference_index = int(sweep.get("reference_index", -1))
                         reclaim_index = int(sweep.get("candle_index", -1))
+                        flow_source_series = (
+                            df["flow_source"].astype("string").fillna("")
+                            if "flow_source" in df.columns
+                            else pd.Series("", index=df.index, dtype="string")
+                        )
+                        trusted_sources = {
+                            "binance_taker_volume",
+                            "alpaca_quote_classified",
+                        }
+                        trusted_start = len(df)
+                        for idx in range(len(df) - 1, -1, -1):
+                            if str(flow_source_series.iloc[idx]) not in trusted_sources:
+                                break
+                            trusted_start = idx
                         if (0 <= reference_index < reclaim_index < len(df)
+                                and reference_index >= trusted_start
                                 and vd.cvd_values and vd.delta_values):
                             expected = "bullish" if signal.sweep_direction == "low" else "bearish"
                             reference_price = float(sweep.get("level", 0.0))
@@ -1356,6 +1375,7 @@ class SMCEngine:
             signal.in_premium = signal.zone_position == "premium"
             signal.in_discount = signal.zone_position == "discount"
             signal.in_equilibrium = signal.zone_position == "equilibrium"
+            signal.range_zones = zones
 
     # ------------------------------------------------------------------
     # Compatibility & Helper Methods

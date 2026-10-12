@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from datetime import datetime, timedelta, timezone
 import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
 from app.core.json_store import write_json
+from app.core.tri_core_contract import TRI_CORE_SETUP_TYPES
 from app.models.paper_oms import (
     PaperOMSAccount,
     PaperOMSEvent,
@@ -25,6 +23,8 @@ from app.services.paper_oms import (
     PaperOMSError,
     PaperOMSValidation,
 )
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 async def _make_oms(tmp_path: Path):
@@ -47,6 +47,44 @@ async def _make_oms(tmp_path: Path):
     oms = PaperOMS(factory)
     await oms.start(projection, config, subscribe=False)
     return oms, factory, engine, projection, config
+
+
+def _approved_auto_pilot_payload(*, direction: str, symbol: str) -> dict:
+    payload = _order_payload(direction=direction, symbol=symbol)
+    snapshot_id = "a1b2c3d4e5f60718293a4b5c"
+    event_id = f"sweep:{symbol}:15m:test"
+    payload.update({
+        "source": "auto_pilot",
+        "setup_grade": "A",
+        "setup_type": "sweep_reversal",
+        "decision_snapshot_id": snapshot_id,
+        "decision_trace_id": f"{snapshot_id}:{event_id}",
+        "setup_timeframe": "15m",
+        "tri_core_event_id": event_id,
+        "decision_authority": "tri_core_setup_engine",
+        "tri_core_direction": direction,
+        "execution_revalidation": {
+            "passed": True,
+            "snapshot_id": snapshot_id,
+            "event_id": event_id,
+        },
+        "risk_assessment": {
+            "approved": True,
+            "sizing_authority": "risk_engine",
+            "risk_budget_source": "deterministic_config",
+            "position_size": 10.0,
+            "risk_pct": 1.0,
+        },
+        "instrument_constraints": {
+            "min_quantity": 0.001,
+            "min_notional": 1.0,
+            "quantity_step": 0.001,
+        },
+        "ai_review_required": True,
+        "ai_review_status": "reviewed",
+        "ai_review_verdict": "COHERENT",
+    })
+    return payload
 
 
 def _order_payload(*, direction: str, order_type: str = "market", symbol: str) -> dict:
@@ -99,12 +137,132 @@ async def test_market_order_requires_a_fresh_quote(tmp_path):
 async def test_auto_pilot_order_requires_approved_risk_assessment(tmp_path):
     oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
     symbol = f"P6NORISK{uuid.uuid4().hex[:6]}/USDT"
-    payload = _order_payload(direction="long", symbol=symbol)
-    payload["source"] = "auto_pilot"
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    payload["risk_assessment"] = {"approved": False, "position_size": 10.0, "risk_pct": 1.0}
 
     with pytest.raises(PaperOMSValidation, match="approved RiskAssessment"):
         await oms.place_order(payload)
 
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_auto_pilot_causal_limit_revalidates_before_fill(tmp_path):
+    oms, factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6ARMLIMIT{uuid.uuid4().hex[:6]}/USDT"
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    payload.update({
+        "order_type": "limit",
+        "entry_policy": "limit_retest_only",
+        "limit_zone_id": "zone-1",
+        "valid_until": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+    })
+    from app.engines.price_hub import price_hub
+    price_hub.update_price(
+        symbol,
+        105.0,
+        bid=104.99,
+        ask=105.0,
+        source="test_ws",
+        transport="websocket",
+        data_quality="test",
+    )
+    pending = await oms.place_order(payload)
+    assert pending["status"] == "pending"
+
+    # Simulate the canonical snapshot expiring while the order waits.
+    async with factory() as session:
+        position = await session.get(PaperOMSPosition, pending["id"])
+        source_payload = dict(position.source_payload or {})
+        source_payload["valid_until"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat()
+        position.source_payload = source_payload
+        await session.commit()
+
+    now_ts = datetime.now(timezone.utc).timestamp()
+    changed = await oms.process_market_tick({
+        "symbol": symbol,
+        "price": 99.0,
+        "bid": 98.99,
+        "ask": 99.0,
+        "last_trade_quantity": 1000.0,
+        "sequence": 777,
+        "source": "test_ws",
+        "received_timestamp": now_ts,
+    })
+
+    assert changed[0]["status"] == "cancelled"
+    assert "snapshot expired" in changed[0]["close_reason"].lower()
+    fills = await oms.list_fills(position_id=pending["id"])
+    assert fills["fills"] == []
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_oms_stop_loss_closes_the_matching_candidate_lifecycle(tmp_path):
+    from app.services.candidate_lifecycle import (
+        CandidateState,
+        candidate_lifecycle,
+    )
+
+    await candidate_lifecycle.reset()
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6LIFECYCLE{uuid.uuid4().hex[:6]}/USDT"
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    snapshot_id = payload["decision_snapshot_id"]
+    event_id = payload["tri_core_event_id"]
+    await candidate_lifecycle.register(
+        symbol=symbol,
+        snapshot_id=snapshot_id,
+        event_id=event_id,
+        ready=True,
+    )
+    for state in (
+        CandidateState.AI_REVIEW_PENDING,
+        CandidateState.AI_COHERENT,
+        CandidateState.EXECUTION_VALIDATING,
+        CandidateState.EXECUTION_VALIDATED,
+        CandidateState.RISK_APPROVED,
+        CandidateState.ORDER_PENDING,
+    ):
+        assert await candidate_lifecycle.transition(
+            symbol=symbol,
+            snapshot_id=snapshot_id,
+            event_id=event_id,
+            new_state=state,
+        )
+
+    opened = await oms.place_order(payload)
+    lifecycle = await candidate_lifecycle.get(
+        snapshot_id=snapshot_id,
+        event_id=event_id,
+    )
+    assert opened["status"] == "open"
+    assert lifecycle["state"] == CandidateState.OPEN.value
+
+    now_ts = datetime.now(timezone.utc).timestamp()
+    changed = await oms.process_market_tick({
+        "symbol": symbol,
+        "price": 94.0,
+        "bid": 93.99,
+        "ask": 94.0,
+        "last_trade_quantity": 1000.0,
+        "sequence": 778,
+        "source": "test_ws",
+        "received_timestamp": now_ts,
+    })
+    lifecycle = await candidate_lifecycle.get(
+        snapshot_id=snapshot_id,
+        event_id=event_id,
+    )
+    assert changed[0]["status"] == "closed"
+    assert lifecycle["state"] == CandidateState.CLOSED.value
+    assert lifecycle["reason_code"] == "OMS_CLOSED"
+
+    await candidate_lifecycle.reset()
     await oms.stop()
     await engine.dispose()
 
@@ -134,6 +292,29 @@ async def test_setup_grade_is_persisted_with_entry_snapshot(tmp_path):
     assert persisted["setup_grade"] == "S"
     assert persisted["grade_provenance"] == "entry_snapshot"
 
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("setup_type", sorted(TRI_CORE_SETUP_TYPES))
+async def test_every_canonical_tri_core_setup_type_crosses_the_oms_boundary(
+    tmp_path, setup_type
+):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6TYPE{uuid.uuid4().hex[:6]}/USDT"
+    payload = _order_payload(direction="long", symbol=symbol)
+    payload.update({
+        "setup_grade": "A",
+        "setup_type": setup_type,
+        "decision_snapshot_id": "a1b2c3d4e5f60718293a4b5c",
+        "setup_timeframe": "15m",
+    })
+
+    opened = await oms.place_order(payload)
+
+    assert opened["setup_type"] == setup_type
+    assert opened["setup_grade"] == "A"
     await oms.stop()
     await engine.dispose()
 
@@ -589,7 +770,7 @@ async def test_reset_creates_new_account_generation_without_deleting_audit(tmp_p
 
 
 @pytest.mark.anyio
-async def test_durable_risk_halt_survives_service_calls_and_blocks_new_orders(tmp_path):
+async def test_durable_risk_halt_is_reported_but_not_recomputed_as_oms_entry_gate(tmp_path):
     oms, factory, engine, _projection, _config = await _make_oms(tmp_path)
     now = datetime.now(timezone.utc)
     async with factory() as session:
@@ -598,7 +779,7 @@ async def test_durable_risk_halt_survives_service_calls_and_blocks_new_orders(tm
         )).scalar_one()
         session.add(PaperOMSRiskHalt(
             account_id=account.id,
-            reason="Three consecutive stop-loss exits",
+            reason="Historical risk halt",
             triggered_at=now,
             halted_until=now + timedelta(hours=24),
             source_payload={"test": True},
@@ -607,10 +788,15 @@ async def test_durable_risk_halt_survives_service_calls_and_blocks_new_orders(tm
 
     snapshot = await oms.account_snapshot()
     assert snapshot["risk_halt"]["active"] is True
-    with pytest.raises(PaperOMSConflict, match="Risk halt active"):
-        await oms.place_order(
-            _order_payload(direction="long", symbol=f"P6HALT{uuid.uuid4().hex[:6]}/USDT")
-        )
+
+    # OMS reports durable risk-halt history but does not independently recompute
+    # or enforce portfolio-risk eligibility. Manual/operator execution remains
+    # an explicit override; automated flow must arrive with RiskEngine approval.
+    opened = await oms.place_order(
+        _order_payload(direction="long", symbol=f"P6HALT{uuid.uuid4().hex[:6]}/USDT")
+    )
+    assert opened["status"] == "open"
+
     await oms.stop()
     await engine.dispose()
 
@@ -730,8 +916,8 @@ async def test_order_auto_assigns_tp1_and_locks_profit_before_breakeven(tmp_path
 
 @pytest.mark.anyio
 async def test_update_protection_market_price_validation(tmp_path):
-    from app.services.paper_oms import PaperOMSValidation
     from app.engines.price_hub import price_hub
+    from app.services.paper_oms import PaperOMSValidation
 
     oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
     symbol = f"P6PROT{uuid.uuid4().hex[:6]}/USDT"
@@ -781,3 +967,154 @@ async def test_update_protection_market_price_validation(tmp_path):
 
 
 
+
+@pytest.mark.anyio
+async def test_auto_pilot_order_requires_tri_core_authority(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6AUTH{uuid.uuid4().hex[:6]}/USDT"
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    payload["decision_authority"] = ""
+
+    with pytest.raises(PaperOMSValidation, match="TriCoreSetupEngine"):
+        await oms.place_order(payload)
+
+    payload["decision_authority"] = "tri_core_setup_engine"
+    payload["tri_core_direction"] = "short"
+    with pytest.raises(PaperOMSValidation, match="must match the deterministic Tri-Core direction"):
+        await oms.place_order(payload)
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_auto_pilot_order_requires_passed_execution_revalidation(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P14REVAL{uuid.uuid4().hex[:6]}/USDT"
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    payload["execution_revalidation"]["passed"] = False
+
+    with pytest.raises(PaperOMSValidation, match="ExecutionRevalidator"):
+        await oms.place_order(payload)
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_auto_pilot_order_requires_matching_trace_and_candidate_identity(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P14TRACE{uuid.uuid4().hex[:6]}/USDT"
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    payload["decision_trace_id"] = "wrong-trace"
+
+    with pytest.raises(PaperOMSValidation, match="decision trace identity"):
+        await oms.place_order(payload)
+
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    payload["execution_revalidation"]["event_id"] = "different-event"
+    with pytest.raises(PaperOMSValidation, match="identity must match"):
+        await oms.place_order(payload)
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_auto_pilot_order_requires_coherent_ai_when_ai_is_required(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P14AI{uuid.uuid4().hex[:6]}/USDT"
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    payload["ai_review_verdict"] = "CONFLICT"
+
+    with pytest.raises(PaperOMSValidation, match="coherent completed AI review"):
+        await oms.place_order(payload)
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_auto_pilot_order_enforces_resolved_instrument_constraints(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P14FILTER{uuid.uuid4().hex[:6]}/USDT"
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    payload["instrument_constraints"]["min_quantity"] = 20.0
+
+    with pytest.raises(PaperOMSValidation, match="below instrument minimum"):
+        await oms.place_order(payload)
+
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    payload["position_size"] = 10.0005
+    payload["size"] = 10.0005
+    payload["risk_assessment"]["position_size"] = 10.0005
+    with pytest.raises(PaperOMSValidation, match="quantity step"):
+        await oms.place_order(payload)
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_oms_preserves_risk_engine_approved_risk_pct_without_reclamping(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P14RISK{uuid.uuid4().hex[:6]}/USDT"
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    payload["risk_pct"] = 0.42
+    payload["risk_assessment"]["risk_pct"] = 0.42
+
+    opened = await oms.place_order(payload)
+
+    assert opened["risk_pct"] == pytest.approx(0.42)
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_auto_pilot_rejects_non_risk_engine_sizing_authority(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P17AUTH{uuid.uuid4().hex[:6]}/USDT"
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    payload["risk_assessment"]["sizing_authority"] = "llm_reviewer"
+
+    with pytest.raises(PaperOMSValidation, match="sizing authority must be RiskEngine"):
+        await oms.place_order(payload)
+
+    payload = _approved_auto_pilot_payload(direction="long", symbol=symbol)
+    payload["risk_assessment"]["risk_budget_source"] = "ai_confidence"
+    with pytest.raises(PaperOMSValidation, match="deterministic configuration"):
+        await oms.place_order(payload)
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_hrd04_strategy_family_is_optional_oms_metadata(tmp_path):
+    oms, factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6FAMILY{uuid.uuid4().hex[:6]}/USDT"
+    payload = _order_payload(direction="long", symbol=symbol)
+    payload.update({
+        "setup_grade": "A",
+        "setup_type": "breaker_retest",
+        "strategy_family": "swing",
+        "decision_snapshot_id": "a1b2c3d4e5f60718293a4b5c",
+        "setup_timeframe": "15m",
+    })
+
+    opened = await oms.place_order(payload)
+
+    async with factory() as session:
+        position = await session.get(PaperOMSPosition, opened["id"])
+        assert position.source_payload["strategy_family"] == "swing"
+
+    legacy_payload = _order_payload(
+        direction="long",
+        symbol=f"P6LEGACY{uuid.uuid4().hex[:6]}/USDT",
+    )
+    legacy = await oms.place_order(legacy_payload)
+    assert legacy["status"] in {"open", "pending"}
+
+    await oms.stop()
+    await engine.dispose()

@@ -8,20 +8,26 @@ from __future__ import annotations
 import asyncio
 import math
 import threading
-from typing import Literal, Optional
-from uuid import uuid4
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Literal, Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, model_validator
 from loguru import logger
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.core.security import verify_api_key
 from app.core.config import get_settings
-from app.engines.market_data import MarketDataEngine
-from app.engines.execution_engine import PaperExecutionEngine, LiveExecutionEngine
 from app.core.json_store import JsonStoreCorruptionError, read_json, write_json
-from app.core.live_session import LiveSession, require_live_session, live_session_manager
+from app.core.live_session import (
+    LiveSession,
+    live_session_manager,
+    require_live_session,
+)
+from app.core.security import verify_api_key
+from app.core.tri_core_contract import normalize_tri_core_setup_type
+from app.engines.execution_engine import LiveExecutionEngine, PaperExecutionEngine
+from app.engines.market_data import MarketDataEngine
 from app.services.paper_oms import (
     PaperOMSConflict,
     PaperOMSError,
@@ -29,8 +35,6 @@ from app.services.paper_oms import (
     PaperOMSValidation,
     paper_oms,
 )
-
-from pathlib import Path
 
 router = APIRouter()
 _paper_execution = PaperExecutionEngine()
@@ -294,7 +298,7 @@ async def reset_paper_account(req: ResetAccountRequest, _key: str = Depends(veri
 
 
 class PlaceOrderRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     symbol: str = Field(min_length=1, max_length=30, pattern=r"^[A-Za-z0-9_./:-]+$")
     direction: Literal["long", "short"]
     order_type: Literal["market", "limit"] = "market"
@@ -317,14 +321,23 @@ class PlaceOrderRequest(BaseModel):
     # the position at entry so Journal never has to infer a historical grade
     # from today's market state.
     setup_grade: Optional[Literal["A", "S"]] = None
-    setup_type: Optional[Literal["sweep_reversal", "displacement_retest"]] = None
+    setup_type: Optional[str] = Field(default=None, max_length=64)
     decision_snapshot_id: Optional[str] = Field(
         default=None, min_length=8, max_length=64, pattern=r"^[a-fA-F0-9]+$"
     )
     setup_timeframe: Optional[str] = Field(
         default=None, min_length=1, max_length=8, pattern=r"^[0-9]+[mhdwM]$"
     )
+    tri_core_event_id: Optional[str] = Field(default=None, max_length=120)
+    strategy_family: Optional[str] = Field(default=None, max_length=120)
     idempotency_key: Optional[str] = Field(default=None, min_length=8, max_length=100)
+    explicit_override: bool = False
+    override_reason: Optional[str] = Field(default=None, max_length=400)
+
+    @field_validator("setup_type")
+    @classmethod
+    def validate_setup_type(cls, value: Optional[str]) -> Optional[str]:
+        return normalize_tri_core_setup_type(value)
 
     @model_validator(mode="after")
     def validate_size_aliases(self):
@@ -333,6 +346,22 @@ class PlaceOrderRequest(BaseModel):
             raise ValueError("One of position_size, size, or qty is required")
         if len(supplied) > 1 and any(not math.isclose(supplied[0], value) for value in supplied[1:]):
             raise ValueError("position_size, size, and qty must agree when supplied together")
+        if not (self.setup_grade or self.setup_type or self.decision_snapshot_id):
+            self.setup_timeframe = None
+        else:
+            if not self.setup_timeframe:
+                if self.decision_snapshot_id:
+                    try:
+                        from app.services.execution_analysis import execution_analyses
+                        snapshot = execution_analyses.get_by_snapshot_id(self.decision_snapshot_id)
+                        if snapshot and getattr(snapshot, "timeframe", None):
+                            self.setup_timeframe = str(snapshot.timeframe).lower()
+                    except Exception:
+                        pass
+                if not self.setup_timeframe:
+                    self.setup_timeframe = "15m"
+            else:
+                self.setup_timeframe = self.setup_timeframe.lower()
         setup_metadata = (
             self.setup_grade,
             self.setup_type,
@@ -345,6 +374,12 @@ class PlaceOrderRequest(BaseModel):
             raise ValueError(
                 "setup_grade, setup_type, decision_snapshot_id and setup_timeframe must be supplied together"
             )
+        if self.explicit_override and self.mode == "live":
+            raise ValueError("explicit_override is strictly prohibited in Live Trading")
+        if self.explicit_override and len((self.override_reason or "").strip()) < 12:
+            raise ValueError("explicit_override requires an audit reason of at least 12 characters")
+        if not self.explicit_override and self.override_reason:
+            raise ValueError("override_reason requires explicit_override=true")
         return self
 
     def get_effective_size(self) -> float:
@@ -400,25 +435,106 @@ async def place_order(
             )
 
     manual_override = False
+    authority_status: dict[str, Any] | None = None
+    decision_snapshot = None
     if req.decision_snapshot_id:
         from app.services.execution_analysis import execution_analyses
+        from app.services.authority_status import build_authority_status
         snapshot = execution_analyses.get_by_snapshot_id(req.decision_snapshot_id)
-        if snapshot is not None:
-            sig = snapshot.signal
-            if (
-                snapshot.symbol.upper() != req.symbol.upper()
-                or (sig.direction and sig.direction.lower() != dir_)
-                or (sig.entry and abs(float(sig.entry) - entry) > 1e-4)
-                or (sig.stop_loss and abs(float(sig.stop_loss) - sl) > 1e-4)
-                or (sig.take_profit and abs(float(sig.take_profit) - tp) > 1e-4)
-            ):
-                manual_override = True
+        if snapshot is None:
+            raise HTTPException(status_code=409, detail="Decision snapshot is unavailable or expired")
+        decision_snapshot = snapshot
+        sig = snapshot.signal
+
+        def _level_matches(snapshot_level: Any, request_level: float) -> bool:
+            if snapshot_level is None:
+                return True
+            try:
+                s_val = float(snapshot_level)
+                r_val = float(request_level)
+            except (TypeError, ValueError):
+                return False
+            diff = abs(s_val - r_val)
+            if diff <= 1e-4:
+                return True
+            # Allow display-rounding tolerance for crypto and high-priced assets:
+            # up to 0.02 absolute difference (cent/pip display rounding) or 0.05% relative difference.
+            rel_diff = diff / max(abs(s_val), 1.0)
+            return diff <= 0.02 or rel_diff <= 5e-4
+
+        plan_mismatch = (
+            snapshot.symbol.upper() != req.symbol.upper()
+            or (sig.direction and sig.direction.lower() != dir_)
+            or not _level_matches(sig.entry, entry)
+            or not _level_matches(sig.stop_loss, sl)
+            or not _level_matches(sig.take_profit, tp)
+        )
+        if plan_mismatch:
+            logger.warning(
+                f"[Trades] Plan mismatch for {req.symbol}: "
+                f"sym: {snapshot.symbol} vs {req.symbol} | "
+                f"dir: {sig.direction} vs {dir_} | "
+                f"entry: snap={sig.entry} req={entry} (match={_level_matches(sig.entry, entry)}) | "
+                f"sl: snap={sig.stop_loss} req={sl} (match={_level_matches(sig.stop_loss, sl)}) | "
+                f"tp: snap={sig.take_profit} req={tp} (match={_level_matches(sig.take_profit, tp)})"
+            )
+        setup = dict(getattr(sig, "tri_core_setup", {}) or {})
+        event_id = str(req.tri_core_event_id or setup.get("event_id") or "")
+        if not event_id:
+            raise HTTPException(status_code=409, detail="Decision snapshot has no auditable Tri-Core event")
+        authority_status = await build_authority_status(
+            symbol=req.symbol,
+            snapshot_id=req.decision_snapshot_id,
+            event_id=event_id,
+            tri_core_setup=setup,
+            structural_rr=getattr(sig, "risk_reward", None),
+        )
+        pipeline_ready = authority_status.get("order", {}).get("ready") is True
+        if (plan_mismatch or not pipeline_ready) and not req.explicit_override:
+            reason = (
+                "Order levels do not match the immutable decision snapshot"
+                if plan_mismatch
+                else authority_status.get("lifecycle_reason")
+                or authority_status.get("risk", {}).get("reason")
+                or "Final authority pipeline is not ready"
+            )
+            raise HTTPException(status_code=409, detail=str(reason))
+        manual_override = bool(req.explicit_override)
+        approved_size = authority_status.get("risk", {}).get("position_size")
+        if (
+            isinstance(approved_size, (int, float))
+            and float(approved_size) > 0
+            and effective_size > float(approved_size) + 1e-9
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Requested size {effective_size:g} exceeds Risk Engine maximum approved size "
+                    f"{float(approved_size):g}"
+                ),
+            )
 
     if _paper_oms_available():
         try:
             payload = req.model_dump()
             payload["position_size"] = effective_size
             payload["manual_override"] = manual_override
+            payload["source"] = (
+                "explicit_override"
+                if req.explicit_override
+                else "operator_confirmed_candidate"
+                if req.decision_snapshot_id
+                else "manual_independent"
+            )
+            payload["requested_position_size"] = effective_size
+            payload["estimated_risk_amount"] = abs(entry - sl) * effective_size
+            if authority_status is not None:
+                risk_status = authority_status.get("risk", {})
+                payload["approved_position_size"] = risk_status.get("position_size")
+                payload["approved_risk_pct"] = risk_status.get("risk_pct")
+                payload["authority_candidate_id"] = authority_status.get("candidate_id")
+            if decision_snapshot is not None:
+                payload["valid_until"] = decision_snapshot.valid_until.isoformat()
             return await paper_oms.place_order(payload)
         except PaperOMSError as exc:
             _raise_paper_oms_http(exc)

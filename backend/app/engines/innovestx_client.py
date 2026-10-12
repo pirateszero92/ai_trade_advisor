@@ -224,8 +224,8 @@ class InnovestXClient:
                                 ltp = float(item["lastTradePrice"])
                                 if ltp > 0:
                                     last_trade_price = ltp
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logger.debug(f"[InnovestX] Ignoring malformed list lastTradePrice: {exc}")
                     if bids:
                         best_bid = max(bids)
                     if asks:
@@ -242,8 +242,8 @@ class InnovestXClient:
                     if "lastTradePrice" in data:
                         try:
                             last_trade_price = float(data["lastTradePrice"])
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug(f"[InnovestX] Ignoring malformed lastTradePrice: {exc}")
 
                 effective_price = last_trade_price or ((best_bid + best_ask) / 2.0 if (best_bid > 0 and best_ask > 0) else (best_bid or best_ask))
                 if effective_price > 0:

@@ -23,13 +23,14 @@ class Settings(BaseSettings):
         "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8080,http://127.0.0.1:8080,http://localhost:8000,http://127.0.0.1:8000"
     )
     app_timezone: str = "Asia/Bangkok"
-    allowed_llm_hosts: str = "localhost,127.0.0.1,::1,host.docker.internal"
+    allowed_llm_hosts: str = "localhost,127.0.0.1,::1,host.docker.internal,ollama.com,api.ollama.com,openai.com,api.openai.com"
 
     database_url: str = "postgresql+asyncpg://localhost/ai_trade_db"
     redis_url: str = "redis://localhost:6379/0"
 
     local_llm_endpoint: str = "http://localhost:1234/v1"
     local_llm_model: str = "llama-3.2-8b"
+    local_llm_api_key: str = ""
     scanner_ai_mode: Literal["shadow", "paper", "off"] = "shadow"
     scanner_ai_timeout_seconds: float = Field(default=60.0, ge=5.0, le=120.0)
     scanner_ai_min_score: int = Field(default=60, ge=40, le=90)
@@ -82,6 +83,13 @@ class Settings(BaseSettings):
     alpaca_api_key: str = ""
     alpaca_api_secret: str = ""
     alpaca_base_url: str = "https://paper-api.alpaca.markets"
+    alpaca_data_url: str = "https://data.alpaca.markets"
+    alpaca_data_feed: Literal["iex", "sip", "delayed_sip"] = "iex"
+    equity_flow_lookback_bars: int = Field(default=24, ge=8, le=96)
+    equity_flow_min_quote_coverage: float = Field(default=0.60, ge=0.0, le=1.0)
+    equity_flow_min_trades_per_bar: int = Field(default=20, ge=1, le=10_000)
+    equity_flow_max_pages: int = Field(default=10, ge=1, le=100)
+    equity_auto_trade_enabled: bool = False
 
     fcm_server_key: str = ""
     telegram_bot_token: str = ""
@@ -92,8 +100,13 @@ class Settings(BaseSettings):
     default_risk_per_trade: float = 1.0
     tri_core_base_risk_pct: float = Field(default=0.75, gt=0, le=1.0)
     tri_core_max_risk_pct: float = Field(default=1.0, gt=0, le=1.0)
+    sqz_risk_scaling_enabled: bool = False
     max_daily_loss: float = 3.0
     max_open_positions: int = 5
+    btc_anchor_filter_enabled: bool = True
+    btc_anchor_dump_threshold_pct: float = Field(default=1.0, ge=0.2, le=5.0)
+    cluster_loss_cooldown_enabled: bool = True
+    cluster_loss_cooldown_minutes: int = Field(default=30, ge=5, le=240)
 
 
 _SETTINGS_LOCK = threading.RLock()

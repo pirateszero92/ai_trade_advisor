@@ -1,5 +1,8 @@
 """API integration tests for FastAPI backend."""
 
+from types import SimpleNamespace
+from datetime import datetime, timezone
+
 import pytest
 from httpx import AsyncClient, ASGITransport
 from app.main import app
@@ -144,6 +147,131 @@ async def test_trade_invalid_sl_tp_rejection():
         resp = await client.post("/api/v1/trades/place", json=bad_req, headers=headers)
         assert resp.status_code == 400
         assert "Invalid SL/TP" in resp.json().get("detail", "")
+
+
+@pytest.mark.anyio
+async def test_snapshot_linked_manual_order_fails_closed_when_risk_rejected(monkeypatch):
+    from app.services.execution_analysis import execution_analyses
+    from app.services import authority_status as authority_module
+
+    snapshot_id = "a1b2c3d4e5f60718293a4b5c"
+    signal = SimpleNamespace(
+        direction="long",
+        entry=100.0,
+        stop_loss=98.0,
+        take_profit=106.0,
+        risk_reward=3.0,
+        tri_core_setup={
+            "actionable": True,
+            "direction": "long",
+            "grade": "A",
+            "setup_type": "range_boundary_ping_pong",
+            "event_id": "ping:test",
+        },
+    )
+    fake_snapshot = SimpleNamespace(
+        symbol="BTC/USDT",
+        signal=signal,
+        valid_until=datetime.now(timezone.utc),
+    )
+    monkeypatch.setattr(
+        execution_analyses, "get_by_snapshot_id", lambda _value: fake_snapshot
+    )
+
+    async def rejected(**_kwargs):
+        return {
+            "candidate_id": f"{snapshot_id}:ping:test",
+            "lifecycle_reason": "SL is too wide",
+            "risk": {"status": "rejected", "reason": "SL is too wide", "position_size": 0.0},
+            "order": {"ready": False},
+        }
+
+    monkeypatch.setattr(authority_module, "build_authority_status", rejected)
+    cfg = get_settings()
+    payload = {
+        "symbol": "BTC/USDT",
+        "direction": "long",
+        "entry": 100.0,
+        "stop_loss": 98.0,
+        "take_profit": 106.0,
+        "size": 1.0,
+        "setup_grade": "A",
+        "setup_type": "range_boundary_ping_pong",
+        "decision_snapshot_id": snapshot_id,
+        "setup_timeframe": "15m",
+        "tri_core_event_id": "ping:test",
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/trades/place",
+            json=payload,
+            headers={"X-API-Key": cfg.app_secret_key},
+        )
+
+    assert response.status_code == 409
+    assert "SL is too wide" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_snapshot_linked_manual_order_cannot_exceed_risk_size(monkeypatch):
+    from app.services.execution_analysis import execution_analyses
+    from app.services import authority_status as authority_module
+
+    snapshot_id = "b1b2c3d4e5f60718293a4b5c"
+    signal = SimpleNamespace(
+        direction="long",
+        entry=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        risk_reward=3.0,
+        tri_core_setup={
+            "actionable": True,
+            "direction": "long",
+            "grade": "A",
+            "setup_type": "fvg_retest",
+            "event_id": "fvg:test",
+        },
+    )
+    fake_snapshot = SimpleNamespace(
+        symbol="BTC/USDT",
+        signal=signal,
+        valid_until=datetime.now(timezone.utc),
+    )
+    monkeypatch.setattr(
+        execution_analyses, "get_by_snapshot_id", lambda _value: fake_snapshot
+    )
+
+    async def ready(**_kwargs):
+        return {
+            "candidate_id": f"{snapshot_id}:fvg:test",
+            "risk": {"status": "approved", "position_size": 1.0, "risk_pct": 0.6},
+            "order": {"ready": True},
+        }
+
+    monkeypatch.setattr(authority_module, "build_authority_status", ready)
+    cfg = get_settings()
+    payload = {
+        "symbol": "BTC/USDT",
+        "direction": "long",
+        "entry": 100.0,
+        "stop_loss": 99.0,
+        "take_profit": 103.0,
+        "size": 2.0,
+        "setup_grade": "A",
+        "setup_type": "fvg_retest",
+        "decision_snapshot_id": snapshot_id,
+        "setup_timeframe": "15m",
+        "tri_core_event_id": "fvg:test",
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/trades/place",
+            json=payload,
+            headers={"X-API-Key": cfg.app_secret_key},
+        )
+
+    assert response.status_code == 409
+    assert "exceeds Risk Engine maximum" in response.json()["detail"]
 
 
 @pytest.mark.anyio

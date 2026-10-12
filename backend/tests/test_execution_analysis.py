@@ -53,6 +53,11 @@ async def test_cached_execution_analysis_is_isolated_between_callers(monkeypatch
     ).hexdigest()[:20]
     key = ("BTC/USDT", "crypto", "binance", "limit", "15m", config_hash)
     canonical = _analysis(config=config)
+    canonical.systemic_risk = {
+        "status": "ALLOWED",
+        "execution_allowed": True,
+        "btc_snapshot_id": "btc-snapshot-1",
+    }
     service._cache[key] = canonical
 
     first = await service.get(
@@ -72,6 +77,7 @@ async def test_cached_execution_analysis_is_isolated_between_callers(monkeypatch
     first.strategy.rejection_reasons.append("caller-only rejection")
     first.signal.reaction["transition"] = {"changed": True}
     first.frame.iloc[0, first.frame.columns.get_loc("close")] = 1.0
+    first.systemic_risk["execution_allowed"] = False
 
     assert canonical.strategy.approved is True
     assert canonical.strategy.rejection_reasons == []
@@ -81,3 +87,5 @@ async def test_cached_execution_analysis_is_isolated_between_callers(monkeypatch
     assert second.strategy.rejection_reasons == []
     assert "transition" not in second.signal.reaction
     assert second.frame.iloc[0]["close"] == 101.0
+    assert canonical.systemic_risk["execution_allowed"] is True
+    assert second.systemic_risk["execution_allowed"] is True

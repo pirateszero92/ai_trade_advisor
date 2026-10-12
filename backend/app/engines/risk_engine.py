@@ -88,10 +88,23 @@ def get_asset_cluster(symbol: str) -> str:
     return "other"
 
 
+def validate_btc_anchor(
+    symbol: str,
+    direction: str,
+    systemic_risk: dict[str, Any] | None = None,
+) -> tuple[bool, Optional[str]]:
+    """Validate BTC Market Anchor for crypto altcoins."""
+    from app.services.btc_market_anchor import validate_btc_anchor as _val
+    return _val(symbol, direction, systemic_risk)
+
+
 def squeeze_adjusted_risk_pct(signal: SMCSignal) -> float:
-    """Translate SQZ strength into sizing only; it can never create or veto a setup."""
+    """Optionally translate SQZ strength into sizing; never create or veto a setup."""
     cfg = get_settings()
     base = min(float(cfg.tri_core_base_risk_pct), float(cfg.default_risk_per_trade), 1.0)
+    if not bool(getattr(cfg, "sqz_risk_scaling_enabled", False)):
+        return round(base, 4)
+
     cap = min(max(base, float(cfg.tri_core_max_risk_pct)), 1.0)
     decision = getattr(signal, "indicator_decision", {}) or {}
     bonus = float(decision.get("squeeze_bonus", 0) or 0)
@@ -112,9 +125,16 @@ class RiskAssessment:
     rejection_reason: Optional[str] = None
 
     # Position sizing
+    sizing_authority: str = "risk_engine"
+    risk_budget_source: str = "deterministic_config"
     position_size: float = 0.0          # in units or contracts
     risk_amount: float = 0.0            # account currency at risk
     risk_pct: float = 0.0               # % of account at risk
+    stop_distance_pct: float = 0.0
+    max_stop_distance_pct: float = 0.0
+    atr_pct: float | None = None
+    stop_distance_atr: float | None = None
+    stop_policy: str = "absolute"
     base_risk_pct: float = 0.0
     regime_risk_multiplier: float = 1.0
     cluster_risk_multiplier: float = 1.0
@@ -126,14 +146,24 @@ class RiskAssessment:
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     risk_reward: float = 0.0
+    structural_rr: float = 0.0
+    executable_rr: float = 0.0
+    minimum_executable_rr: float = 0.0
     execution_cost_per_unit: float = 0.0
 
     # Guardrails
     daily_loss_ok: bool = True
     position_count_ok: bool = True
     cluster_exposure_ok: bool = True
+    portfolio_notional_ok: bool = True
     sl_valid: bool = True
     rr_ok: bool = True
+
+    # Portfolio exposure
+    current_gross_notional: float = 0.0
+    new_position_notional: float = 0.0
+    portfolio_gross_notional: float = 0.0
+    max_portfolio_notional: float = 0.0
 
     # Adjustment flags
     tone: Literal["normal", "cautious", "aggressive"] = "normal"
@@ -155,6 +185,9 @@ class RiskEngine:
 
     MIN_RR = 1.5              # Minimum acceptable risk-reward ratio
     SL_MAX_PCT = 0.05         # Maximum SL distance as % of entry (5 %)
+    # Candidate seed only. Walk-forward calibration may replace this value;
+    # the absolute 5% circuit breaker above remains authoritative.
+    ATR_STOP_MULTIPLIER = 1.25
     SL_MIN_PCT = 0.0025       # Minimum SL distance as % of entry (0.25 %) to avoid fee explosion & 1-tick noise
     MAX_FEE_TO_RISK_RATIO = 0.50  # Max ratio of per-unit execution cost to SL distance (50%)
     MAX_CLUSTER_POSITIONS = 2 # Max concurrent positions in same correlated cluster
@@ -179,27 +212,31 @@ class RiskEngine:
         contract_multiplier: float = 1.0,
         quantity_step: float = 0.000001,
         max_leverage: float = 5.0,
+        current_gross_notional: float = 0.0,
         active_positions: Optional[list[dict[str, Any]]] = None,
         execution_cost_per_unit: float = 0.0,
         risk_per_trade_pct: float | None = None,
         minimum_rr: float | None = None,
         max_stop_distance_pct: float | None = None,
+        atr_pct: float | None = None,
     ) -> RiskAssessment:
         """
         Evaluate the risk of trading a given SMCSignal.
         """
         cluster = get_asset_cluster(signal.symbol)
+        structural_rr = float(getattr(signal, "risk_reward", 0.0) or 0.0)
         assessment = RiskAssessment(
             entry=signal.entry,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
-            risk_reward=signal.risk_reward,
+            risk_reward=structural_rr,
+            structural_rr=structural_rr,
             asset_cluster=cluster,
         )
 
         numeric_inputs = (account_balance, open_positions, daily_pnl_pct, drawdown_pct,
                           contract_multiplier, quantity_step, max_leverage,
-                          execution_cost_per_unit)
+                          current_gross_notional, execution_cost_per_unit)
         if any(not math.isfinite(float(value)) for value in numeric_inputs):
             assessment.rejection_reason = "Risk inputs must be finite numbers"
             return assessment
@@ -207,34 +244,42 @@ class RiskEngine:
             assessment.rejection_reason = "Account balance must be positive"
             return assessment
         if (open_positions < 0 or contract_multiplier <= 0 or quantity_step <= 0
-                or max_leverage <= 0 or execution_cost_per_unit < 0):
+                or max_leverage <= 0 or current_gross_notional < 0
+                or execution_cost_per_unit < 0):
             assessment.rejection_reason = "Position count and instrument metadata are invalid"
             return assessment
 
+        # BTC Market Anchor systemic risk check
+        systemic_risk = getattr(signal, "systemic_risk", {}) or {}
+        if systemic_risk and systemic_risk.get("execution_allowed", True) is False:
+            assessment.approved = False
+            assessment.rejection_reason = (
+                f"BTC Market Anchor: {systemic_risk.get('reason') or systemic_risk.get('reason_code') or 'BTC_REGIME_CONFLICT'}"
+            )
+            return assessment
+
         regime_data = getattr(signal, "market_regime", {})
-        # Enforce fail-closed Market Regime Gate:
-        # If market_regime data is explicitly provided by upstream, it MUST be valid, ready,
-        # and contain an actionable policy. Empty dict {} indicates legacy/unaware callers.
+        # Regime is sizing context only. RiskEngine must not become a competing
+        # setup/entry authority by reading ready/entry_allowed gates.
         if isinstance(regime_data, dict) and regime_data:
             assessment.market_regime = str(regime_data.get("regime", "unknown"))
             regime_policy = regime_data.get("policy")
-            if not isinstance(regime_policy, dict) or not regime_policy:
-                assessment.rejection_reason = (
-                    f"Market regime policy missing or incomplete for {assessment.market_regime}; risk gate failed-closed"
+            if isinstance(regime_policy, dict) and regime_policy:
+                multiplier = regime_policy.get("risk_multiplier", 1.0)
+                try:
+                    multiplier = float(multiplier)
+                except (TypeError, ValueError):
+                    multiplier = 1.0
+                if not math.isfinite(multiplier) or multiplier <= 0:
+                    multiplier = 1.0
+                    assessment.warnings.append(
+                        "Invalid regime risk multiplier ignored; using neutral sizing"
+                    )
+                assessment.regime_risk_multiplier = multiplier
+            else:
+                assessment.warnings.append(
+                    "Regime policy unavailable; using neutral risk multiplier"
                 )
-                return assessment
-            assessment.regime_risk_multiplier = float(
-                regime_policy.get("risk_multiplier", 0.0)
-            )
-            if (
-                not regime_data.get("ready", False)
-                or not regime_policy.get("entry_allowed", False)
-                or assessment.regime_risk_multiplier <= 0
-            ):
-                assessment.rejection_reason = (
-                    f"New risk is blocked in {assessment.market_regime} regime"
-                )
-                return assessment
         else:
             regime_policy = {}
 
@@ -321,6 +366,20 @@ class RiskEngine:
                 effective_max_stop_pct,
                 float(max_stop_distance_pct) / 100.0,
             )
+        if atr_pct is not None:
+            if not math.isfinite(float(atr_pct)) or not 0 < float(atr_pct) <= 20:
+                assessment.rejection_reason = "ATR percent must be between 0 and 20 percent"
+                return assessment
+            atr_stop_pct = (float(atr_pct) / 100.0) * self.ATR_STOP_MULTIPLIER
+            effective_max_stop_pct = min(
+                self.SL_MAX_PCT,
+                max(effective_max_stop_pct, atr_stop_pct),
+            )
+            assessment.atr_pct = float(atr_pct)
+            assessment.stop_distance_atr = sl_pct / (float(atr_pct) / 100.0)
+            assessment.stop_policy = "atr_aware_candidate_seed"
+        assessment.stop_distance_pct = sl_pct * 100.0
+        assessment.max_stop_distance_pct = effective_max_stop_pct * 100.0
         if sl_pct > effective_max_stop_pct:
             assessment.sl_valid = False
             assessment.rejection_reason = (
@@ -347,36 +406,48 @@ class RiskEngine:
                 )
                 return assessment
 
-        # --- 5. R:R check ---
-        # Costs belong in both sides of the expectancy equation: they increase
-        # the amount lost at the stop and reduce the reward available at target.
+        # --- 5. R:R calculation (observability only) ---
+        # ExecutionRevalidator already enforced the minimum executable R:R
+        # threshold before this stage runs.  RiskEngine records the calculated
+        # value and sets rr_ok for downstream display but does NOT hard-reject
+        # here to avoid a double-gate with the identical threshold.
+        # The safety floor (MIN_RR) is used only when no minimum_rr was passed
+        # in — i.e. when RiskEngine is called directly in tests / standalone.
         all_in_risk_dist = max(sl_dist + execution_cost_per_unit, 1e-9)
         net_reward_dist = max(
             abs(signal.take_profit - signal.entry) - execution_cost_per_unit,
             0.0,
         )
         calculated_rr = net_reward_dist / all_in_risk_dist
-        assessment.risk_reward = round(calculated_rr, 4)
+        assessment.executable_rr = round(calculated_rr, 4)
+        assessment.risk_reward = assessment.executable_rr
         assessment.execution_cost_per_unit = round(execution_cost_per_unit, 10)
         if minimum_rr is not None:
             if not math.isfinite(float(minimum_rr)) or not 1 <= float(minimum_rr) <= 20:
                 assessment.rejection_reason = "Minimum R:R must be between 1 and 20"
                 return assessment
-        effective_min_rr = max(
-            self.MIN_RR,
-            float(regime_policy.get("min_rr", self.MIN_RR)) if regime_policy else self.MIN_RR,
-            float(minimum_rr) if minimum_rr is not None else self.MIN_RR,
+        effective_min_rr = (
+            float(minimum_rr) if minimum_rr is not None else self.MIN_RR
         )
         if not math.isfinite(effective_min_rr):
-            assessment.rejection_reason = "Minimum R:R must be a finite number"
+            assessment.rejection_reason = "Minimum executable R:R must be a finite number"
             return assessment
+        assessment.minimum_executable_rr = round(effective_min_rr, 4)
         if calculated_rr < effective_min_rr:
             assessment.rr_ok = False
-            assessment.approved = False
-            assessment.rejection_reason = (
-                f"R:R too low ({calculated_rr:.2f} < {effective_min_rr})"
+            # Only hard-reject when called standalone (no minimum_rr passed in).
+            # In the auto-pilot pipeline, ExecutionRevalidator is the R:R gate owner.
+            if minimum_rr is None:
+                assessment.approved = False
+                assessment.rejection_reason = (
+                    f"R:R too low ({calculated_rr:.2f} < {effective_min_rr})"
+                )
+                return assessment
+            assessment.warnings.append(
+                f"R:R {calculated_rr:.2f} below floor {effective_min_rr:.2f}"
+                " (already validated by ExecutionRevalidator)"
             )
-            return assessment
+
 
         # --- 6. Position sizing ---
         if risk_per_trade_pct is not None and (
@@ -389,6 +460,11 @@ class RiskEngine:
             assessment,
             base_override=risk_per_trade_pct,
         )
+        assessment.risk_budget_source = (
+            "deterministic_config_sqz"
+            if bool(getattr(self.cfg, "sqz_risk_scaling_enabled", False))
+            else "deterministic_config"
+        )
         assessment.base_risk_pct = base_risk_pct
         risk_pct = base_risk_pct * assessment.regime_risk_multiplier * assessment.cluster_risk_multiplier
         if assessment.regime_risk_multiplier < 1.0 or assessment.cluster_risk_multiplier < 1.0:
@@ -400,9 +476,19 @@ class RiskEngine:
                 )
         risk_budget = account_balance * (risk_pct / 100)
         
-        # Instrument-aware sizing
+        # Instrument-aware sizing with an aggregate portfolio leverage ceiling.
         max_notional = account_balance * max_leverage
-        max_units = max_notional / (signal.entry * contract_multiplier)
+        assessment.current_gross_notional = round(current_gross_notional, 8)
+        assessment.max_portfolio_notional = round(max_notional, 8)
+        if current_gross_notional >= max_notional - 1e-9:
+            assessment.portfolio_notional_ok = False
+            assessment.rejection_reason = (
+                f"Aggregate portfolio notional limit reached "
+                f"({current_gross_notional:.2f} >= {max_notional:.2f})"
+            )
+            return assessment
+        remaining_portfolio_notional = max(max_notional - current_gross_notional, 0.0)
+        max_units = remaining_portfolio_notional / (signal.entry * contract_multiplier)
         raw_size = risk_budget / (all_in_risk_dist * contract_multiplier)
         capped_size = min(raw_size, max_units)
         step_d = Decimal(str(quantity_step))
@@ -413,6 +499,22 @@ class RiskEngine:
         position_size = round(float(steps * step_d), step_decimals)
         if position_size <= 0:
             assessment.rejection_reason = "Account is too small for the instrument quantity step"
+            return assessment
+
+        new_position_notional = (
+            position_size * signal.entry * contract_multiplier
+        )
+        portfolio_gross_notional = current_gross_notional + new_position_notional
+        assessment.current_gross_notional = round(current_gross_notional, 8)
+        assessment.new_position_notional = round(new_position_notional, 8)
+        assessment.portfolio_gross_notional = round(portfolio_gross_notional, 8)
+        assessment.max_portfolio_notional = round(max_notional, 8)
+        if portfolio_gross_notional > max_notional + 1e-9:
+            assessment.portfolio_notional_ok = False
+            assessment.rejection_reason = (
+                f"Aggregate portfolio notional exceeds leverage cap "
+                f"({portfolio_gross_notional:.2f} > {max_notional:.2f})"
+            )
             return assessment
 
         actual_risk = position_size * all_in_risk_dist * contract_multiplier

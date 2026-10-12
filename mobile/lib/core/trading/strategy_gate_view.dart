@@ -185,7 +185,7 @@ class StrategyGateView {
     return '$confluence/${minConfluence.round()}';
   }
 
-  String get evidenceScoreLabel => 'Evidence L$longEvidence/S$shortEvidence';
+  String get evidenceScoreLabel => 'Context L$longEvidence/S$shortEvidence';
 
   String get waitReasonThai {
     if (approved) return 'ผ่าน Strategy Gate';

@@ -100,6 +100,9 @@ async def analyse_signal(
         "position_size": risk.position_size,
         "risk_pct": risk.risk_pct,
         "risk_amount": risk.risk_amount,
+        "structural_rr": risk.structural_rr,
+        "executable_rr": risk.executable_rr,
+        "minimum_executable_rr": risk.minimum_executable_rr,
         "base_risk_pct": risk.base_risk_pct,
         "regime_risk_multiplier": risk.regime_risk_multiplier,
         "market_regime": risk.market_regime,
@@ -135,7 +138,8 @@ async def analyse_signal(
         "strategy": strategy_result.to_dict(),
         "risk": risk_payload,
         "ai_analysis": ai_result,
-        "decision_authority": "execution_timeframe_only",
+        "decision_authority": "tri_core_setup_engine",
+        "execution_scope": "execution_timeframe_only",
         "evidence": evidence,
     }
 
@@ -212,14 +216,50 @@ async def list_signals(
     signals = signals[:limit]
 
     from app.services.execution_analysis import execution_analyses
+    from app.services.authority_status import build_authority_status
     for s in signals:
         sym = s.get("symbol", "")
-        for cached in execution_analyses._cache.values():
-            if cached.symbol == sym:
-                rev = getattr(cached.signal, "ai_review", {})
-                if rev and rev.get("status") in ("reviewed", "error"):
-                    s["ai_review"] = rev
-                break
+        analysis_snapshot = s.get("analysis_snapshot") or {}
+        tri_core = s.get("tri_core_setup") or {}
+        snapshot_id = str(analysis_snapshot.get("snapshot_id") or "")
+        event_id = str(tri_core.get("event_id") or "")
+        existing_review = s.get("ai_review") or {}
+        existing_review_snapshot = str(existing_review.get("input_snapshot_id") or "")
+        if existing_review_snapshot and existing_review_snapshot != snapshot_id:
+            s["ai_review"] = {
+                "status": "discarded",
+                "verdict": "UNAVAILABLE",
+                "failure_type": "STALE_REVIEW",
+                "input_snapshot_id": existing_review_snapshot,
+                "expected_snapshot_id": snapshot_id,
+                "advisory_only": True,
+            }
+        cached = execution_analyses.get_by_snapshot_id(snapshot_id) if snapshot_id else None
+        if cached is not None:
+            s["systemic_risk"] = dict(cached.systemic_risk or {})
+            review = getattr(cached.signal, "ai_review", {}) or {}
+            review_snapshot = str(review.get("input_snapshot_id") or "")
+            same_identity = (
+                cached.symbol.upper() == str(sym).upper()
+                and cached.exchange.lower() == str(s.get("exchange") or "").lower()
+                and cached.timeframe.lower()
+                == str(analysis_snapshot.get("timeframe") or s.get("timeframe") or "").lower()
+            )
+            if (
+                same_identity
+                and review_snapshot == snapshot_id
+                and review.get("status") == "reviewed"
+            ):
+                s["ai_review"] = review
+        effective_snapshot_id = snapshot_id or f"snap-{sym}"
+        effective_event_id = event_id or f"wait-{sym}"
+        s["authority_status"] = await build_authority_status(
+            symbol=sym,
+            snapshot_id=effective_snapshot_id,
+            event_id=effective_event_id,
+            tri_core_setup=tri_core,
+            structural_rr=s.get("risk_reward"),
+        )
         if "message" in s:
             s["message"] = _clean_message_text(s["message"])
 
@@ -292,6 +332,22 @@ async def trigger_scan(
         filtered_signals = [s for s in filtered_signals if s.get("exchange") == "innovestx" or "thb" in s.get("symbol", "").lower()]
     elif mode == "paper":
         filtered_signals = [s for s in filtered_signals if s.get("exchange") != "innovestx" and "thb" not in s.get("symbol", "").lower()]
+
+    from app.services.authority_status import build_authority_status
+    for signal in filtered_signals:
+        snapshot = signal.get("analysis_snapshot") or {}
+        tri_core = signal.get("tri_core_setup") or {}
+        snapshot_id = str(snapshot.get("snapshot_id") or "")
+        event_id = str(tri_core.get("event_id") or "")
+        effective_snapshot_id = snapshot_id or f"snap-{signal.get('symbol')}"
+        effective_event_id = event_id or f"wait-{signal.get('symbol')}"
+        signal["authority_status"] = await build_authority_status(
+            symbol=str(signal.get("symbol") or ""),
+            snapshot_id=effective_snapshot_id,
+            event_id=effective_event_id,
+            tri_core_setup=tri_core,
+            structural_rr=signal.get("risk_reward"),
+        )
 
     return {
         "message": f"Scan complete. {len(filtered_signals)} setups ({mode or 'all'}).",

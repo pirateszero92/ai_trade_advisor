@@ -419,7 +419,7 @@ def test_ranging_gate_accepts_confirmed_15m_zone_reaction_without_fake_sweep():
     result = StrategyEngine().evaluate(sig)
 
     assert result.approved is True
-    assert any("Causal SMC setup" in check for check in result.passed_checks)
+    assert any("Tri-Core candidate is actionable" in check for check in result.passed_checks)
 
 
 def test_15m_resistance_false_break_rejection_is_distinct():
@@ -707,8 +707,10 @@ def test_strategy_engine_regime_policy_safe_defaults():
     strat = StrategyEngine()
     res = strat.evaluate(sig)
     assert res.approved is True
-    assert res.effective_policy["min_confluence"] == 65.0
-    assert res.effective_policy["min_rr"] == 2.0
+    assert res.effective_policy["entry_allowed"] is True
+    assert res.effective_policy["risk_multiplier"] == 1.0
+    assert "min_confluence" not in res.effective_policy
+    assert "min_rr" not in res.effective_policy
 
 
 def test_strategy_engine_does_not_use_mid_range_as_entry_gate():

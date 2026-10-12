@@ -244,31 +244,54 @@ class AdvancedIndicatorsEngine:
         hl_range = high - low
         hl_range = hl_range.replace(0, 1e-8)
 
-        trusted_flow_sources = {"binance_taker_volume"}
+        trusted_flow_sources = {
+            "binance_taker_volume",
+            "alpaca_quote_classified",
+        }
         normalized_sources = (
             df["flow_source"].astype("string").str.strip().str.lower()
             if "flow_source" in df.columns else pd.Series(dtype="string")
         )
         flow_sources = set(normalized_sources.dropna())
-        trusted_aggressor = (
+        trusted_mask = normalized_sources.isin(trusted_flow_sources)
+        trusted_tail_bars = 0
+        if len(trusted_mask) == len(df):
+            for value in reversed(trusted_mask.tolist()):
+                if not bool(value):
+                    break
+                trusted_tail_bars += 1
+        is_native_crypto_flow = (
             len(normalized_sources) == len(df)
-            and bool(flow_sources)
             and not normalized_sources.isna().any()
-            and bool(normalized_sources.isin(trusted_flow_sources).all())
+            and bool((normalized_sources == "binance_taker_volume").all())
         )
+        is_equity_flow = (
+            trusted_tail_bars >= 8
+            and str(normalized_sources.iloc[-1]) == "alpaca_quote_classified"
+        )
+        trusted_aggressor = is_native_crypto_flow or is_equity_flow
+        trusted_start_index = 0 if is_native_crypto_flow else len(df) - trusted_tail_bars
 
         if {"buy_volume", "sell_volume"}.issubset(df.columns) and trusted_aggressor:
             aggressor = df[["buy_volume", "sell_volume"]].apply(pd.to_numeric, errors="coerce")
-            if not np.isfinite(aggressor.to_numpy()).all():
+            trusted_aggressor_rows = aggressor.iloc[trusted_start_index:]
+            if not np.isfinite(trusted_aggressor_rows.to_numpy()).all():
                 raise ValueError("Aggressor volume contains NaN or infinite values")
-            if bool((aggressor < 0).any().any()):
+            if bool((trusted_aggressor_rows < 0).any().any()):
                 raise ValueError("Aggressor volume cannot be negative")
-            buy_vol = aggressor["buy_volume"]
-            sell_vol = aggressor["sell_volume"]
+            buy_vol = aggressor["buy_volume"].fillna(0.0)
+            sell_vol = aggressor["sell_volume"].fillna(0.0)
             reported_total = buy_vol + sell_vol
             tolerance = np.maximum(vol.abs() * 0.01, 1e-8)
-            if bool(((reported_total - vol).abs() > tolerance).any()):
+            if is_native_crypto_flow and bool(
+                ((reported_total - vol).abs() > tolerance).any()
+            ):
                 raise ValueError("Aggressor buy/sell volume does not reconcile with total volume")
+            if is_equity_flow and bool(
+                (reported_total.iloc[trusted_start_index:]
+                 > vol.iloc[trusted_start_index:] + tolerance.iloc[trusted_start_index:]).any()
+            ):
+                raise ValueError("Classified equity volume exceeds reported bar volume")
             delta_series = buy_vol - sell_vol
             delta_source = "exchange_aggressor"
         else:
@@ -331,7 +354,7 @@ class AdvancedIndicatorsEngine:
         if delta_source == "exchange_aggressor" and pivot_end >= 5:
             lows = []
             highs = []
-            for i in range(2, pivot_end):
+            for i in range(max(2, trusted_start_index + 2), pivot_end):
                 if low.iloc[i] < low.iloc[i-2:i].min() and low.iloc[i] < low.iloc[i+1:i+3].min():
                     lows.append(i)
                 if high.iloc[i] > high.iloc[i-2:i].max() and high.iloc[i] > high.iloc[i+1:i+3].max():
@@ -420,7 +443,7 @@ class AdvancedIndicatorsEngine:
                 "delta": curr_delta,
                 "delta_ratio": delta_ratio,
                 "current_cvd": curr_cvd,
-                "flow_source": next(iter(flow_sources)),
+                "flow_source": str(normalized_sources.iloc[-1]),
             }
 
         return VolumeDeltaResult(
@@ -433,7 +456,10 @@ class AdvancedIndicatorsEngine:
             volume_spike=volume_spike,
             description=(desc if delta_source == "exchange_aggressor" else f"Estimated candle-volume proxy: {desc}"),
             source=delta_source,
-            flow_source=(next(iter(flow_sources)) if trusted_aggressor else "unavailable"),
+            flow_source=(
+                str(normalized_sources.iloc[-1])
+                if trusted_aggressor else "unavailable"
+            ),
             divergence=divergence,
             divergence_evidence=divergence_evidence,
             absorption_evidence=absorption_evidence,

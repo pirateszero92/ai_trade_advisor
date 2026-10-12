@@ -112,7 +112,10 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
   @override
   void didUpdateWidget(covariant SMCInteractiveChart oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(widget.candles, oldWidget.candles) ||
+    if (widget.symbol != oldWidget.symbol) {
+      _resetView();
+      _recomputeCandleIndex();
+    } else if (!identical(widget.candles, oldWidget.candles) ||
         widget.candles.length != oldWidget.candles.length) {
       _recomputeCandleIndex();
     }
@@ -159,6 +162,8 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
       builder: (context, constraints) {
         final chartWidth =
             math.max(10.0, constraints.maxWidth - 70); // 70px right price axis
+        final chartHeight =
+            math.max(10.0, constraints.maxHeight - 24.0); // 24px time axis
         final isOverPriceScale =
             _hoverOffset != null && _hoverOffset!.dx >= chartWidth;
 
@@ -168,6 +173,35 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
             maxScrollRight); // Allow smooth panning into future space
         final effectiveScrollOffset =
             _scrollOffset.clamp(minScrollLeft, maxScrollRight);
+
+        // Precompute visible price span for vertical drag calibration
+        const rightPadding = 20.0;
+        final rawStart =
+            ((effectiveScrollOffset - rightPadding) / _candleWidth).floor() - 1;
+        final startIndex = rawStart.clamp(0, widget.candles.length - 1);
+        final rawEnd =
+            ((chartWidth - rightPadding + effectiveScrollOffset) / _candleWidth)
+                    .ceil() +
+                3;
+        final endIndex = rawEnd.clamp(startIndex, widget.candles.length - 1);
+        final visibleCandles =
+            widget.candles.sublist(startIndex, endIndex + 1);
+
+        double minPrice = visibleCandles.map((c) => c.low).reduce(math.min);
+        double maxPrice = visibleCandles.map((c) => c.high).reduce(math.max);
+        if (widget.currentPrice > 0) {
+          minPrice = math.min(minPrice, widget.currentPrice);
+          maxPrice = math.max(maxPrice, widget.currentPrice);
+        }
+        final basePriceSpan = maxPrice - minPrice;
+        final paddedMinPrice =
+            minPrice - (basePriceSpan > 0 ? basePriceSpan * 0.06 : 1.0);
+        final paddedMaxPrice =
+            maxPrice + (basePriceSpan > 0 ? basePriceSpan * 0.06 : 1.0);
+        final baseHalfSpan = (paddedMaxPrice - paddedMinPrice) / 2.0;
+        final scaledHalfSpan = baseHalfSpan / _priceScaleMultiplier;
+        final effectiveSpan = scaledHalfSpan * 2.0;
+        final pricePerPixel = effectiveSpan / chartHeight;
 
         return Stack(
           children: [
@@ -230,6 +264,14 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
                           _scrollOffset =
                               (_scrollOffset + details.focalPointDelta.dx)
                                   .clamp(minScrollLeft, maxScrollRight);
+
+                          // Pan chart vertically (TradingView style 2D drag)
+                          final dy = details.focalPointDelta.dy;
+                          if (dy != 0 && chartHeight > 0) {
+                            final maxPriceOffset = scaledHalfSpan * 20.0;
+                            _priceOffset = (_priceOffset + (dy * pricePerPixel))
+                                .clamp(-maxPriceOffset, maxPriceOffset);
+                          }
                           _hoverOffset = details.localFocalPoint;
                         }
                       } else {
@@ -850,6 +892,7 @@ class _SMCUnifiedPainter extends CustomPainter {
               offset: Offset(rayLeft + 4, y - 14),
               bgColor: const Color(0xFF251A1E),
               textColor: AppColors.bearish,
+              chartWidth: chartWidth,
             );
           }
         }
@@ -878,6 +921,7 @@ class _SMCUnifiedPainter extends CustomPainter {
               offset: Offset(rayLeft + 4, y + 2),
               bgColor: const Color(0xFF1A251E),
               textColor: AppColors.bullish,
+              chartWidth: chartWidth,
             );
           }
         }
@@ -1035,7 +1079,20 @@ class _SMCUnifiedPainter extends CustomPainter {
         volumeMaPath.lineTo(x, y);
       }
     }
-    if (volumeMaStarted) canvas.drawPath(volumeMaPath, volumeMaPaint);
+    if (volumeMaStarted) {
+      canvas.drawPath(volumeMaPath, volumeMaPaint);
+      _drawText(
+        canvas,
+        text: 'Vol MA 20',
+        offset: Offset(8, chartHeight - volAreaHeight + 2),
+        style: const TextStyle(
+          fontSize: 8.5,
+          color: Color(0xFF2962FF),
+          fontWeight: FontWeight.w600,
+          fontFamily: 'monospace',
+        ),
+      );
+    }
 
     // ------------------------------------------------------------------------
     // E. Draw Current Live Price Line & Right Axis Badge
@@ -1182,6 +1239,7 @@ class _SMCUnifiedPainter extends CustomPainter {
     required Color bgColor,
     required Color textColor,
     Color? borderColor,
+    double? chartWidth,
   }) {
     final textSpan = TextSpan(
       text: text,
@@ -1198,12 +1256,21 @@ class _SMCUnifiedPainter extends CustomPainter {
 
     const paddingH = 6.0;
     const paddingV = 2.0;
+    final totalWidth = textPainter.width + (paddingH * 2);
+    final totalHeight = textPainter.height + (paddingV * 2);
+    
+    // Clamp dx so it doesn't overflow the right edge of the chart area if chartWidth is provided
+    final double clampedX = chartWidth != null
+        ? offset.dx.clamp(2.0, math.max(2.0, chartWidth - totalWidth - 2.0)).toDouble()
+        : offset.dx;
+    final clampedY = offset.dy;
+
     final rect = RRect.fromRectAndRadius(
       Rect.fromLTWH(
-        offset.dx,
-        offset.dy,
-        textPainter.width + (paddingH * 2),
-        textPainter.height + (paddingV * 2),
+        clampedX,
+        clampedY,
+        totalWidth,
+        totalHeight,
       ),
       const Radius.circular(4),
     );
@@ -1219,7 +1286,7 @@ class _SMCUnifiedPainter extends CustomPainter {
     }
 
     textPainter.paint(
-        canvas, Offset(offset.dx + paddingH, offset.dy + paddingV));
+        canvas, Offset(clampedX + paddingH, clampedY + paddingV));
   }
 
   void _drawText(Canvas canvas,

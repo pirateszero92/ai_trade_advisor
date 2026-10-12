@@ -12,6 +12,7 @@ import pandas as pd
 from app.engines.risk_engine import RiskEngine, squeeze_adjusted_risk_pct
 from app.engines.timeframe_profiles import validate_timeframe_profiles
 from app.services.execution_analysis import analyze_execution_frame
+from app.services.evidence import fingerprint
 
 _RESAMPLE_RULES = {
     "15m": "15min",
@@ -88,6 +89,136 @@ class ExecutionAssumptions:
             value = float(getattr(self, name))
             if not 0 < value <= 1:
                 raise ValueError(f"{name} must be greater than 0 and at most 1")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _frame_replay_hash(frame: pd.DataFrame) -> str:
+    columns = [
+        column for column in (
+            "open", "high", "low", "close", "volume",
+            "buy_volume", "sell_volume", "volume_delta", "cvd", "flow_source",
+        )
+        if column in frame.columns
+    ]
+    payload = {
+        "index": [pd.Timestamp(value).isoformat() for value in frame.index],
+        "columns": columns,
+        "rows": frame[columns].where(pd.notna(frame[columns]), None).to_dict(orient="records"),
+    }
+    return fingerprint(payload)
+
+
+def build_replay_manifest(
+    *,
+    frame: pd.DataFrame,
+    symbol: str,
+    timeframe: str,
+    config: dict[str, Any],
+    assumptions: ExecutionAssumptions,
+    replay_parameters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "market_data_hash": _frame_replay_hash(frame),
+        "config_hash": fingerprint(config),
+        "execution_assumptions": assumptions.to_dict(),
+        "execution_assumptions_hash": fingerprint(assumptions.to_dict()),
+        "replay_parameters": deepcopy(replay_parameters or {}),
+        "replay_parameters_hash": fingerprint(replay_parameters or {}),
+        "closed_candle_only": True,
+        "decision_history_boundary": "history_ends_at_decision_bar",
+        "execution_future_boundary": "future_starts_after_decision_bar",
+        "future_leakage_allowed": False,
+        "ai_review_mode": "external_annotation_only",
+        "llm_called_during_backtest": False,
+    }
+
+
+def build_ai_review_cohorts(
+    attempts: list[dict[str, Any]],
+    *,
+    ai_reviews: dict[str, dict[str, Any]] | None = None,
+    initial_capital: float = 10_000.0,
+) -> dict[str, Any]:
+    reviews = ai_reviews or {}
+    cohorts: dict[str, list[dict[str, Any]]] = {
+        "all_deterministic": list(attempts),
+        "ai_coherent": [],
+        "ai_conflict": [],
+        "ai_unavailable": [],
+    }
+    for attempt in attempts:
+        decision_id = str(attempt.get("decision_id") or "")
+        verdict = str((reviews.get(decision_id) or {}).get("verdict") or "").upper()
+        if verdict == "COHERENT":
+            cohorts["ai_coherent"].append(attempt)
+        elif verdict == "CONFLICT":
+            cohorts["ai_conflict"].append(attempt)
+        elif verdict == "UNAVAILABLE":
+            cohorts["ai_unavailable"].append(attempt)
+    metrics = {
+        name: calculate_backtest_metrics(
+            items,
+            initial_capital=initial_capital,
+            evaluation_mode=f"review_cohort:{name}",
+        )
+        for name, items in cohorts.items()
+    }
+    return {
+        "review_source": "external_recorded_reviews_only",
+        "llm_called_during_backtest": False,
+        "counts": {name: len(items) for name, items in cohorts.items()},
+        "metrics": metrics,
+        "decision_ids_with_review": sorted(
+            decision_id for decision_id in reviews if decision_id
+        ),
+    }
+
+
+@dataclass(frozen=True)
+class WalkForwardValidationCriteria:
+    min_symbols: int = 2
+    min_asset_classes: int = 2
+    min_total_completed_trades: int = 100
+    min_completed_trades_per_symbol: int = 20
+    min_oos_folds_per_symbol: int = 3
+    min_expectancy_r: float = 0.05
+    min_profit_factor: float = 1.10
+    max_drawdown_pct: float = 15.0
+    min_fill_rate: float = 0.65
+    min_regimes_tested: int = 2
+    min_true_aggressor_coverage: float = 0.95
+    min_history_days: float = 90.0
+
+    def __post_init__(self) -> None:
+        if self.min_symbols < 1:
+            raise ValueError("min_symbols must be positive")
+        if self.min_asset_classes < 1:
+            raise ValueError("min_asset_classes must be positive")
+        if self.min_total_completed_trades < 1:
+            raise ValueError("min_total_completed_trades must be positive")
+        if self.min_completed_trades_per_symbol < 1:
+            raise ValueError("min_completed_trades_per_symbol must be positive")
+        if self.min_oos_folds_per_symbol < 1:
+            raise ValueError("min_oos_folds_per_symbol must be positive")
+        if not -5 <= self.min_expectancy_r <= 10:
+            raise ValueError("min_expectancy_r is outside the safe range")
+        if not 0 <= self.min_profit_factor <= 100:
+            raise ValueError("min_profit_factor is outside the safe range")
+        if not 0 < self.max_drawdown_pct <= 100:
+            raise ValueError("max_drawdown_pct must be between 0 and 100")
+        if not 0 <= self.min_fill_rate <= 1:
+            raise ValueError("min_fill_rate must be between 0 and 1")
+        if self.min_regimes_tested < 1:
+            raise ValueError("min_regimes_tested must be positive")
+        if not 0 < self.min_true_aggressor_coverage <= 1:
+            raise ValueError("min_true_aggressor_coverage must be between 0 and 1")
+        if self.min_history_days < 1:
+            raise ValueError("min_history_days must be positive")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -399,7 +530,8 @@ def simulate_execution(
     if risk_per_unit <= 0:
         raise ValueError("Execution costs produced an invalid risk distance")
 
-    assert first_entry_offset is not None
+    if first_entry_offset is None:
+        raise RuntimeError("Execution invariant violated: filled trade has no first entry offset")
     if exit_reason is None:
         monitor_start = last_entry_offset + 1 if remaining <= requested_quantity * 1e-12 else entry_deadline
         holding_end = min(len(bars), first_entry_offset + assumptions.max_holding_bars + 1)
@@ -463,7 +595,10 @@ def simulate_execution(
             else:
                 active_stop = max(min(active_stop, candidate), take_profit + 1e-12)
 
-    assert exit_offset is not None and exit_reference is not None
+    if exit_offset is None or exit_reference is None:
+        raise RuntimeError(
+            "Execution invariant violated: exit selected without offset/reference metadata"
+        )
 
     exit_price = _execution_price(exit_reference, direction, "exit", assumptions)
     exit_fee = abs(exit_price * filled_quantity) * assumptions.fee_bps / 10_000.0
@@ -572,9 +707,12 @@ def calculate_backtest_metrics(
         }
 
     scenarios: dict[str, list[dict[str, Any]]] = {}
+    strategy_families: dict[str, list[dict[str, Any]]] = {}
     for item in completed:
         scenario = str(item.get("scenario_id") or item.get("scenario") or "UNKNOWN")
         scenarios.setdefault(scenario, []).append(item)
+        family = str(item.get("strategy_family") or "none")
+        strategy_families.setdefault(family, []).append(item)
 
     by_scenario = {}
     for scenario_name, values in sorted(scenarios.items()):
@@ -593,6 +731,29 @@ def calculate_backtest_metrics(
             "expectancy_r": round(sum(sc_r) / len(sc_r), 4) if sc_r else 0.0,
             "profit_factor": sc_pf,
             "net_pnl": round(sum(sc_pnl), 2),
+        }
+
+    by_strategy_family = {}
+    for family_name, values in sorted(strategy_families.items()):
+        family_r = [float(val["r_multiple"]) for val in values]
+        family_pnl = [float(val["net_pnl"]) for val in values]
+        family_wins = [v for v in family_r if v > 1e-9]
+        family_losses = [v for v in family_r if v < -1e-9]
+        family_gross_profit = sum(v for v in family_pnl if v > 0)
+        family_gross_loss = abs(sum(v for v in family_pnl if v < 0))
+        family_pf = (
+            round(family_gross_profit / family_gross_loss, 2)
+            if family_gross_loss > 0
+            else (99.9 if family_gross_profit > 0 else 0.0)
+        )
+        by_strategy_family[family_name] = {
+            "trades": len(values),
+            "wins": len(family_wins),
+            "losses": len(family_losses),
+            "win_rate_pct": round(len(family_wins) / len(values) * 100.0, 2) if values else 0.0,
+            "expectancy_r": round(sum(family_r) / len(family_r), 4) if family_r else 0.0,
+            "profit_factor": family_pf,
+            "net_pnl": round(sum(family_pnl), 2),
         }
 
     calibration = {
@@ -624,6 +785,7 @@ def calculate_backtest_metrics(
         "regimes_tested": len([name for name in regimes if name != "unknown"]),
         "by_regime": by_regime,
         "by_scenario": by_scenario,
+        "by_strategy_family": by_strategy_family,
         "confidence_calibration": calibration,
     }
 
@@ -644,6 +806,8 @@ def run_walk_forward_backtest(
     max_trades: int = 1000,
     entry_mode: str = "limit",
     start_index: int | None = None,
+    ai_reviews: dict[str, dict[str, Any]] | None = None,
+    asset_class: str = "unknown",
 ) -> dict[str, Any]:
     """Run a non-overlapping anchored out-of-sample replay."""
     if market_data is None or market_data.empty:
@@ -667,7 +831,30 @@ def run_walk_forward_backtest(
 
     frame = market_data.copy()
     frame.columns = [str(column).lower() for column in frame.columns]
-    profiles = validate_timeframe_profiles(config.get("timeframe_profiles"))
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        raise ValueError("Backtest market data must use a DatetimeIndex")
+    if not frame.index.is_monotonic_increasing or frame.index.has_duplicates:
+        raise ValueError("Backtest market data index must be unique and chronological")
+    frozen_config = deepcopy(config)
+    replay_manifest = build_replay_manifest(
+        frame=frame,
+        symbol=symbol,
+        timeframe=timeframe,
+        config=frozen_config,
+        assumptions=assumptions,
+        replay_parameters={
+            "initial_capital": initial_capital,
+            "risk_per_trade_pct": risk_per_trade_pct,
+            "max_leverage": max_leverage,
+            "warmup_bars": warmup_bars,
+            "oos_fraction": oos_fraction,
+            "stride_bars": stride_bars,
+            "max_trades": max_trades,
+            "entry_mode": entry_mode,
+            "start_index": start_index,
+        },
+    )
+    profiles = validate_timeframe_profiles(frozen_config.get("timeframe_profiles"))
     trigger_profile = profiles["roles"]["trigger"]
     if timeframe != trigger_profile["timeframe"]:
         raise ValueError(
@@ -696,7 +883,7 @@ def run_walk_forward_backtest(
             frame=history,
             symbol=symbol,
             entry_mode=entry_mode,
-            config_snapshot=config,
+            config_snapshot=frozen_config,
         )
         sweep = getattr(signal, "liquidity_sweep", {}) or {}
         setup = getattr(signal, "tri_core_setup", {}) or {}
@@ -775,9 +962,23 @@ def run_walk_forward_backtest(
         )
         scenario_res = getattr(signal, "scenario", None)
         scenario_id = scenario_res.get("scenario_id", "UNKNOWN") if isinstance(scenario_res, dict) else "UNKNOWN"
+        decision_time = pd.Timestamp(frame.index[index]).isoformat()
+        decision_id = fingerprint({
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "decision_time": decision_time,
+            "event_id": event_id,
+            "config_hash": replay_manifest["config_hash"],
+        })[:24]
         execution.update(
             {
-                "decision_time": pd.Timestamp(frame.index[index]).isoformat(),
+                "decision_id": decision_id,
+                "decision_time": decision_time,
+                "decision_history_last_timestamp": pd.Timestamp(history.index[-1]).isoformat(),
+                "future_first_timestamp": (
+                    pd.Timestamp(future.index[0]).isoformat() if len(future) else None
+                ),
+                "config_hash": replay_manifest["config_hash"],
                 "direction": signal.direction,
                 "entry_target": entry,
                 "stop_loss": stop,
@@ -785,6 +986,8 @@ def run_walk_forward_backtest(
                 "confluence": signal.confluence_score,
                 "regime": signal.market_regime.get("regime", "unknown"),
                 "scenario_id": scenario_id,
+                "setup_type": str(setup.get("setup_type") or ""),
+                "strategy_family": str(setup.get("strategy_family") or "none"),
                 "strategy_approved": True,
             }
         )
@@ -825,6 +1028,11 @@ def run_walk_forward_backtest(
     calibration_distribution = summarize_sweep_observations(
         list(sweep_observations.values()), split_scope="outer_oos_observation_only"
     )
+    review_cohorts = build_ai_review_cohorts(
+        attempts,
+        ai_reviews=ai_reviews,
+        initial_capital=initial_capital,
+    )
     return {
         "status": "completed",
         "evaluation_mode": evaluation_mode,
@@ -845,6 +1053,8 @@ def run_walk_forward_backtest(
             )
         ],
         "risk_halt_bars": halted_bars,
+        "replay_manifest": replay_manifest,
+        "ai_review_cohorts": review_cohorts,
         "metrics": metrics,
         "calibration_distribution": calibration_distribution,
         "trades": attempts,
@@ -860,6 +1070,7 @@ def run_rolling_walk_forward_backtest(
     assumptions: ExecutionAssumptions,
     folds: int = 3,
     initial_train_fraction: float = 0.50,
+    asset_class: str = "unknown",
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Evaluate a frozen policy over chronological, non-overlapping OOS folds."""
@@ -870,6 +1081,27 @@ def run_rolling_walk_forward_backtest(
     if not 0.40 <= initial_train_fraction <= 0.70:
         raise ValueError("initial_train_fraction must be between 0.40 and 0.70")
     frame = market_data.copy().sort_index()
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        raise ValueError("Backtest market data must use a DatetimeIndex")
+    if frame.index.has_duplicates:
+        raise ValueError("Backtest market data index must be unique")
+    frozen_config = deepcopy(config)
+    replay_manifest = build_replay_manifest(
+        frame=frame,
+        symbol=symbol,
+        timeframe=timeframe,
+        config=frozen_config,
+        assumptions=assumptions,
+        replay_parameters={
+            "folds": folds,
+            "initial_train_fraction": initial_train_fraction,
+            **{
+                key: value
+                for key, value in kwargs.items()
+                if key != "ai_reviews"
+            },
+        },
+    )
     warmup_bars = int(kwargs.get("warmup_bars", 100))
     initial_end = max(warmup_bars + 1, int(len(frame) * initial_train_fraction))
     remaining = len(frame) - initial_end
@@ -892,8 +1124,9 @@ def run_rolling_walk_forward_backtest(
             market_data=fold_frame,
             symbol=symbol,
             timeframe=timeframe,
-            config=deepcopy(config),
+            config=deepcopy(frozen_config),
             assumptions=assumptions,
+            asset_class=asset_class,
             **fold_kwargs,
         )
         for trade in result["trades"]:
@@ -920,15 +1153,23 @@ def run_rolling_walk_forward_backtest(
         evaluation_mode="rolling_walk_forward_oos",
     )
     metrics["data_readiness"] = assess_aggressor_data_readiness(frame)
-    metrics["tri_core_policy"] = dict(config.get("tri_core_policy") or {})
+    metrics["tri_core_policy"] = dict(frozen_config.get("tri_core_policy") or {})
     metrics["oos_fold_count"] = folds
+    review_cohorts = build_ai_review_cohorts(
+        combined_trades,
+        ai_reviews=kwargs.get("ai_reviews"),
+        initial_capital=float(kwargs.get("initial_capital", 10_000.0)),
+    )
     return {
         "status": "completed",
         "evaluation_mode": "rolling_walk_forward_oos",
         "symbol": symbol,
+        "asset_class": asset_class,
         "timeframe": timeframe,
         "data_bars": len(frame),
         "strategy_pipeline": "canonical_15m_single_timeframe",
+        "replay_manifest": replay_manifest,
+        "ai_review_cohorts": review_cohorts,
         "folds": fold_results,
         "rejection_diagnostics": [
             {"reason": reason, "count": count}
@@ -939,6 +1180,130 @@ def run_rolling_walk_forward_backtest(
         "metrics": metrics,
         "calibration_distributions_by_fold": all_observations,
         "trades": combined_trades,
+    }
+
+
+def evaluate_walk_forward_validation(
+    runs: list[dict[str, Any]],
+    criteria: WalkForwardValidationCriteria,
+    *,
+    current_policy_status: str = "draft_unvalidated",
+) -> dict[str, Any]:
+    """Assess whether a frozen draft has enough independent OOS evidence for human promotion review.
+
+    This function never mutates configuration and never marks a strategy production eligible.
+    """
+    normalized = [run for run in runs if isinstance(run, dict)]
+    symbols = sorted({
+        str(run.get("symbol") or "")
+        for run in normalized
+        if str(run.get("symbol") or "")
+    })
+    asset_classes = sorted({
+        str(run.get("asset_class") or "")
+        for run in normalized
+        if str(run.get("asset_class") or "")
+    })
+    total_completed = sum(
+        int((run.get("metrics") or {}).get("completed_trades", 0))
+        for run in normalized
+    )
+    observed_regimes: set[str] = set()
+    per_symbol: list[dict[str, Any]] = []
+    for run in normalized:
+        metrics = run.get("metrics") or {}
+        readiness = metrics.get("data_readiness") or {}
+        regimes = {
+            str(name)
+            for name in (metrics.get("by_regime") or {})
+            if str(name) and str(name) != "unknown"
+        }
+        observed_regimes.update(regimes)
+        profit_factor = metrics.get("profit_factor")
+        checks = {
+            "symbol_declared": bool(str(run.get("symbol") or "")),
+            "asset_class_declared": bool(str(run.get("asset_class") or "")),
+            "policy_snapshot_is_draft": str(
+                (metrics.get("tri_core_policy") or {}).get("calibration_status", "")
+            ) == "draft_unvalidated",
+            "rolling_oos": run.get("evaluation_mode") == "rolling_walk_forward_oos",
+            "completed_trades": int(metrics.get("completed_trades", 0))
+            >= criteria.min_completed_trades_per_symbol,
+            "oos_folds": int(metrics.get("oos_fold_count", 0))
+            >= criteria.min_oos_folds_per_symbol,
+            "expectancy_r": float(metrics.get("expectancy_r", 0.0))
+            >= criteria.min_expectancy_r,
+            "profit_factor": profit_factor is not None
+            and float(profit_factor) >= criteria.min_profit_factor,
+            "max_drawdown_pct": float(metrics.get("max_drawdown_pct", 100.0))
+            <= criteria.max_drawdown_pct,
+            "fill_rate": float(metrics.get("fill_rate", 0.0))
+            >= criteria.min_fill_rate,
+            "true_aggressor_coverage": float(readiness.get("coverage", 0.0))
+            >= criteria.min_true_aggressor_coverage,
+            "history_days": float(readiness.get("history_days", 0.0))
+            >= criteria.min_history_days,
+            "replay_no_future_leakage": (
+                (run.get("replay_manifest") or {}).get("future_leakage_allowed") is False
+            ),
+            "llm_not_called_during_backtest": (
+                (run.get("replay_manifest") or {}).get("llm_called_during_backtest") is False
+            ),
+        }
+        per_symbol.append({
+            "symbol": str(run.get("symbol") or ""),
+            "asset_class": str(run.get("asset_class") or ""),
+            "passed": all(checks.values()),
+            "checks": checks,
+            "completed_trades": int(metrics.get("completed_trades", 0)),
+            "expectancy_r": float(metrics.get("expectancy_r", 0.0)),
+            "profit_factor": profit_factor,
+            "max_drawdown_pct": float(metrics.get("max_drawdown_pct", 100.0)),
+            "fill_rate": float(metrics.get("fill_rate", 0.0)),
+            "oos_fold_count": int(metrics.get("oos_fold_count", 0)),
+            "regimes": sorted(regimes),
+        })
+
+    aggregate_checks = {
+        "symbol_coverage": len(symbols) >= criteria.min_symbols,
+        "asset_class_coverage": len(asset_classes) >= criteria.min_asset_classes,
+        "total_completed_trades": total_completed >= criteria.min_total_completed_trades,
+        "regime_coverage": len(observed_regimes) >= criteria.min_regimes_tested,
+        "all_symbol_runs_pass": bool(per_symbol) and all(item["passed"] for item in per_symbol),
+        "policy_still_draft": current_policy_status == "draft_unvalidated",
+    }
+    passed = all(aggregate_checks.values())
+    failures: list[str] = []
+    for name, ok in aggregate_checks.items():
+        if not ok:
+            failures.append(name)
+    for item in per_symbol:
+        if not item["passed"]:
+            failed = [name for name, ok in item["checks"].items() if not ok]
+            failures.append(f"{item['symbol']}: {', '.join(failed)}")
+
+    return {
+        "passed": passed,
+        "validation_candidate": passed,
+        "human_approval_required": True,
+        "production_eligible": False,
+        "config_mutated": False,
+        "current_policy_status": current_policy_status,
+        "next_status_requires_human_action": (
+            "walk_forward_validated" if passed else None
+        ),
+        "symbols": symbols,
+        "asset_classes": asset_classes,
+        "regimes": sorted(observed_regimes),
+        "total_completed_trades": total_completed,
+        "criteria": criteria.to_dict(),
+        "aggregate_checks": aggregate_checks,
+        "per_symbol": per_symbol,
+        "failure_reasons": failures,
+        "note": (
+            "Passing this validation only makes the draft eligible for human promotion review; "
+            "it does not mutate policy status or authorize production deployment."
+        ),
     }
 
 

@@ -90,7 +90,7 @@ def test_unavailable_optional_layer_reduces_coverage_and_score():
     assert volume["status"] == "unavailable"
 
 
-def test_required_unavailable_layer_blocks_strategy_entry():
+def test_strategy_requires_an_actionable_tri_core_candidate():
     signal = _strong_long_signal()
     signal.volume_data_valid = False
     config = deepcopy(DEFAULT_INDICATOR_CORE)
@@ -111,7 +111,7 @@ def test_required_unavailable_layer_blocks_strategy_entry():
     result = strategy.evaluate(signal)
 
     assert result.approved is False
-    assert any("SMC+CVD" in reason for reason in result.rejection_reasons)
+    assert any("Tri-Core" in reason for reason in result.rejection_reasons)
 
 
 def test_disabled_layer_is_excluded_from_normalization():

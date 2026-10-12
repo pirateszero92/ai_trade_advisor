@@ -207,8 +207,8 @@ async def ws_stream(websocket: WebSocket):
                 "data": initial_snapshot,
             },
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"[WS-Stream] Initial snapshot send failed: {exc}")
 
     try:
         last_message_at = 0.0

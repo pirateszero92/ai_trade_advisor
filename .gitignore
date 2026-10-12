@@ -52,6 +52,7 @@ mobile/android/key.properties
 .pytest_cache/
 htmlcov/
 .coverage
+.pytest_temp/
 backend/.pytest_temp/
 backend/tests_tmp/
 
@@ -62,3 +63,4 @@ backend/tests_tmp/
 *.apk
 *.aab
 /*.png
+mobile/web_dist/

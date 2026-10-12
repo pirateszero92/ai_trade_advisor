@@ -3,11 +3,13 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
 import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/ws_client.dart';
 import '../../core/trading/strategy_gate_view.dart';
-import '../../core/trading/ai_review_panel.dart';
+import '../../core/trading/authority_pipeline_panel.dart';
+import '../../core/trading/authority_pipeline_view.dart';
 import '../settings/settings_screen.dart';
 import 'signal_sort.dart';
 
@@ -449,6 +451,33 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
       final targetExchange =
           signalEx ?? (_activeMode == 'live' ? 'innovestx' : 'binance');
 
+      final authStatus = (signal['authority_status'] as Map?) ?? {};
+      final authTriCore = (authStatus['tri_core'] as Map?) ?? {};
+      final rawTriCore = (signal['tri_core_setup'] as Map?) ??
+          (signal['tri_core'] as Map?) ??
+          authTriCore;
+
+      final snapshotId = signal['snapshot_id'] ??
+          signal['decision_snapshot_id'] ??
+          (signal['analysis_snapshot'] as Map?)?['snapshot_id'] ??
+          authStatus['snapshot_id'];
+
+      final setupGrade =
+          rawTriCore['grade'] ?? authTriCore['grade'] ?? signal['setup_grade'];
+      final setupType = rawTriCore['setup_type'] ??
+          authTriCore['setup_type'] ??
+          signal['setup_type'];
+      final strategyFamily = rawTriCore['strategy_family'] ??
+          authTriCore['strategy_family'] ??
+          signal['strategy_family'];
+      final triCoreEventId = rawTriCore['event_id'] ??
+          authTriCore['event_id'] ??
+          signal['event_id'];
+      final hasCompleteSetup = setupGrade != null &&
+          setupType != null &&
+          snapshotId != null &&
+          snapshotId.toString().isNotEmpty;
+
       final resp = await dio.post(
         AppApi.url('/api/v1/paper/orders'),
         data: {
@@ -457,14 +486,29 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
           'entry': entry,
           'stop_loss': safeSl,
           'take_profit': safeTp,
-          'order_type': entryMode == 'market' ? 'market' : 'limit',
+          'order_type': entryMode == 'market' ? 'market' : (rawTriCore['order_type'] ?? 'limit'),
           'position_size': selectedQty,
           'size': selectedQty,
           'tag': tag,
           'mode': 'paper',
           'exchange': targetExchange,
           'auto_be': true,
-          'trailing_stop': true,
+          'decision_snapshot_id':
+              hasCompleteSetup && entryMode == 'recommended' ? snapshotId : null,
+          'source': hasCompleteSetup && entryMode == 'recommended'
+              ? 'operator_confirmed_candidate'
+              : 'manual_independent',
+          'tri_core_event_id':
+              hasCompleteSetup && entryMode == 'recommended' ? triCoreEventId : null,
+          'setup_grade':
+              hasCompleteSetup && entryMode == 'recommended' ? setupGrade : null,
+          'setup_type':
+              hasCompleteSetup && entryMode == 'recommended' ? setupType : null,
+          'strategy_family':
+              hasCompleteSetup && entryMode == 'recommended' ? strategyFamily : null,
+          'setup_timeframe': hasCompleteSetup && entryMode == 'recommended'
+              ? (signal['timeframe'] ?? '15m')
+              : null,
           'idempotency_key': '${DateTime.now().microsecondsSinceEpoch}-$tag',
         },
       );
@@ -482,6 +526,7 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
         );
       }
       _fetchPositions();
+      _fetchSignals();
     } catch (e) {
       String errDetail = e.toString();
       if (e is DioException && e.response?.data != null) {
@@ -725,6 +770,15 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
   @override
   Widget build(BuildContext context) {
     final filtered = _filteredSignals;
+    int marketCount(String market) => _signals
+        .where((signal) =>
+            _activeWatchlistNorm
+                .contains(_normalizeSym(signal['symbol']?.toString() ?? '')) &&
+            (signal['market_type'] ?? '').toString() == market)
+        .length;
+    final cryptoCount = marketCount('crypto');
+    final forexCount = marketCount('forex');
+    final stockCount = marketCount('stock');
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -828,13 +882,13 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                     scrollDirection: Axis.horizontal,
                     child: Row(
                       children: [
-                        _filterChip('ALL', 'all'),
+                        _filterChip('ALL (${_signals.length})', 'all'),
                         const SizedBox(width: 6),
-                        _filterChip('CRYPTO', 'crypto'),
+                        _filterChip('CRYPTO ($cryptoCount)', 'crypto'),
                         const SizedBox(width: 6),
-                        _filterChip('FOREX & GOLD', 'forex'),
+                        _filterChip('FOREX & GOLD ($forexCount)', 'forex'),
                         const SizedBox(width: 6),
-                        _filterChip('STOCKS', 'stock'),
+                        _filterChip('STOCKS ($stockCount)', 'stock'),
                       ],
                     ),
                   ),
@@ -932,10 +986,14 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                               final rr =
                                   (s['risk_reward'] as num?)?.toDouble() ??
                                       (s['rr'] as num?)?.toDouble();
-                              final date = (s['timestamp'] ?? '')
-                                  .toString()
-                                  .split('T')
-                                  .first;
+                              final rawTimestamp =
+                                  (s['timestamp'] ?? '').toString();
+                              final parsedTimestamp =
+                                  DateTime.tryParse(rawTimestamp);
+                              final date = parsedTimestamp == null
+                                  ? rawTimestamp.split('T').first
+                                  : DateFormat('yyyy-MM-dd')
+                                      .format(parsedTimestamp.toLocal());
 
                               final matchingPositions = _positions
                                   .where((p) =>
@@ -966,6 +1024,11 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                               final flowGranularity =
                                   (s['flow_granularity'] ?? 'unavailable')
                                       .toString();
+                              final marketDataStatus =
+                                  s['market_data_status'] is Map
+                                      ? Map<String, dynamic>.from(
+                                          s['market_data_status'] as Map)
+                                      : <String, dynamic>{};
                               final regime = s['market_regime'] is Map
                                   ? Map<String, dynamic>.from(
                                       s['market_regime'] as Map)
@@ -1006,7 +1069,12 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                                           : <String, dynamic>{});
 
                               return _SignalCard(
+                                signalPayload: s,
                                 institutionalMetrics: institutionalMetrics,
+                                authorityStatus: s['authority_status'] is Map
+                                    ? Map<String, dynamic>.from(
+                                        s['authority_status'] as Map)
+                                    : const <String, dynamic>{},
                                 symbol: sym,
                                 direction: dir,
                                 timeframe: tf,
@@ -1024,6 +1092,7 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                                 volumeQuality: volumeQuality,
                                 deltaSource: deltaSource,
                                 flowGranularity: flowGranularity,
+                                marketDataStatus: marketDataStatus,
                                 regimeLabel:
                                     (regime['label'] ?? 'Legacy').toString(),
                                 regimeDirection:
@@ -1040,12 +1109,6 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                                 mtf: mtf,
                                 message: msg,
                                 advice: s['advice'] as String?,
-                                aiReview: Map<String, dynamic>.from(
-                                    s['ai_review'] as Map? ?? {}),
-                                squeezeBonus: ((s['indicator_decision']
-                                            as Map?)?['squeeze_bonus'] as num?)
-                                        ?.toInt() ??
-                                    0,
                                 scenario:
                                     s['scenario'] as Map<String, dynamic>?,
                                 reaction: reaction,
@@ -1150,8 +1213,6 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
 }
 
 class _SignalCard extends StatelessWidget {
-  final Map<String, dynamic> aiReview;
-  final int squeezeBonus;
   final String symbol, direction, timeframe, message, time;
   final String? advice;
   final Map<String, dynamic>? scenario;
@@ -1167,6 +1228,7 @@ class _SignalCard extends StatelessWidget {
   final String volumeQuality;
   final String deltaSource;
   final String flowGranularity;
+  final Map<String, dynamic> marketDataStatus;
   final String regimeLabel;
   final String regimeDirection;
   final bool regimeEntryAllowed;
@@ -1177,10 +1239,12 @@ class _SignalCard extends StatelessWidget {
   final VoidCallback onExecuteTrade;
   final Function(dynamic id, String tag) onClosePosition;
   final Map<String, dynamic> institutionalMetrics;
+  final Map<String, dynamic> authorityStatus;
+  final Map<String, dynamic> signalPayload;
 
   const _SignalCard({
-    this.aiReview = const {},
-    this.squeezeBonus = 0,
+    this.signalPayload = const {},
+    this.authorityStatus = const {},
     required this.symbol,
     required this.direction,
     required this.timeframe,
@@ -1198,6 +1262,7 @@ class _SignalCard extends StatelessWidget {
     this.volumeQuality = 'unavailable',
     this.deltaSource = 'unavailable',
     this.flowGranularity = 'unavailable',
+    this.marketDataStatus = const <String, dynamic>{},
     this.regimeLabel = 'Legacy',
     this.regimeDirection = 'neutral',
     this.regimeEntryAllowed = false,
@@ -1231,7 +1296,7 @@ class _SignalCard extends StatelessWidget {
     } else if (isGradeB) {
       final isLong = direction == 'LONG';
       final zone = isLong ? 'Discount' : 'Premium';
-      return 'คำแนะนำ: โครงสร้าง $direction แตะโซน $zone แต่ Tri-Core ยังไม่ยืนยัน SMC+CVD บน execution timeframe';
+      return 'คำแนะนำ: โครงสร้าง $direction แตะโซน $zone แต่ Tri-Core ยังไม่ยืนยัน causal SMC + trusted flow บน execution timeframe';
     } else {
       return 'คำแนะนำ: รอ (WAIT) จน SMC location และ exchange-derived CVD ยืนยันบน execution timeframe เดียวกัน';
     }
@@ -1365,6 +1430,40 @@ class _SignalCard extends StatelessWidget {
     );
   }
 
+  Widget _buildHeaderBadge(
+    String text,
+    Color color,
+    IconData icon, {
+    String? tooltip,
+  }) {
+    final badge = Container(
+      constraints: const BoxConstraints(minHeight: 20),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withValues(alpha: 0.7), width: 0.8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 10, color: color),
+          const SizedBox(width: 3),
+          Text(
+            text,
+            style: TextStyle(
+              fontSize: 8,
+              height: 1.1,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+    return tooltip == null ? badge : Tooltip(message: tooltip, child: badge);
+  }
+
   Widget _buildMtfRoleStrip() {
     final stagesRaw = mtf['stages'];
     if (stagesRaw is! Map) return const SizedBox.shrink();
@@ -1423,7 +1522,7 @@ class _SignalCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final isLong = direction == 'LONG';
     final isShort = direction == 'SHORT';
-    final isActionable = gate.approved &&
+    final hasValidSetup = gate.approved &&
         entry != null &&
         sl != null &&
         tp != null &&
@@ -1431,6 +1530,11 @@ class _SignalCard extends StatelessWidget {
         (isLong
             ? (sl! < entry! && tp! > entry!)
             : (isShort && sl! > entry! && tp! < entry!));
+    final authority = AuthorityPipelineView.fromPayload(signalPayload.isNotEmpty
+        ? signalPayload
+        : {'authority_status': authorityStatus});
+    final isActionable = hasValidSetup && authority.orderReady;
+    final authorityLifecycleState = authority.lifecycleState.toUpperCase();
     final color = isLong
         ? AppColors.bullish
         : (isShort ? AppColors.bearish : AppColors.neutral);
@@ -1489,6 +1593,48 @@ class _SignalCard extends StatelessWidget {
             : {'NO_CHASE', 'EXPIRED', 'INVALIDATED'}.contains(lifecycleState)
                 ? AppColors.bearish
                 : const Color(0xFFFFC857);
+    final authorityBadgeState = authority.isPositionOpen
+        ? 'POSITION OPEN'
+        : authority.isOrderPending
+            ? 'ORDER PENDING'
+            : authority.risk.isNegative
+                ? 'RISK REJECTED'
+                : authority.ai.isNegative
+                    ? 'AI ${authority.ai.status.replaceAll('_', ' ').toUpperCase()}'
+                    : authority.execution.isNegative
+                        ? 'EXECUTION ${authority.execution.status.replaceAll('_', ' ').toUpperCase()}'
+                        : lifecycleState == 'ENTRY_READY'
+                            ? 'SETUP READY'
+                            : lifecycleState.replaceAll('_', ' ');
+    final authorityBadgeColor = authority.isPositionOpen
+        ? AppColors.bullish
+        : authority.risk.isNegative ||
+                authority.ai.isNegative ||
+                authority.execution.isNegative
+            ? AppColors.bearish
+            : lifecycleColor;
+    final actionSide =
+        isLong ? 'BUY / LONG' : (isShort ? 'SELL / SHORT' : 'BUY / SELL');
+    final blockedActionReason = lifecycleState == 'NO_CHASE'
+        ? 'NO CHASE'
+        : authority.isClosed
+            ? 'CLOSED • WAIT NEW SETUP'
+            : authority.isOrderPending
+                ? 'ORDER PENDING'
+                : authority.isPositionOpen
+                    ? 'POSITION OPEN'
+                    : authority.ai.isNegative
+                        ? 'AI ${authority.ai.status.replaceAll('_', ' ').toUpperCase()}'
+                        : authority.execution.isNegative
+                            ? 'EXECUTION ${authority.execution.status.replaceAll('_', ' ').toUpperCase()}'
+                            : (authorityLifecycleState == 'WAITING_ENTRY' ||
+                                    authority.execution.status.toLowerCase() ==
+                                        'waiting_retest')
+                                ? 'WAIT • RETEST PENDING'
+                                : authorityLifecycleState.replaceAll('_', ' ');
+    final isLimitArmed = entryType == 'limit' ||
+        authority.execution.status.toLowerCase() == 'limit_armed' ||
+        authorityLifecycleState == 'LIMIT_ARMED';
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -1498,56 +1644,66 @@ class _SignalCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
-                  child: Row(
+                  flex: 4,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      // Interactive Buy / Sell Button on the Direction Badge
-                      ElevatedButton.icon(
-                        onPressed: isActionable ? onExecuteTrade : null,
-                        icon: Icon(
-                          isLong
-                              ? Icons.arrow_upward
-                              : (isShort
-                                  ? Icons.arrow_downward
-                                  : Icons.hourglass_empty),
-                          size: 13,
-                          color: Colors.black,
-                        ),
-                        label: Text(
-                          isLong
-                              ? 'BUY / LONG'
-                              : (isShort ? 'SELL / SHORT' : 'WAIT'),
-                          style: const TextStyle(
-                              color: Colors.black,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 11),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: color,
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 4),
-                          minimumSize: Size.zero,
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
+                      Text(
+                        symbol,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 16),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      const SizedBox(width: 8),
-                      Flexible(
-                        child: Text(
-                          symbol,
-                          style: const TextStyle(
-                              fontWeight: FontWeight.bold, fontSize: 16),
-                          overflow: TextOverflow.ellipsis,
+                      const SizedBox(height: 7),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: isActionable ? onExecuteTrade : null,
+                          icon: Icon(
+                            isActionable
+                                ? (isLong
+                                    ? Icons.arrow_upward
+                                    : Icons.arrow_downward)
+                                : Icons.lock_outline,
+                            size: 13,
+                          ),
+                          label: Text(
+                            isActionable
+                                ? (isLimitArmed
+                                    ? 'ARM ${isLong ? 'BUY' : 'SELL'} LIMIT'
+                                    : actionSide)
+                                : 'LOCKED • $blockedActionReason',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 9,
+                              height: 1.05,
+                            ),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: color,
+                            foregroundColor: Colors.black,
+                            disabledBackgroundColor: const Color(0xFF252B37),
+                            disabledForegroundColor: Colors.white54,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 6),
+                            minimumSize: const Size(0, 34),
+                          ),
                         ),
                       ),
                     ],
                   ),
                 ),
                 const SizedBox(width: 8),
-                Flexible(
+                Expanded(
+                  flex: 7,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     mainAxisSize: MainAxisSize.min,
@@ -1557,112 +1713,82 @@ class _SignalCard extends StatelessWidget {
                         spacing: 4,
                         runSpacing: 3,
                         children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 5, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: (regimeEntryAllowed
-                                      ? AppColors.bullish
-                                      : AppColors.bearish)
-                                  .withValues(alpha: 0.12),
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(
-                                color: (regimeEntryAllowed
-                                        ? AppColors.bullish
-                                        : AppColors.bearish)
-                                    .withValues(alpha: 0.55),
-                                width: 0.8,
-                              ),
-                            ),
-                            child: Text(
-                              '${regimeLabel.toUpperCase()} ${regimeDirection == 'neutral' ? '' : regimeDirection.toUpperCase()} · RISK ×${regimeRiskMultiplier.toStringAsFixed(2)}',
-                              style: TextStyle(
-                                fontSize: 8,
-                                fontWeight: FontWeight.bold,
-                                color: regimeEntryAllowed
-                                    ? AppColors.bullish
-                                    : AppColors.bearish,
-                              ),
-                            ),
+                          _buildHeaderBadge(
+                            '${regimeLabel.toUpperCase()} ${regimeDirection == 'neutral' ? '' : regimeDirection.toUpperCase()} · RISK ×${regimeRiskMultiplier.toStringAsFixed(2)}',
+                            regimeEntryAllowed
+                                ? AppColors.bullish
+                                : AppColors.bearish,
+                            Icons.swap_horiz,
                           ),
                           if (squeezeStatus == 'squeeze_fire') ...[
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 5, vertical: 2),
-                              decoration: BoxDecoration(
-                                color:
-                                    AppColors.bullish.withValues(alpha: 0.15),
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(
-                                    color: AppColors.bullish
-                                        .withValues(alpha: 0.8),
-                                    width: 0.8),
-                              ),
-                              child: const Text('⚡ SQUEEZE FIRE',
-                                  style: TextStyle(
-                                      fontSize: 8,
-                                      fontWeight: FontWeight.bold,
-                                      color: AppColors.bullish)),
+                            _buildHeaderBadge(
+                              'SQUEEZE FIRE',
+                              AppColors.bullish,
+                              Icons.bolt,
                             ),
                           ] else if (squeezeStatus == 'squeeze_on') ...[
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 5, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFFF9900)
-                                    .withValues(alpha: 0.15),
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(
-                                    color: const Color(0xFFFF9900)
-                                        .withValues(alpha: 0.8),
-                                    width: 0.8),
-                              ),
-                              child: const Text('⚫ SQUEEZING',
-                                  style: TextStyle(
-                                      fontSize: 8,
-                                      fontWeight: FontWeight.bold,
-                                      color: Color(0xFFFF9900))),
+                            _buildHeaderBadge(
+                              'SQUEEZING',
+                              const Color(0xFFFF9900),
+                              Icons.compress,
                             ),
                           ],
-                          Tooltip(
-                            message: 'CVD source: $deltaSource',
-                            child: _buildInstitutionalBadge(
-                              volumeQuality == 'exchange_aggressor'
-                                  ? (flowGranularity == 'aggtrade_derived'
-                                      ? 'CVD AGGTRADES'
-                                      : 'CVD KLINE')
-                                  : (volumeQuality == 'estimated'
-                                      ? 'CVD ESTIMATED'
-                                      : 'CVD N/A'),
-                              volumeQuality == 'exchange_aggressor'
-                                  ? AppColors.bullish
-                                  : (volumeQuality == 'estimated'
-                                      ? const Color(0xFFFF9900)
-                                      : AppColors.bearish),
-                              Icons.query_stats,
-                            ),
+                          _buildHeaderBadge(
+                            volumeQuality == 'exchange_aggressor'
+                                ? (flowGranularity == 'trade_quote_derived'
+                                    ? 'EQUITY FLOW'
+                                    : flowGranularity == 'aggtrade_derived'
+                                        ? 'CVD AGGTRADES'
+                                        : 'CVD KLINE')
+                                : (marketDataStatus['market'] == 'US_EQUITY'
+                                    ? 'EQUITY FLOW N/A'
+                                    : volumeQuality == 'estimated'
+                                        ? 'CVD ESTIMATED'
+                                        : 'CVD N/A'),
+                            volumeQuality == 'exchange_aggressor'
+                                ? AppColors.bullish
+                                : (volumeQuality == 'estimated'
+                                    ? const Color(0xFFFF9900)
+                                    : AppColors.bearish),
+                            Icons.query_stats,
+                            tooltip: flowGranularity == 'trade_quote_derived'
+                                ? 'Quote-classified equity flow: $deltaSource'
+                                : 'CVD source: $deltaSource',
                           ),
+                          if (marketDataStatus['market'] == 'US_EQUITY')
+                            _buildHeaderBadge(
+                              marketDataStatus['regular_session_open'] == true
+                                  ? (marketDataStatus['candle_fresh'] == true
+                                      ? 'US OPEN · FRESH'
+                                      : 'US OPEN · STALE')
+                                  : 'US MARKET CLOSED',
+                              marketDataStatus['fresh_for_execution'] == true
+                                  ? AppColors.bullish
+                                  : const Color(0xFFFFC857),
+                              Icons.schedule,
+                              tooltip:
+                                  'Provider: ${marketDataStatus['data_provider'] ?? 'unknown'} · ${marketDataStatus['reason'] ?? ''}',
+                            ),
+                          if (marketDataStatus['market'] == 'US_EQUITY')
+                            _buildHeaderBadge(
+                              marketDataStatus['execution_mode'] == 'paper_auto'
+                                  ? 'STOCK AUTO'
+                                  : 'STOCK SHADOW',
+                              marketDataStatus['execution_mode'] == 'paper_auto'
+                                  ? AppColors.bullish
+                                  : const Color(0xFF7AA2F7),
+                              Icons.visibility_outlined,
+                              tooltip: marketDataStatus['execution_mode'] ==
+                                      'paper_auto'
+                                  ? 'Stock Auto-Pilot is enabled'
+                                  : 'Signals are evaluated and recorded, but Auto-Pilot will not submit stock orders',
+                            ),
                           if (scenario != null &&
                               scenario!['name_th'] != null) ...[
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 5, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF9B51E0)
-                                    .withValues(alpha: 0.20),
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(
-                                    color: const Color(0xFFBB6BD9)
-                                        .withValues(alpha: 0.8),
-                                    width: 0.8),
-                              ),
-                              child: Text(
-                                "${scenario!['name_th'].toString().split(' ')[0]} ${(scenario!['archetype'] ?? 'SETUP').toString().toUpperCase()}",
-                                style: const TextStyle(
-                                    fontSize: 8,
-                                    fontWeight: FontWeight.bold,
-                                    color: Color(0xFFE0B0FF)),
-                              ),
+                            _buildHeaderBadge(
+                              "${scenario!['name_th'].toString().split(' ')[0]} ${(scenario!['archetype'] ?? 'SETUP').toString().toUpperCase()}",
+                              const Color(0xFFE0B0FF),
+                              Icons.route,
                             ),
                           ],
                           if (reaction['reaction_state'] != null &&
@@ -1670,91 +1796,48 @@ class _SignalCard extends StatelessWidget {
                                   .toString()
                                   .trim()
                                   .isNotEmpty) ...[
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 5, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFFFC857)
-                                    .withValues(alpha: 0.14),
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(
-                                    color: const Color(0xFFFFC857)
-                                        .withValues(alpha: 0.75),
-                                    width: 0.8),
-                              ),
-                              child: Text(
-                                reaction['actionable'] == true
-                                    ? '$timeframe ${reaction['reaction_state']} · ENTRY WINDOW'
-                                    : reaction['entry_status'] ==
-                                            'CONFIRMED_NO_ENTRY'
-                                        ? '$timeframe ${reaction['reaction_state']} · CONFIRMED · NO ENTRY'
-                                        : reaction['entry_status'] ==
-                                                'PRESSURE_WARNING'
-                                            ? '$timeframe ${reaction['reaction_state']} · PRESSURE · NO ENTRY'
-                                            : '$timeframe ${reaction['reaction_state']} · WATCH',
-                                style: const TextStyle(
-                                    fontSize: 8,
-                                    fontWeight: FontWeight.bold,
-                                    color: Color(0xFFFFD98A)),
-                              ),
+                            _buildHeaderBadge(
+                              reaction['actionable'] == true
+                                  ? '$timeframe ${reaction['reaction_state']} · ENTRY WINDOW'
+                                  : reaction['entry_status'] ==
+                                          'CONFIRMED_NO_ENTRY'
+                                      ? '$timeframe ${reaction['reaction_state']} · CONFIRMED · NO ENTRY'
+                                      : reaction['entry_status'] ==
+                                              'PRESSURE_WARNING'
+                                          ? '$timeframe ${reaction['reaction_state']} · PRESSURE · NO ENTRY'
+                                          : '$timeframe ${reaction['reaction_state']} · WATCH',
+                              const Color(0xFFFFD98A),
+                              Icons.candlestick_chart,
                             ),
                           ],
                           if (deltaAbsorption) ...[
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 5, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF00E5FF)
-                                    .withValues(alpha: 0.15),
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(
-                                    color: const Color(0xFF00E5FF)
-                                        .withValues(alpha: 0.8),
-                                    width: 0.8),
-                              ),
-                              child: const Text('🌊 ABSORPTION',
-                                  style: TextStyle(
-                                      fontSize: 8,
-                                      fontWeight: FontWeight.bold,
-                                      color: Color(0xFF00E5FF))),
+                            _buildHeaderBadge(
+                              'ABSORPTION',
+                              const Color(0xFF00E5FF),
+                              Icons.waves,
                             ),
                           ],
                           if (lifecycleState != 'WAIT')
-                            Tooltip(
-                              message:
+                            _buildHeaderBadge(
+                              authorityBadgeState,
+                              authorityBadgeColor,
+                              Icons.shield_outlined,
+                              tooltip:
                                   (triCore['state_reason'] ?? '').toString(),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: lifecycleColor.withValues(alpha: 0.14),
-                                  borderRadius: BorderRadius.circular(4),
-                                  border: Border.all(
-                                      color: lifecycleColor.withValues(
-                                          alpha: 0.75),
-                                      width: 0.8),
-                                ),
-                                child: Text(
-                                  lifecycleState.replaceAll('_', ' '),
-                                  style: TextStyle(
-                                      fontSize: 8,
-                                      fontWeight: FontWeight.bold,
-                                      color: lifecycleColor),
-                                ),
-                              ),
                             ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF252540),
-                              borderRadius: BorderRadius.circular(4),
+                          if ((triCore['calibration_status'] ?? '') ==
+                              'draft_unvalidated')
+                            _buildHeaderBadge(
+                              'UNCALIBRATED',
+                              const Color(0xFFFFC857),
+                              Icons.science_outlined,
+                              tooltip:
+                                  'Candidate parameters are not walk-forward certified; Auto-Pilot is disabled',
                             ),
-                            child: Text(timeframe,
-                                style: const TextStyle(
-                                    fontSize: 10,
-                                    color: Colors.white70,
-                                    fontWeight: FontWeight.bold)),
+                          _buildHeaderBadge(
+                            timeframe,
+                            Colors.white70,
+                            Icons.schedule,
                           ),
                         ],
                       ),
@@ -1773,12 +1856,10 @@ class _SignalCard extends StatelessWidget {
             ),
             _buildMtfRoleStrip(),
             _buildInstitutionalEdgeStrip(),
-            AiReviewPanel(
-                review: aiReview,
-                coreScore: confluence,
-                squeezeBonus: squeezeBonus,
-                longEvidence: gate.longEvidence,
-                shortEvidence: gate.shortEvidence),
+            AuthorityPipelinePanel(
+                payload: signalPayload.isNotEmpty
+                    ? signalPayload
+                    : {'authority_status': authorityStatus}),
             const SizedBox(height: 8),
             Container(
               width: double.infinity,
@@ -2053,92 +2134,120 @@ class _SignalCard extends StatelessWidget {
               }),
             ],
             const SizedBox(height: 10),
-            Row(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(gate.approved ? 'Setup score: ' : 'Evidence score: ',
-                    style:
-                        const TextStyle(fontSize: 11, color: Colors.white38)),
-                Text(
-                  '$confluence/100',
-                  style: TextStyle(
-                      fontSize: 11,
-                      color: gradeColor,
-                      fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(width: 8),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                  decoration: BoxDecoration(
-                    color: gradeColor.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(
-                        color: gradeColor.withValues(alpha: 0.6), width: 0.8),
-                  ),
-                  child: Text(
-                    gradeText,
-                    style: TextStyle(
-                        fontSize: 9,
-                        fontWeight: FontWeight.bold,
-                        color: gradeColor),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                  decoration: BoxDecoration(
-                    color: displayDirBg,
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(
-                      color: displayDirBorder,
-                      width: 0.8,
+                Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 6,
+                  runSpacing: 5,
+                  children: [
+                    Text(
+                      'Context evidence: $confluence/100',
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: gradeColor,
+                          fontWeight: FontWeight.bold),
                     ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        displayDirIcon,
-                        size: 9,
-                        color: displayDirColor,
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 1.5),
+                      decoration: BoxDecoration(
+                        color: gradeColor.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                            color: gradeColor.withValues(alpha: 0.6),
+                            width: 0.8),
                       ),
-                      const SizedBox(width: 2),
-                      Text(
-                        displayDirText,
+                      child: Text(
+                        gradeText,
                         style: TextStyle(
-                          fontSize: 9,
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                            color: gradeColor),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 1.5),
+                      decoration: BoxDecoration(
+                        color: displayDirBg,
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: displayDirBorder,
+                          width: 0.8,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            displayDirIcon,
+                            size: 9,
+                            color: displayDirColor,
+                          ),
+                          const SizedBox(width: 2),
+                          Text(
+                            displayDirText,
+                            style: TextStyle(
+                              fontSize: 9,
+                              fontWeight: FontWeight.bold,
+                              color: displayDirColor,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (gate.minConfluence > 0) ...[
+                      Text(
+                        gate.evidenceScoreLabel,
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: gate.approved
+                              ? AppColors.bullish
+                              : const Color(0xFFFFC857),
                           fontWeight: FontWeight.bold,
-                          color: displayDirColor,
                         ),
                       ),
                     ],
-                  ),
+                  ],
                 ),
-                if (gate.minConfluence > 0) ...[
-                  const SizedBox(width: 8),
-                  Text(
-                    gate.evidenceScoreLabel,
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: gate.approved
-                          ? AppColors.bullish
-                          : const Color(0xFFFFC857),
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-                const Spacer(),
-                Text(
-                    gate.approved
-                        ? 'Setup Ready • Risk pending'
-                        : 'Watchlist • WAIT',
+                const SizedBox(height: 5),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    authority.orderReady
+                        ? 'ORDER READY'
+                        : authority.isClosed
+                            ? 'Trade closed • wait for a new setup'
+                            : authority.isOrderPending
+                                ? 'Limit armed • waiting for fill'
+                                : authority.isPositionOpen
+                                    ? 'Position open • managed by OMS'
+                                    : gate.approved
+                                        ? (authority.ai.status.toUpperCase() == 'CAUTION'
+                                            ? 'AI CAUTION • Stand Aside'
+                                            : authority.ai.status.toUpperCase() == 'CONFLICT'
+                                                ? 'AI CONFLICT • Trade Blocked'
+                                                : authority.risk.status.toLowerCase() == 'blocked'
+                                                    ? 'Risk Blocked • Stand Aside'
+                                                    : 'Tri-Core Ready • Pipeline pending')
+                                        : 'Watchlist • WAIT',
                     style: TextStyle(
                         fontSize: 10,
-                        color: gate.approved
+                        color: authority.orderReady
                             ? AppColors.bullish
-                            : const Color(0xFFFFC857),
-                        fontWeight: FontWeight.bold)),
+                            : (authority.ai.status.toUpperCase() == 'CONFLICT' ||
+                                    authority.risk.status.toLowerCase() == 'blocked')
+                                ? AppColors.bearish
+                                : const Color(0xFFFFC857),
+                        fontWeight: FontWeight.bold),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.right,
+                  ),
+                ),
               ],
             ),
           ],
@@ -2222,6 +2331,24 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
   late double _selectedQty;
   Timer? _liveTimer;
 
+  static String _formatRawPrice(double? price) {
+    if (price == null || !price.isFinite) return '';
+    if (price < 0.001) {
+      return price
+          .toStringAsFixed(8)
+          .replaceAll(RegExp(r'0+$'), '')
+          .replaceAll(RegExp(r'\.$'), '');
+    }
+    if (price < 1.0) {
+      return price
+          .toStringAsFixed(6)
+          .replaceAll(RegExp(r'0+$'), '')
+          .replaceAll(RegExp(r'\.$'), '');
+    }
+    if (price < 5.0) return price.toStringAsFixed(4);
+    return price.toStringAsFixed(2);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -2232,15 +2359,7 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
         ? widget.initialLivePrice
         : _recommendedEntry;
 
-    // Default to 'market' if live price is already > 0.5% away from recommended OB
-    final diffPct = _recommendedEntry > 0
-        ? ((_livePrice - _recommendedEntry).abs() / _recommendedEntry)
-        : 0.0;
-    if (diffPct > 0.005) {
-      _entryMode = 'market';
-    } else {
-      _entryMode = widget.recommendedEntry > 0 ? 'recommended' : 'market';
-    }
+    _entryMode = widget.recommendedEntry > 0 ? 'recommended' : 'market';
     _selectedRR = widget.signalRR ?? 2.0;
 
     final mType =
@@ -2264,11 +2383,11 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
             : _recommendedEntry - initialSlDist * _selectedRR);
 
     _customEntryController =
-        TextEditingController(text: _recommendedEntry.toStringAsFixed(2));
+        TextEditingController(text: _formatRawPrice(_recommendedEntry));
     _customSlController =
-        TextEditingController(text: initialSl.toStringAsFixed(2));
+        TextEditingController(text: _formatRawPrice(initialSl));
     _customTpController =
-        TextEditingController(text: initialTp.toStringAsFixed(2));
+        TextEditingController(text: _formatRawPrice(initialTp));
 
     _startLivePricePolling();
   }
@@ -2343,25 +2462,30 @@ class _OrderConfirmationDialogState extends State<_OrderConfirmationDialog> {
             ? [0.01, 0.05, 0.10, 0.50, 1.00]
             : [0.05, 0.10, 0.25, 0.50, 1.00]);
 
+    final isRecommended = _entryMode == 'recommended';
     final isCustom = _entryMode == 'custom';
     final entry = isCustom
         ? (double.tryParse(_customEntryController.text) ?? _recommendedEntry)
         : _currentEntry;
     final slDistance = _getSlDistance(entry);
-    final sl = isCustom
-        ? (double.tryParse(_customSlController.text) ??
-            (isLong ? entry - slDistance : entry + slDistance))
-        : (isLong ? (entry - slDistance) : (entry + slDistance));
-    var tp = isCustom
-        ? (double.tryParse(_customTpController.text) ??
-            (isLong
-                ? entry + slDistance * _selectedRR
-                : entry - slDistance * _selectedRR))
-        : (isLong
-            ? (entry + slDistance * _selectedRR)
-            : (entry - slDistance * _selectedRR));
+    final sl = isRecommended && widget.rawSl != null && widget.rawSl! > 0
+        ? widget.rawSl!
+        : (isCustom
+            ? (double.tryParse(_customSlController.text) ??
+                (isLong ? entry - slDistance : entry + slDistance))
+            : (isLong ? (entry - slDistance) : (entry + slDistance)));
+    var tp = isRecommended && widget.rawTp != null && widget.rawTp! > 0
+        ? widget.rawTp!
+        : (isCustom
+            ? (double.tryParse(_customTpController.text) ??
+                (isLong
+                    ? entry + slDistance * _selectedRR
+                    : entry - slDistance * _selectedRR))
+            : (isLong
+                ? (entry + slDistance * _selectedRR)
+                : (entry - slDistance * _selectedRR)));
 
-    if (!isCustom) {
+    if (!isCustom && !isRecommended) {
       if (isLong && tp <= _livePrice && _livePrice > 0) {
         tp = _livePrice + slDistance * _selectedRR;
       } else if (!isLong && tp >= _livePrice && _livePrice > 0) {

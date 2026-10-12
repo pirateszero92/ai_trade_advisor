@@ -200,7 +200,9 @@ def test_armed_sweep_invalidates_beyond_sweep_extreme():
     assert any("invalidated" in reason for reason in setup.rejection_reasons)
 
 
-def test_legacy_scenario_and_sqz_cannot_change_strategy_authority():
+def test_legacy_scenario_and_sqz_cannot_change_strategy_authority(monkeypatch):
+    from app.core.config import get_settings
+    monkeypatch.setattr(get_settings(), "sqz_risk_scaling_enabled", True)
     signal = _signal()
     setup = TriCoreSetupEngine.evaluate(signal, _frame())
     signal.tri_core_setup = setup.to_dict()

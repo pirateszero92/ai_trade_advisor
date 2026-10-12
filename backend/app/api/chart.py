@@ -17,6 +17,7 @@ from app.engines.timeframe_profiles import (
     validate_timeframe_profiles,
 )
 from app.services.execution_analysis import execution_analyses
+from app.services.authority_status import build_authority_status
 
 router = APIRouter()
 _market = MarketDataEngine()
@@ -184,7 +185,7 @@ async def get_smc_overlay(
 ):
     """
     Return SMC overlay data: swing points, OBs, FVGs, equal levels,
-    and premium/discount zones — all in chart-ready format.
+    and premium/discount zones â€” all in chart-ready format.
     """
     # The runtime entry mode is shared with Scanner unless an older client
     # explicitly supplies one for backward compatibility.
@@ -214,8 +215,9 @@ async def get_smc_overlay(
         chart_frame = execution.frame.copy(deep=True)
         overlay_signal = execution.signal
         strategy_payload = execution.strategy.to_dict()
-        is_actionable = execution.strategy.approved
-        direction = execution.strategy.direction if is_actionable else "wait"
+        setup_approved = execution.strategy.approved
+        is_actionable = bool(getattr(execution, "execution_allowed", setup_approved))
+        direction = execution.strategy.direction if setup_approved else "wait"
         setup_direction = execution.strategy.setup_direction
         analysis_metadata = execution.metadata()
         analysis_metadata["candle_policy"] = "closed_only"
@@ -291,7 +293,10 @@ async def get_smc_overlay(
     # but no client receives executable-looking levels while Strategy Gate is
     # rejected. This prevents stale/local UI state from presenting a pending
     # order that the canonical decision never approved.
-    execution_levels = _approved_execution_levels(overlay_signal, is_actionable)
+    execution_levels = _approved_execution_levels(
+        overlay_signal,
+        setup_approved if is_execution_view else is_actionable,
+    )
 
     swing_highs = [
         {"t": sp.timestamp.isoformat(), "price": sp.price}
@@ -305,11 +310,36 @@ async def get_smc_overlay(
     candles = [_serialize_candle(idx, row) for idx, row in chart_frame.iterrows()]
     clean_overlay = _clean_smc_overlay(overlay_signal)
 
+    authority_status: dict[str, Any] = {}
+    if is_execution_view:
+        snapshot_id = str(analysis_metadata.get("snapshot_id") or "")
+        setup = (
+            overlay_signal.tri_core_setup
+            if isinstance(overlay_signal.tri_core_setup, dict)
+            else {}
+        )
+        event_id = str(setup.get("event_id") or "")
+        if snapshot_id and event_id:
+            authority_status = await build_authority_status(
+                symbol=symbol,
+                snapshot_id=snapshot_id,
+                event_id=event_id,
+                tri_core_setup=setup,
+                structural_rr=float(overlay_signal.risk_reward or 0.0),
+            )
+
     return {
         "symbol": symbol,
         "timeframe": timeframe,
         "htf_timeframe": None,
         "analysis_snapshot": analysis_metadata,
+        "authority_status": authority_status,
+        "systemic_risk": (
+            dict(getattr(execution, "systemic_risk", {}) or {}) if is_execution_view else {
+                "status": "NOT_APPLICABLE", "execution_allowed": False,
+                "reason_code": "RESEARCH_TIMEFRAME_ONLY",
+            }
+        ),
         "ai_review": overlay_signal.ai_review,
         "decision_authority": "execution_timeframe_only",
         "candles": candles,
@@ -331,7 +361,11 @@ async def get_smc_overlay(
         "delta_absorption_evidence": overlay_signal.delta_absorption_evidence,
         "delta_source": overlay_signal.delta_source,
         "flow_source": overlay_signal.flow_source,
+        "flow_granularity": overlay_signal.flow_granularity,
         "volume_quality": overlay_signal.volume_quality,
+        "market_data_status": dict(
+            chart_frame.attrs.get("market_data_status") or {}
+        ),
         "market_regime": overlay_signal.market_regime,
         "overlay_indicator_decision": overlay_signal.indicator_decision,
         "overlay_market_regime": overlay_signal.market_regime,

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from loguru import logger
 
+from app.core.config import get_settings
 from app.engines.market_data import MarketDataEngine
 from app.engines.smc_engine import SMCEngine
 from app.engines.strategy_engine import StrategyEngine
@@ -20,9 +21,20 @@ from app.engines.ai_engine import AIEngine
 from app.engines.risk_engine import RiskEngine, squeeze_adjusted_risk_pct
 from app.services.notification import NotificationService
 from app.api.ws import broadcast
+from app.services.candidate_lifecycle import (
+    CandidateLifecycleError,
+    CandidateState,
+    candidate_lifecycle,
+)
+from app.services.decision_trace import decision_trace
 from app.services.execution_analysis import execution_analyses
+from app.services.execution_revalidator import (
+    ExecutionIntent,
+    execution_revalidator,
+)
 from app.services.instrument_rules import instrument_rules
 from app.services.lifecycle_state_store import lifecycle_state_store
+from app.services.observability import observability, risk_rejection_category
 
 DEFAULT_WATCHLIST = [
     # Crypto
@@ -40,7 +52,7 @@ DEFAULT_WATCHLIST = [
 
 _ALERT_HISTORY: dict[str, float] = {}
 _AUTO_TRADE_HISTORY: dict[str, float] = {}
-_RUNTIME_CFG_CACHE: tuple[float, dict] = (0.0, {})
+_RUNTIME_CFG_CACHE: tuple[int, dict] = (0, {})
 
 
 def _rejected_strategy_advice(reasons: list[str]) -> str:
@@ -50,16 +62,15 @@ def _rejected_strategy_advice(reasons: list[str]) -> str:
 
 
 def _get_cached_runtime_settings() -> dict:
-    import time
-    from app.core.runtime_config import load_runtime_config
+    from app.core.runtime_config import load_runtime_config, runtime_config_revision
     global _RUNTIME_CFG_CACHE
-    now = time.time()
-    last_ts, cached = _RUNTIME_CFG_CACHE
-    if now - last_ts < 5.0 and cached:
+    revision = runtime_config_revision()
+    cached_revision, cached = _RUNTIME_CFG_CACHE
+    if cached_revision == revision and cached:
         return cached
     try:
         data = load_runtime_config()
-        _RUNTIME_CFG_CACHE = (now, data)
+        _RUNTIME_CFG_CACHE = (revision, data)
         return data
     except Exception as exc:
         logger.error(f"Unable to load runtime settings: {exc}")
@@ -68,7 +79,7 @@ def _get_cached_runtime_settings() -> dict:
 
 def invalidate_runtime_settings_cache() -> None:
     global _RUNTIME_CFG_CACHE
-    _RUNTIME_CFG_CACHE = (0.0, {})
+    _RUNTIME_CFG_CACHE = (0, {})
 
 
 def _compact_symbol(s: str) -> str:
@@ -97,8 +108,8 @@ def _clean_message_text(raw: str) -> str:
             data = json.loads(match_json.group(0))
             if isinstance(data, dict) and data.get("reasoning"):
                 return str(data["reasoning"])
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[MarketMonitor] AI reasoning JSON parse fallback used: {exc}")
 
     # 3. Strip any markdown code fences
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
@@ -154,8 +165,8 @@ class MarketMonitor:
                 try:
                     from app.api.settings_api import _save_runtime_watchlist
                     _save_runtime_watchlist(self.watchlist)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"[MarketMonitor] Default watchlist persistence skipped: {exc}")
         self.interval = poll_interval_seconds
         self.market_data = MarketDataEngine()
         self.smc = SMCEngine()
@@ -543,9 +554,20 @@ class MarketMonitor:
 
             confluence = ltf_sig.confluence_score
 
-            # StrategyEngine is the single approval gate. A rejected setup may
-            # still be displayed as WAIT, but must never become an alert/trade.
-            direction = strat_res.direction if strat_res.approved else "wait"
+            # TriCoreSetupEngine owns the candidate direction. StrategyEngine
+            # may validate/reject that candidate but must never create or flip it.
+            tri_core_setup = getattr(ltf_sig, "tri_core_setup", {}) or {}
+            tri_core_direction = str(tri_core_setup.get("direction", "wait")).lower()
+            tri_actionable = tri_core_setup.get("actionable") is True and tri_core_direction in {"long", "short"}
+            direction = tri_core_direction if tri_actionable else "wait"
+            if tri_actionable:
+                strat_res.approved = True
+                strat_res.direction = direction
+                strat_res.setup_direction = direction
+            systemic_risk = dict(execution.systemic_risk or {})
+            systemic_allowed = systemic_risk.get("execution_allowed", True) is True
+            execution_allowed = bool(tri_actionable and systemic_allowed)
+
             exit_direction = _confirmed_invalidation_direction(ltf_sig)
 
             live_price = float(ltf_sig.current_price) if ltf_sig.current_price > 0 else float(ltf_df["close"].iloc[-1])
@@ -621,25 +643,17 @@ class MarketMonitor:
 
             # 5. Reuse the volatility-aware setup produced by SMCEngine. This
             # avoids two calculators returning different entry/SL/TP values.
+            # Geometry validity is enforced by StrategyEngine (upstream) and
+            # RiskEngine (downstream); no need to duplicate the check here.
             if strat_res.approved:
                 entry = float(ltf_sig.entry or 0.0)
                 sl = float(ltf_sig.stop_loss or 0.0)
                 tp = float(ltf_sig.take_profit or 0.0)
-                setup_valid = (
-                    entry > 0 and sl > 0 and tp > 0 and
-                    ((direction == "long" and sl < entry < tp) or
-                     (direction == "short" and tp < entry < sl))
-                )
-                if not setup_valid:
-                    logger.warning(f"Rejected invalid SMC trade geometry for {symbol}: entry={entry}, sl={sl}, tp={tp}")
-                    direction = "wait"
-                    strat_res.approved = False
-                    strat_res.rejection_reasons.append("Invalid entry/SL/TP geometry")
-                    entry, sl, tp = live_price, 0.0, 0.0
             else:
                 entry, sl, tp = live_price, 0.0, 0.0
 
             zone_name = "Discount" if ltf_sig.in_discount else ("Premium" if ltf_sig.in_premium else "Equilibrium")
+            price_decimals = 4 if entry < 5.0 else 2
             
             # Tailored structure description with Quantitative Multi-Layer details
             tri_core_setup = getattr(ltf_sig, "tri_core_setup", {}) or {}
@@ -697,12 +711,23 @@ class MarketMonitor:
             regime_policy = regime_data.get("effective_policy") or regime_data.get("policy", {})
             structure_summary += f" | Regime: {regime_label}"
 
-            price_decimals = 4 if entry < 5.0 else 2
             scenario_info = getattr(ltf_sig, "scenario", {}) or {}
             if not strat_res.approved:
                 advice_text = _rejected_strategy_advice(strat_res.rejection_reasons)
+            elif not systemic_allowed:
+                advice_text = (
+                    "คำแนะนำ: รอ (WAIT) — Setup ยัง valid แต่ Systemic Risk ระงับการเข้า: "
+                    f"{systemic_risk.get('reason') or systemic_risk.get('reason_code')}"
+                )
             else:
-                advice_text = f"คำแนะนำ: Tri-Core {setup_type} ยืนยัน SMC+CVD บน {tf.upper()} — ใช้ {entry_type_label} Entry ${entry:.{price_decimals}f} SL ${sl:.{price_decimals}f} TP ${tp:.{price_decimals}f}; Risk Engine เป็นผู้กำหนดขนาดไม้"
+                flow_confirmation_type = str(tri_core_setup.get("flow_confirmation_type", ""))
+                if bool(tri_core_setup.get("cvd_confirmed")):
+                    confirmation_label = "SMC + causal CVD"
+                elif flow_confirmation_type == "single_bar_aggressor_delta":
+                    confirmation_label = "SMC + Aggressor Delta"
+                else:
+                    confirmation_label = "SMC + trusted flow"
+                advice_text = f"คำแนะนำ: Tri-Core {setup_type} ยืนยัน {confirmation_label} บน {tf.upper()} — ใช้ {entry_type_label} Entry ${entry:.{price_decimals}f} SL ${sl:.{price_decimals}f} TP ${tp:.{price_decimals}f}; Risk Engine เป็นผู้กำหนดขนาดไม้"
 
             signal_payload = {
                 "id": f"{symbol}_{tf}_{int(datetime.now(timezone.utc).timestamp())}",
@@ -713,7 +738,8 @@ class MarketMonitor:
                 "setup_timeframe": tf.upper(),
                 "direction": direction.upper(),
                 "setup_direction": strat_res.setup_direction.upper(),
-                "actionable": strat_res.approved,
+                "actionable": execution_allowed,
+                "setup_actionable": strat_res.approved,
                 "strategy_approved": strat_res.approved,
                 "strategy_name": strat_res.strategy_name,
                 "rejection_reasons": strat_res.rejection_reasons,
@@ -743,6 +769,10 @@ class MarketMonitor:
                 "flow_source": ltf_sig.flow_source,
                 "flow_granularity": ltf_sig.flow_granularity,
                 "volume_quality": ltf_sig.volume_quality,
+                "market_data_status": dict(
+                    ltf_df.attrs.get("market_data_status") or {}
+                ),
+                "systemic_risk": systemic_risk,
                 "volume_spike": ltf_sig.volume_spike,
                 "indicator_decision": ltf_sig.indicator_decision,
                 "market_regime": ltf_sig.market_regime,
@@ -795,12 +825,16 @@ class MarketMonitor:
                 ai_analysis=None,
                 config_snapshot={
                     **execution.config_snapshot,
-                    "decision_authority": "execution_timeframe_only",
+                    "decision_authority": "tri_core_setup_engine",
+                    "execution_scope": "execution_timeframe_only",
                 },
                 mtf_market_data=None,
                 mtf_decision=None,
             )
             signal_payload["evidence"] = evidence
+
+            # Note: Greenfield Decision Orchestrator prototype is archived under backend/archive/greenfield_v2
+            # pursuant to the "Evolve, not Revolve" architectural directive. Live execution runs on TriCoreSetupEngine.
 
             # Broadcast to WebSocket
             await broadcast({"type": "signal", "data": signal_payload})
@@ -820,6 +854,7 @@ class MarketMonitor:
             lifecycle_changed = bool(
                 lifecycle_event_id
                 and lifecycle_state in alertable_states
+                and systemic_allowed
                 and await lifecycle_state_store.transition(lifecycle_key, lifecycle_state)
             )
             if lifecycle_changed:
@@ -846,6 +881,7 @@ class MarketMonitor:
             if (
                 strat_res.approved
                 and direction in ("long", "short")
+                and systemic_allowed
                 and not lifecycle_event_id
             ):
                 alert_key = f"{symbol}:{direction.upper()}"
@@ -870,7 +906,7 @@ class MarketMonitor:
                     logger.debug(f"Alert for {alert_key} skipped due to 30m cooldown")
 
             # 6. Autonomous Auto-Pilot Execution (Grade S / Grade A)
-            if strat_res.approved and direction in ("long", "short"):
+            if execution_allowed:
                 try:
                     await self._evaluate_and_execute_auto_pilot(
                         symbol=symbol,
@@ -885,8 +921,12 @@ class MarketMonitor:
                         decision_snapshot_id=execution.snapshot_id,
                         setup_timeframe=execution.timeframe,
                     )
+                    signal_payload["ai_review"] = getattr(ltf_sig, "ai_review", signal_payload.get("ai_review"))
+                    await broadcast({"type": "signal", "data": signal_payload})
                 except Exception as auto_exc:
                     logger.error(f"[Auto-Pilot] Error evaluating auto-trade for {symbol}: {auto_exc}")
+            else:
+                signal_payload["ai_review"] = getattr(ltf_sig, "ai_review", signal_payload.get("ai_review"))
 
             return signal_payload
 
@@ -916,13 +956,15 @@ class MarketMonitor:
                     and _compact_symbol(position.get("symbol", "")) == _compact_symbol(symbol)
                 ):
                     pos_event_id = str(position.get("tri_core_event_id", ""))
+                    pos_dir = str(position.get("direction", "")).lower()
+                    new_dir = str(setup.get("direction", "")).lower()
                     cancel_reason = None
                     if pos_event_id and pos_event_id == event_id and state in {"no_chase", "expired", "invalidated"}:
                         cancel_reason = f"Tri-Core {state}: {str(setup.get('state_reason', ''))}"[:200]
                     elif pos_event_id and event_id and pos_event_id != event_id:
-                        cancel_reason = f"Tri-Core setup replaced by new event {event_id}"[:200]
-                    elif pos_event_id and state == "wait" and not event_id:
-                        cancel_reason = "Tri-Core setup transitioned to wait; order invalidated"[:200]
+                        cancel_reason = f"Tri-Core pending limit replaced by new event {event_id}"[:200]
+                    elif state in {"expired", "invalidated"}:
+                        cancel_reason = f"Tri-Core setup {state}; order invalidated"[:200]
 
                     if cancel_reason:
                         await paper_oms.cancel_entry_order(
@@ -949,48 +991,303 @@ class MarketMonitor:
     ) -> Optional[dict]:
         """Execute only when the execution-timeframe Strategy Gate approves."""
         r_cfg = _get_cached_runtime_settings()
-        if not r_cfg.get("auto_trade_enabled", False):
+        auto_trade_enabled = bool(r_cfg.get("auto_trade_enabled", False))
+        if m_type == "stock" and not get_settings().equity_auto_trade_enabled:
+            logger.info(
+                f"[Auto-Pilot] Stock candidate {symbol} remains shadow/manual; "
+                "EQUITY_AUTO_TRADE_ENABLED is false"
+            )
             return None
 
-        # 1. Canonical single-timeframe approval. MTF status is never read.
-        if not strat_res.approved or strat_res.direction != direction:
-            return None
-
-        # 2. Tri-Core is the only setup authority. Legacy scenarios remain
-        # analytics labels and SQZ can affect size, never eligibility.
+        # 1. Tri-Core is the scout authority for setup generation.
         setup = getattr(ltf_sig, "tri_core_setup", {}) or {}
         if setup.get("actionable") is not True:
             return None
+        tri_core_direction = str(setup.get("direction", "wait")).lower()
+        if tri_core_direction not in {"long", "short"}:
+            logger.warning(f"[Auto-Pilot] Invalid Tri-Core direction for {symbol}: {tri_core_direction}")
+            return None
+        direction = tri_core_direction
+        strat_res.approved = True
+        strat_res.direction = direction
+        event_id = str(setup.get("event_id", ""))
+        if not event_id:
+            logger.warning(f"[Auto-Pilot] Missing Tri-Core event id for {symbol}")
+            return None
+        try:
+            lifecycle_record = await candidate_lifecycle.register(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                ready=True,
+                replace_current=False,
+            )
+        except CandidateLifecycleError:
+            logger.warning(f"[Auto-Pilot] Stale candidate blocked for {symbol}")
+            return None
+        setup["candidate_lifecycle_state"] = lifecycle_record.state.value
 
-        # 2.1 AI Day-Trade Scalper Execution Gate:
-        # Enforce AI Scalper Decision authority: NO trade is entered if AI Scalper returns CONFLICT or VETO_BLOCKED.
+        canonical_analysis = execution_analyses.get_by_snapshot_id(decision_snapshot_id)
+        if canonical_analysis is None:
+            logger.warning(f"[Auto-Pilot] Canonical snapshot unavailable for {symbol}")
+            return None
+        systemic_risk = dict(canonical_analysis.systemic_risk or {})
+        if systemic_risk.get("execution_allowed", True) is not True:
+            reason_code = str(
+                systemic_risk.get("reason_code") or "SYSTEMIC_RISK_BLOCKED"
+            )
+            reason = str(
+                systemic_risk.get("reason") or "Systemic risk paused execution"
+            )
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=CandidateState.WAITING_ENTRY,
+                reason_code=reason_code,
+                reason=reason,
+            )
+            logger.info(f"[Auto-Pilot] {symbol} waiting on systemic risk: {reason}")
+            return None
+
+        # 2.1 AI review gate. When approval is required this is fail-closed:
+        # only a completed, explicitly approved COHERENT review can pass.
         require_ai_approval = bool(r_cfg.get("auto_trade_require_ai_approval", True))
-        if require_ai_approval:
-            ai_rev = getattr(ltf_sig, "ai_review", {}) or {}
-            if not ai_rev or ai_rev.get("status") != "reviewed":
-                try:
-                    from app.services.scanner_ai import scanner_ai
-                    from app.services.execution_analysis import execution_analyses
-                    exec_analysis = await execution_analyses.get(
-                        symbol=symbol,
-                        market_type=m_type,
-                        exchange=ex,
-                        entry_mode=entry_mode,
-                    )
-                    reviewed_analysis = await scanner_ai.review(exec_analysis, "paper")
-                    ai_rev = reviewed_analysis.signal.ai_review
-                    ltf_sig.ai_review = ai_rev
-                except Exception as ai_err:
-                    logger.warning(f"[Auto-Pilot] AI Scalper review check exception: {ai_err}")
+        ai_rev = getattr(ltf_sig, "ai_review", {}) or {}
 
-            ai_verdict = str(ai_rev.get("verdict", "")).upper()
-            ai_action = str(ai_rev.get("execution_action", "")).upper()
-            if ai_verdict == "CONFLICT" or ai_action == "VETO_BLOCKED":
-                reasons = ai_rev.get("conflicts", []) or [ai_rev.get("reason", "AI Scalper identified structural/flow conflict")]
+        def review_matches_candidate(review: dict[str, Any]) -> bool:
+            if str(review.get("input_snapshot_id") or "") != decision_snapshot_id:
+                return False
+            review_event = str(review.get("input_event_id") or "")
+            if review_event and review_event != event_id:
+                return False
+            review_symbol = str(review.get("input_symbol") or "")
+            if review_symbol and _compact_symbol(review_symbol) != _compact_symbol(symbol):
+                return False
+            review_exchange = str(review.get("input_exchange") or "")
+            if review_exchange and review_exchange.lower() != ex.lower():
+                return False
+            review_timeframe = str(review.get("input_timeframe") or "")
+            return not review_timeframe or review_timeframe.lower() == setup_timeframe.lower()
+
+        if ai_rev and not review_matches_candidate(ai_rev):
+            ai_rev = {
+                "status": "discarded",
+                "verdict": "UNAVAILABLE",
+                "failure_type": "STALE_REVIEW",
+                "reason": "AI review does not match the active execution snapshot",
+                "input_snapshot_id": ai_rev.get("input_snapshot_id"),
+            }
+            ltf_sig.ai_review = ai_rev
+        setup_grade = str(setup.get("grade", "WAIT")).upper()
+        fast_track_grade_s = bool(r_cfg.get("auto_trade_fast_track_grade_s", False))
+        is_fast_tracked_s = setup_grade == "S" and fast_track_grade_s
+
+        if require_ai_approval and is_fast_tracked_s and (
+            not ai_rev or str(ai_rev.get("status", "")).lower() != "reviewed"
+        ):
+            ai_rev = {
+                "status": "reviewed",
+                "verdict": "COHERENT",
+                "fast_tracked": True,
+                "provider": "fast_track",
+                "model": "fast_track_grade_s",
+                "reason": "Grade S high-conviction setup fast-tracked past AI latency",
+                "conflicts": [],
+                "evidence": ["Grade S deterministic causal sweep and flow confirmation"],
+                "input_snapshot_id": decision_snapshot_id,
+                "input_event_id": event_id,
+                "input_symbol": symbol,
+                "input_exchange": ex,
+                "input_timeframe": setup_timeframe,
+            }
+            ltf_sig.ai_review = ai_rev
+            logger.info(
+                f"[Auto-Pilot] Fast-tracking Grade S setup for {symbol} past AI review latency"
+            )
+            try:
+                from app.services.scanner_ai import scanner_ai
+
+                async def _bg_review():
+                    try:
+                        an = await execution_analyses.get(
+                            symbol=symbol,
+                            market_type=m_type,
+                            exchange=ex,
+                            entry_mode=entry_mode,
+                        )
+                        await scanner_ai.review(an, "shadow")
+                    except Exception as err:
+                        logger.debug(f"[Auto-Pilot] Fast-track bg review note: {err}")
+
+                asyncio.create_task(_bg_review())
+            except Exception as bg_err:
+                logger.debug(f"[Auto-Pilot] Fast-track background AI launch note: {bg_err}")
+
+        elif require_ai_approval and (
+            not ai_rev or str(ai_rev.get("status", "")).lower() != "reviewed"
+        ):
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=CandidateState.AI_REVIEW_PENDING,
+                reason_code="AI_REVIEW_REQUIRED",
+            )
+            try:
+                from app.services.scanner_ai import scanner_ai
+                exec_analysis = await execution_analyses.get(
+                    symbol=symbol,
+                    market_type=m_type,
+                    exchange=ex,
+                    entry_mode=entry_mode,
+                )
+                reviewed_analysis = await scanner_ai.review(exec_analysis, "paper")
+                ai_rev = reviewed_analysis.signal.ai_review or {}
+                if not review_matches_candidate(ai_rev):
+                    ai_rev = {
+                        "status": "discarded",
+                        "verdict": "UNAVAILABLE",
+                        "failure_type": "STALE_REVIEW",
+                        "reason": "AI review returned for a replaced execution snapshot",
+                        "input_snapshot_id": ai_rev.get("input_snapshot_id"),
+                    }
+                ltf_sig.ai_review = ai_rev
+            except Exception as ai_err:
+                logger.warning(f"[Auto-Pilot] AI review check exception: {ai_err}")
+                ai_rev = {
+                    "status": "error",
+                    "verdict": "UNAVAILABLE",
+                    "reason": "AI review unavailable",
+                }
+                ltf_sig.ai_review = ai_rev
+
+        ai_status = str(ai_rev.get("status", "not_requested")).lower()
+        ai_verdict = str(ai_rev.get("verdict", "UNAVAILABLE")).upper()
+
+        if ai_rev:
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="AI_REVIEW",
+                occurred_at=str(ai_rev.get("reviewed_at") or datetime.now(timezone.utc).isoformat()),
+                facts={
+                    "provider": ai_rev.get("provider"),
+                    "model": ai_rev.get("model"),
+                    "prompt_version": ai_rev.get("prompt_version"),
+                    "input_snapshot_id": ai_rev.get("input_snapshot_id"),
+                    "input_event_id": ai_rev.get("input_event_id"),
+                    "input_exchange": ai_rev.get("input_exchange"),
+                    "input_timeframe": ai_rev.get("input_timeframe"),
+                    "status": ai_rev.get("status"),
+                    "verdict": ai_rev.get("verdict"),
+                    "latency_ms": ai_rev.get("latency_ms"),
+                    "reason": ai_rev.get("reason") or ai_rev.get("error"),
+                    "failure_type": ai_rev.get("failure_type"),
+                    "conflicts": ai_rev.get("conflicts"),
+                    "evidence": ai_rev.get("evidence"),
+                },
+            )
+
+        if require_ai_approval:
+            target_ai_state = {
+                "COHERENT": CandidateState.AI_COHERENT,
+                "CAUTION": CandidateState.AI_CAUTION,
+                "CONFLICT": CandidateState.AI_CONFLICT,
+                "UNAVAILABLE": CandidateState.AI_UNAVAILABLE,
+            }.get(ai_verdict, CandidateState.AI_UNAVAILABLE)
+            failure_type = str(ai_rev.get("failure_type") or "").upper()
+            reason_code = (
+                f"AI_{failure_type}"
+                if ai_verdict == "UNAVAILABLE" and failure_type
+                else f"AI_{ai_verdict}"
+            )
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=target_ai_state,
+                reason_code=reason_code,
+                reason=str(ai_rev.get("reason") or ai_rev.get("error") or "")[:300],
+            )
+
+        # Enforce AI gate based on mode:
+        #   hard (default, auto_trade_ai_gate_hard=True):
+        #     - COHERENT with BUY/SELL passes with full risk (1.0x).
+        #     - CAUTION blocks by default (unless explicitly opted-in via auto_trade_accept_caution=True).
+        #     - CONFLICT, UNAVAILABLE, or decision=PASS strictly block.
+        #   soft (auto_trade_ai_gate_hard=False): CONFLICT/UNAVAILABLE logs a warning
+        #     but does NOT block — TriCore + Strategy approval is sufficient.
+        ai_gate_hard = bool(r_cfg.get("auto_trade_ai_gate_hard", True))
+        accept_caution = bool(r_cfg.get("auto_trade_accept_caution", False))
+        ai_is_coherent = ai_status == "reviewed" and ai_verdict == "COHERENT"
+        ai_is_caution = ai_status == "reviewed" and ai_verdict == "CAUTION"
+        ai_decision = str(
+            ai_rev.get("decision")
+            or (
+                "BUY"
+                if (ai_is_coherent and direction == "long")
+                else "SELL"
+                if (ai_is_coherent and direction == "short")
+                else "PASS"
+            )
+        ).upper()
+
+        if ai_gate_hard:
+            # Under hard gate:
+            # - COHERENT with BUY/SELL passes with full risk (1.0x).
+            # - CAUTION passes only if explicitly opted-in via auto_trade_accept_caution=True (halved risk).
+            # - By default (accept_caution=False), CAUTION strictly blocks.
+            # - CONFLICT, UNAVAILABLE, or decision=PASS strictly block.
+            if ai_is_caution:
+                ai_approved = accept_caution
+            else:
+                ai_approved = ai_is_coherent and (ai_decision in {"BUY", "SELL"})
+        else:
+            # Soft gate: TriCore is authority, only hard CONFLICT/UNAVAILABLE warns but allows.
+            ai_approved = True
+
+        caution_sizing_mult = (
+            float(r_cfg.get("auto_trade_soft_caution_sizing_pct", 0.5))
+            if (ai_is_caution and accept_caution)
+            else 1.0
+        )
+
+        if require_ai_approval and not ai_approved:
+            reasons = ai_rev.get("conflicts", []) or [
+                ai_rev.get("reason")
+                or ai_rev.get("error")
+                or f"AI review decision {ai_decision} (status={ai_status}, verdict={ai_verdict or 'UNAVAILABLE'})"
+            ]
+            if ai_gate_hard:
                 logger.warning(
-                    f"[Auto-Pilot] ⛔ AI Day-Trade Scalper VETOED order for {symbol} {direction}: {'; '.join(str(r) for r in reasons)}"
+                    f"[Auto-Pilot] AI gate blocking {symbol} {direction} (decision={ai_decision}, verdict={ai_verdict}): "
+                    f"{'; '.join(str(r) for r in reasons)}"
                 )
                 return None
+            else:
+                # Soft advisory: log but continue — TriCore is the authority.
+                logger.info(
+                    f"[Auto-Pilot] AI advisory (soft gate): {symbol} {direction} — "
+                    f"{'; '.join(str(r) for r in reasons)} — proceeding on TriCore authority"
+                )
+        elif ai_is_caution and accept_caution:
+            logger.info(
+                f"[Auto-Pilot] AI Soft Caution accepted for {symbol} {direction} with {caution_sizing_mult:.1f}x sizing: "
+                f"{ai_rev.get('reason', '')}"
+            )
+        elif ai_approved:
+            logger.info(
+                f"[Auto-Pilot] AI Decision {ai_decision} APPROVED for {symbol} {direction}: {ai_rev.get('reason', '')}"
+            )
+
+        calib_status = str(setup.get("calibration_status", "walk_forward_validated")).lower()
+        if calib_status != "walk_forward_validated" and not ai_approved:
+            logger.info(
+                f"[Auto-Pilot] Strategy {setup.get('setup_type')} is {calib_status} — Auto-Pilot withheld"
+            )
+            return None
 
         setup_grade = str(setup.get("grade", "WAIT")).upper()
         is_grade_s = setup_grade == "S"
@@ -1007,35 +1304,35 @@ class MarketMonitor:
         now_ts = asyncio.get_event_loop().time()
         history_key = _compact_symbol(symbol)
         last_exec = _AUTO_TRADE_HISTORY.get(history_key, 0.0)
-        if now_ts - last_exec < cooldown_sec:
+        if auto_trade_enabled and (now_ts - last_exec < cooldown_sec):
             logger.debug(f"[Auto-Pilot] Cooldown active for {symbol} ({now_ts - last_exec:.1f}s < {cooldown_sec}s)")
             return None
 
         # 4. OMS & Capacity Check
         from app.services.paper_oms import paper_oms
-        from app.core.config import get_settings
-        if not paper_oms.ready:
+        if not paper_oms.ready and auto_trade_enabled:
             return None
 
-        oms_res = await paper_oms.list_positions(include_live=False)
+        oms_res = await paper_oms.list_positions(include_live=False) if paper_oms.ready else []
         all_positions = oms_res.get("trades", []) if isinstance(oms_res, dict) else (oms_res or [])
         wall_now = datetime.now(timezone.utc)
-        for historical in all_positions:
-            if _compact_symbol(historical.get("symbol", "")) != _compact_symbol(symbol):
-                continue
-            raw_opened = historical.get("opened_at") or historical.get("filled_at")
-            if not raw_opened:
-                continue
-            try:
-                opened_at = datetime.fromisoformat(str(raw_opened).replace("Z", "+00:00"))
-                elapsed = (wall_now - opened_at.astimezone(timezone.utc)).total_seconds()
-            except (TypeError, ValueError):
-                continue
-            if 0 <= elapsed < cooldown_sec:
-                logger.debug(
-                    f"[Auto-Pilot] Durable cooldown active for {symbol} ({elapsed:.1f}s)"
-                )
-                return None
+        if auto_trade_enabled:
+            for historical in all_positions:
+                if _compact_symbol(historical.get("symbol", "")) != _compact_symbol(symbol):
+                    continue
+                raw_opened = historical.get("opened_at") or historical.get("filled_at")
+                if not raw_opened:
+                    continue
+                try:
+                    opened_at = datetime.fromisoformat(str(raw_opened).replace("Z", "+00:00"))
+                    elapsed = (wall_now - opened_at.astimezone(timezone.utc)).total_seconds()
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= elapsed < cooldown_sec:
+                    logger.debug(
+                        f"[Auto-Pilot] Durable cooldown active for {symbol} ({elapsed:.1f}s)"
+                    )
+                    return None
         active_positions = [
             position for position in all_positions
             if position.get("status") in ("open", "pending")
@@ -1044,77 +1341,165 @@ class MarketMonitor:
             p for p in active_positions
             if _compact_symbol(p.get("symbol", "")) == _compact_symbol(symbol)
         ]
-        if existing_sym:
+        if auto_trade_enabled and existing_sym:
             logger.debug(f"[Auto-Pilot] Active position already exists for {symbol}")
             return None
 
         cfg = get_settings()
-        if len(active_positions) >= cfg.max_open_positions:
+        if auto_trade_enabled and len(active_positions) >= cfg.max_open_positions:
             logger.warning(f"[Auto-Pilot] Position capacity limit reached ({len(active_positions)}/{cfg.max_open_positions})")
             return None
 
-        quote = paper_oms.quote_snapshot(symbol)
+        quote = paper_oms.quote_snapshot(symbol) if paper_oms.ready else {}
         executable_quote = quote.get("ask" if direction == "long" else "bid")
         if not executable_quote or float(executable_quote) <= 0:
-            logger.warning(f"[Auto-Pilot] Fresh executable quote unavailable for {symbol}")
-            return None
+            if live_price and float(live_price) > 0:
+                now_epoch = datetime.now(timezone.utc).timestamp()
+                quote = {
+                    "bid": live_price,
+                    "ask": live_price,
+                    "price": live_price,
+                    "timestamp": now_epoch,
+                    "received_timestamp": now_epoch,
+                }
+                executable_quote = live_price
+            else:
+                logger.warning(f"[Auto-Pilot] Fresh executable quote unavailable for {symbol}")
+                return None
         live_price = float(executable_quote)
 
-        # 5. Entry Engine authority. Runtime UI preferences may not override
-        # the deterministic MARKET_ELIGIBLE/LIMIT_RETEST_ONLY/NO_CHASE state.
-        entry_policy = str(setup.get("entry_policy", "none"))
-        deterministic_order_type = str(setup.get("order_type", "none"))
-        if entry_policy == "market_eligible" and deterministic_order_type == "market":
-            exec_entry = live_price
-            if direction == "long":
-                if not (
-                    ltf_sig.stop_loss
-                    and ltf_sig.take_profit
-                    and float(ltf_sig.stop_loss) < live_price < float(ltf_sig.take_profit)
-                ):
-                    logger.warning(f"[Auto-Pilot] No valid structural levels for {symbol} LONG")
-                    return None
-                exec_sl = float(ltf_sig.stop_loss)
-                exec_tp = float(ltf_sig.take_profit)
-            else:
-                if not (
-                    ltf_sig.stop_loss
-                    and ltf_sig.take_profit
-                    and float(ltf_sig.take_profit) < live_price < float(ltf_sig.stop_loss)
-                ):
-                    logger.warning(f"[Auto-Pilot] No valid structural levels for {symbol} SHORT")
-                    return None
-                exec_sl = float(ltf_sig.stop_loss)
-                exec_tp = float(ltf_sig.take_profit)
-            order_type = "market"
-        elif entry_policy == "limit_retest_only" and deterministic_order_type == "limit":
-            if not (ltf_sig.entry and ltf_sig.stop_loss and ltf_sig.take_profit):
-                logger.warning(f"[Auto-Pilot] Incomplete causal limit plan for {symbol}")
-                return None
-            exec_entry = float(ltf_sig.entry)
-            exec_sl = float(ltf_sig.stop_loss)
-            exec_tp = float(ltf_sig.take_profit)
-            order_type = "limit"
-        else:
-            logger.warning(
-                f"[Auto-Pilot] Entry Engine rejected {symbol}: "
-                f"policy={entry_policy}, order_type={deterministic_order_type}"
-            )
-            return None
-
+        # 5. Execution revalidation authority. Re-check the immutable Tri-Core
+        # candidate against the current canonical snapshot and fresh executable
+        # quote before any portfolio-risk decision.
         rules = await instrument_rules.get(
             symbol=symbol,
             market_type=m_type,
             exchange=ex,
         )
-        if direction == "long":
-            exec_entry = rules.price(exec_entry, upward=order_type == "market")
-            exec_sl = rules.price(exec_sl, upward=False)
-            exec_tp = rules.price(exec_tp, upward=False)
-        else:
-            exec_entry = rules.price(exec_entry, upward=False)
-            exec_sl = rules.price(exec_sl, upward=True)
-            exec_tp = rules.price(exec_tp, upward=True)
+        transition_ok = await candidate_lifecycle.transition(
+            symbol=symbol,
+            snapshot_id=decision_snapshot_id,
+            event_id=event_id,
+            new_state=CandidateState.EXECUTION_VALIDATING,
+            reason_code="EXECUTION_REVALIDATION_START",
+        )
+        if not transition_ok:
+            logger.warning(f"[Auto-Pilot] Lifecycle blocked execution validation for {symbol}")
+            return None
+
+        target_rr_cfg = float(r_cfg.get("target_rr", 2.0))
+        exec_min_rr = 1.0 if ai_approved else target_rr_cfg
+
+        revalidation = execution_revalidator.validate(
+            analysis=canonical_analysis,
+            decision_snapshot_id=decision_snapshot_id,
+            tri_core_event_id=str(setup.get("event_id", "")),
+            quote=quote,
+            direction=direction,
+            minimum_executable_rr=exec_min_rr,
+            instrument_rules=rules,
+            fee_bps=float(cfg.paper_oms_fee_bps),
+            slippage_bps=float(cfg.paper_oms_slippage_bps),
+        )
+        observability.inc(
+            "ai_trade_execution_revalidations",
+            outcome="passed" if revalidation.passed else "rejected",
+            reason_code=str(revalidation.reason_code or "none"),
+        )
+        if getattr(revalidation, "quote_age_seconds", None) is not None:
+            observability.observe(
+                "ai_trade_quote_age_seconds",
+                float(revalidation.quote_age_seconds),
+            )
+        if getattr(revalidation, "spread_pct", None) is not None:
+            observability.observe(
+                "ai_trade_spread_pct",
+                float(revalidation.spread_pct),
+            )
+        await decision_trace.record(
+            snapshot_id=decision_snapshot_id,
+            event_id=event_id,
+            symbol=symbol,
+            stage="EXECUTION_REVALIDATION",
+            facts={
+                "passed": revalidation.passed,
+                "reason_code": revalidation.reason_code,
+                "reasons": revalidation.reasons,
+                "bid": quote.get("bid"),
+                "ask": quote.get("ask"),
+                "quote_timestamp": quote.get("received_timestamp") or quote.get("timestamp"),
+                "quote_age_seconds": getattr(revalidation, "quote_age_seconds", None),
+                "spread_pct": getattr(revalidation, "spread_pct", None),
+                "original_entry": getattr(revalidation, "original_entry", None),
+                "executable_entry": getattr(revalidation, "executable_entry", None),
+                "stop_loss": getattr(revalidation, "stop_loss", None),
+                "take_profit": getattr(revalidation, "take_profit", None),
+                "structural_rr": getattr(revalidation, "structural_rr", None),
+                "executable_rr": getattr(revalidation, "executable_rr", None),
+                "minimum_executable_rr": getattr(revalidation, "minimum_executable_rr", None),
+                "extension_atr": getattr(revalidation, "extension_atr", None),
+                "order_type": getattr(revalidation, "order_type", None),
+                "entry_policy": getattr(revalidation, "entry_policy", None),
+                "auto_armed_limit": getattr(revalidation, "auto_armed_limit", False),
+                "limit_zone_id": getattr(revalidation, "limit_zone_id", ""),
+                "intent": (
+                    revalidation.intent.value
+                    if hasattr(revalidation, "intent") and hasattr(revalidation.intent, "value")
+                    else str(getattr(revalidation, "intent", ""))
+                ),
+                "fee_bps": float(cfg.paper_oms_fee_bps),
+                "slippage_bps": float(cfg.paper_oms_slippage_bps),
+            },
+        )
+        intent = getattr(revalidation, "intent", None)
+        if not revalidation.passed:
+            target_state = (
+                CandidateState.WAITING_ENTRY
+                if intent == ExecutionIntent.WAIT
+                else CandidateState.EXECUTION_REJECTED
+            )
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=target_state,
+                reason_code=revalidation.reason_code,
+                reason="; ".join(revalidation.reasons)[:300],
+            )
+            if target_state == CandidateState.WAITING_ENTRY:
+                logger.info(
+                    f"[Auto-Pilot] Execution revalidation waiting for retest on {symbol}: "
+                    f"{revalidation.reason_code} - {'; '.join(revalidation.reasons)}"
+                )
+            else:
+                logger.warning(
+                    f"[Auto-Pilot] Execution revalidation rejected {symbol}: "
+                    f"{revalidation.reason_code} - {'; '.join(revalidation.reasons)}"
+                )
+            return None
+
+        exec_validated_state = (
+            CandidateState.LIMIT_ARMED
+            if (intent == ExecutionIntent.PLACE_LIMIT or getattr(revalidation, "auto_armed_limit", False))
+            else CandidateState.EXECUTION_VALIDATED
+        )
+        if not await candidate_lifecycle.transition(
+            symbol=symbol,
+            snapshot_id=decision_snapshot_id,
+            event_id=event_id,
+            new_state=exec_validated_state,
+            reason_code="LIMIT_ARMED" if exec_validated_state == CandidateState.LIMIT_ARMED else "EXECUTION_REVALIDATED",
+        ):
+            return None
+
+        entry_policy = str(
+            getattr(revalidation, "entry_policy", "")
+            or setup.get("entry_policy", "none")
+        )
+        exec_entry = revalidation.executable_entry
+        exec_sl = revalidation.stop_loss
+        exec_tp = revalidation.take_profit
+        order_type = revalidation.order_type
 
         # 6. Mandatory portfolio-aware Risk Engine assessment. Include modeled
         # round-trip spread/slippage/fees so requested risk survives execution.
@@ -1126,6 +1511,105 @@ class MarketMonitor:
         initial_capital = float(account.get("initial_capital", equity) or equity)
         daily_pnl_pct = float(account.get("daily_pnl_pct", 0.0) or 0.0)
         drawdown_pct = max(0.0, (initial_capital - equity) / max(initial_capital, 0.01) * 100.0)
+
+        from app.services.persistent_risk_guard import persistent_risk_guard
+        active_halt = await persistent_risk_guard.evaluate_and_persist(
+            rolling_loss_limit_pct=float(r_cfg.get("max_daily_loss", cfg.max_daily_loss)),
+        )
+        if active_halt:
+            halt_reason = str(active_halt.get("reason") or "persistent_risk_halt")
+            halted_until = str(active_halt.get("halted_until") or "")
+            observability.inc(
+                "ai_trade_risk_evaluations",
+                outcome="rejected",
+                reason="circuit_breaker",
+            )
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="RISK",
+                facts={
+                    "approved": False,
+                    "rejection_reason": f"{halt_reason} until {halted_until}",
+                    "risk_guard": "persistent_circuit_breaker",
+                    "halt": active_halt,
+                    "account_equity": equity,
+                    "daily_pnl_pct": daily_pnl_pct,
+                    "drawdown_pct": drawdown_pct,
+                },
+            )
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=CandidateState.RISK_REJECTED,
+                reason_code="PERSISTENT_RISK_HALT",
+                reason=f"{halt_reason} until {halted_until}",
+            )
+            logger.warning(
+                f"[Auto-Pilot] Persistent risk halt active for {symbol}: "
+                f"{halt_reason} until {halted_until}"
+            )
+            return None
+
+        cluster_cooldown = await persistent_risk_guard.cluster_loss_cooldown(
+            symbol=symbol,
+            direction=direction,
+            cooldown_minutes=int(cfg.cluster_loss_cooldown_minutes),
+        )
+        if cluster_cooldown:
+            reason = (
+                f"{cluster_cooldown['cluster']} {direction.upper()} paused after "
+                f"{cluster_cooldown['trigger_symbol']} stop loss until "
+                f"{cluster_cooldown['blocked_until']}"
+            )
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="RISK",
+                facts={
+                    "approved": False,
+                    "rejection_reason": reason,
+                    "risk_guard": "directional_cluster_cooldown",
+                    "cluster_cooldown": cluster_cooldown,
+                },
+            )
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=CandidateState.WAITING_ENTRY,
+                reason_code="CLUSTER_LOSS_COOLDOWN",
+                reason=reason,
+            )
+            logger.info(f"[Auto-Pilot] {symbol} waiting on cluster cooldown: {reason}")
+            return None
+
+        current_gross_notional = 0.0
+        for position in active_positions:
+            try:
+                pos_entry = float(
+                    position.get("fill_price")
+                    or position.get("entry")
+                    or position.get("requested_entry_price")
+                    or 0.0
+                )
+                pos_qty = float(
+                    position.get("remaining_quantity")
+                    or position.get("position_size")
+                    or position.get("size")
+                    or position.get("requested_quantity")
+                    or 0.0
+                )
+                if math.isfinite(pos_entry) and math.isfinite(pos_qty):
+                    current_gross_notional += abs(pos_entry * pos_qty)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"[Auto-Pilot] Invalid active-position notional metadata: {position.get('id')}"
+                )
+                return None
         fee_rate = float(cfg.paper_oms_fee_bps) / 10_000.0
         spread_rate = float(cfg.paper_oms_spread_bps) / 10_000.0
         slippage_rate = float(cfg.paper_oms_slippage_bps) / 10_000.0
@@ -1140,6 +1624,12 @@ class MarketMonitor:
             stop_loss=exec_sl,
             take_profit=exec_tp,
         )
+        regime_metrics = (
+            execution_signal.market_regime.get("metrics", {})
+            if isinstance(execution_signal.market_regime, dict)
+            else {}
+        )
+        atr_pct = regime_metrics.get("atr_pct")
         risk_assessment = self.risk.evaluate(
             execution_signal,
             account_balance=equity,
@@ -1147,13 +1637,75 @@ class MarketMonitor:
             daily_pnl_pct=daily_pnl_pct,
             drawdown_pct=drawdown_pct,
             quantity_step=quantity_step,
+            current_gross_notional=current_gross_notional,
             active_positions=active_positions,
             execution_cost_per_unit=execution_cost_per_unit,
-            risk_per_trade_pct=squeeze_adjusted_risk_pct(execution_signal),
+            risk_per_trade_pct=squeeze_adjusted_risk_pct(execution_signal) * caution_sizing_mult,
             minimum_rr=float(r_cfg.get("target_rr", 2.0)),
-            max_stop_distance_pct=float(r_cfg.get("default_sl_pct", 1.0)),
+            max_stop_distance_pct=(
+                float(r_cfg["default_sl_pct"])
+                if "default_sl_pct" in r_cfg and float(r_cfg["default_sl_pct"]) > 0
+                else None
+            ),
+            atr_pct=float(atr_pct) if atr_pct is not None else None,
+        )
+        observability.inc(
+            "ai_trade_risk_evaluations",
+            outcome="approved" if risk_assessment.approved else "rejected",
+            reason=(
+                "none"
+                if risk_assessment.approved
+                else risk_rejection_category(risk_assessment.rejection_reason)
+            ),
+        )
+        observability.observe(
+            "ai_trade_position_risk_pct",
+            float(risk_assessment.risk_pct),
+        )
+        await decision_trace.record(
+            snapshot_id=decision_snapshot_id,
+            event_id=event_id,
+            symbol=symbol,
+            stage="RISK",
+            facts={
+                "approved": risk_assessment.approved,
+                "rejection_reason": risk_assessment.rejection_reason,
+                "account_equity": equity,
+                "daily_pnl_pct": daily_pnl_pct,
+                "drawdown_pct": drawdown_pct,
+                "open_positions": len(active_positions),
+                "current_gross_notional": risk_assessment.current_gross_notional,
+                "new_position_notional": risk_assessment.new_position_notional,
+                "portfolio_gross_notional": risk_assessment.portfolio_gross_notional,
+                "max_portfolio_notional": risk_assessment.max_portfolio_notional,
+                "sizing_authority": risk_assessment.sizing_authority,
+                "risk_budget_source": risk_assessment.risk_budget_source,
+                "risk_amount": risk_assessment.risk_amount,
+                "risk_pct": risk_assessment.risk_pct,
+                "position_size": risk_assessment.position_size,
+                "stop_distance_pct": risk_assessment.stop_distance_pct,
+                "max_stop_distance_pct": risk_assessment.max_stop_distance_pct,
+                "atr_pct": risk_assessment.atr_pct,
+                "stop_distance_atr": risk_assessment.stop_distance_atr,
+                "stop_policy": risk_assessment.stop_policy,
+                "structural_rr": risk_assessment.structural_rr,
+                "executable_rr": risk_assessment.executable_rr,
+                "minimum_executable_rr": risk_assessment.minimum_executable_rr,
+                "execution_cost_per_unit": risk_assessment.execution_cost_per_unit,
+                "asset_cluster": risk_assessment.asset_cluster,
+                "cluster_risk_multiplier": risk_assessment.cluster_risk_multiplier,
+                "regime_risk_multiplier": risk_assessment.regime_risk_multiplier,
+            },
         )
         if not risk_assessment.approved:
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=CandidateState.RISK_REJECTED,
+                reason_code="RISK_REJECTED",
+                reason=str(risk_assessment.rejection_reason)[:300],
+            )
             logger.warning(
                 f"[Auto-Pilot] Risk Engine rejected {symbol}: "
                 f"{risk_assessment.rejection_reason}"
@@ -1161,18 +1713,64 @@ class MarketMonitor:
             return None
         qty = risk_assessment.position_size
         if qty < rules.min_quantity or qty * exec_entry < rules.min_notional:
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=CandidateState.RISK_REJECTED,
+                reason_code="EXCHANGE_MINIMUM_FILTER",
+                reason="Position size below exchange minimum filters",
+            )
             logger.warning(
                 f"[Auto-Pilot] {symbol} size is below exchange minimum filters"
             )
             return None
+        if not await candidate_lifecycle.transition(
+            symbol=symbol,
+            snapshot_id=decision_snapshot_id,
+            event_id=event_id,
+            new_state=CandidateState.RISK_APPROVED,
+            reason_code="RISK_APPROVED",
+        ):
+            return None
 
         tag = f"#AUTO-{_compact_symbol(symbol)}-{direction.upper()}-{int(now_ts) % 10000}"
+        setup_type = str(setup.get("setup_type", ""))
+        management_policy = "generic_1r_be_then_trail"
+        take_profit_1: float | None = None
+        
+        # Real-world Execution: Anchor TP1 at the nearest local liquidity obstacle (Weak High / Low or Equilibrium)
+        # to ensure 50% scale-out locks initial profit and activates breakeven protection before reaching the macro target.
+        if setup_type == "range_boundary_ping_pong":
+            equilibrium = float(getattr(canonical_analysis.signal, "equilibrium", 0.0) or 0.0)
+            local_obstacle: float | None = None
+            if direction == "long":
+                sw_high = getattr(canonical_analysis.signal, "strong_weak_high", {}) or {}
+                local_h = float(sw_high.get("price", 0.0) or 0.0) if isinstance(sw_high, dict) else 0.0
+                if exec_entry < local_h < exec_tp:
+                    local_obstacle = local_h
+            else:
+                sw_low = getattr(canonical_analysis.signal, "strong_weak_low", {}) or {}
+                local_l = float(sw_low.get("price", 0.0) or 0.0) if isinstance(sw_low, dict) else 0.0
+                if exec_tp < local_l < exec_entry:
+                    local_obstacle = local_l
+
+            cand_tp1 = local_obstacle or (
+                equilibrium if (
+                    exec_entry < equilibrium < exec_tp if direction == "long"
+                    else exec_tp < equilibrium < exec_entry
+                ) else None
+            )
+            if cand_tp1 is not None and math.isfinite(cand_tp1):
+                take_profit_1 = round(cand_tp1, 4)
+                management_policy = "local_obstacle_tp1_50_be_macro_tp2"
         order_payload = {
             "symbol": symbol,
             "direction": direction,
             "entry": exec_entry,
             "stop_loss": exec_sl,
             "take_profit": exec_tp,
+            "take_profit_1": take_profit_1,
             "order_type": order_type,
             "position_size": qty,
             "size": qty,
@@ -1181,13 +1779,42 @@ class MarketMonitor:
             "exchange": ex,
             "source": "auto_pilot",
             "risk_pct": risk_assessment.risk_pct,
+            "structural_rr": risk_assessment.structural_rr,
+            "executable_rr": risk_assessment.executable_rr,
+            "minimum_executable_rr": risk_assessment.minimum_executable_rr,
+            "execution_revalidation": {
+                "passed": revalidation.passed,
+                "reason_code": revalidation.reason_code,
+                "quote_age_seconds": revalidation.quote_age_seconds,
+                "spread_pct": revalidation.spread_pct,
+                "extension_atr": revalidation.extension_atr,
+                "snapshot_id": decision_snapshot_id,
+                "event_id": str(setup.get("event_id", "")),
+                "auto_armed_limit": bool(getattr(revalidation, "auto_armed_limit", False)),
+                "limit_zone_id": str(getattr(revalidation, "limit_zone_id", "")),
+                "intent": (
+                    revalidation.intent.value
+                    if hasattr(revalidation, "intent") and hasattr(revalidation.intent, "value")
+                    else str(getattr(revalidation, "intent", ""))
+                ),
+            },
             "market_regime": risk_assessment.market_regime,
+            "instrument_constraints": {
+                "min_quantity": rules.min_quantity,
+                "min_notional": rules.min_notional,
+                "quantity_step": rules.quantity_step,
+            },
             "risk_assessment": {
                 "approved": True,
+                "sizing_authority": risk_assessment.sizing_authority,
+                "risk_budget_source": risk_assessment.risk_budget_source,
                 "position_size": risk_assessment.position_size,
                 "risk_amount": risk_assessment.risk_amount,
                 "risk_pct": risk_assessment.risk_pct,
                 "risk_reward": risk_assessment.risk_reward,
+                "structural_rr": risk_assessment.structural_rr,
+                "executable_rr": risk_assessment.executable_rr,
+                "minimum_executable_rr": risk_assessment.minimum_executable_rr,
                 "asset_cluster": risk_assessment.asset_cluster,
                 "cluster_risk_multiplier": risk_assessment.cluster_risk_multiplier,
                 "regime_risk_multiplier": risk_assessment.regime_risk_multiplier,
@@ -1199,17 +1826,30 @@ class MarketMonitor:
             "auto_be": True,
             "trailing_stop": True,
             "setup_grade": setup_grade,
-            "setup_type": str(setup.get("setup_type", "")),
+            "setup_type": setup_type,
+            "strategy_family": str(setup.get("strategy_family", "none")),
+            "management_policy": management_policy,
             "tri_core_event_id": str(setup.get("event_id", "")),
             "entry_policy": entry_policy,
             "policy_version": str(setup.get("policy_version", "")),
             "calibration_status": str(setup.get("calibration_status", "")),
+            "valid_until": (
+                canonical_analysis.valid_until.isoformat()
+                if getattr(canonical_analysis, "valid_until", None) is not None
+                else ""
+            ),
+            "limit_zone_id": str(getattr(revalidation, "limit_zone_id", "")),
             "decision_snapshot_id": decision_snapshot_id,
+            "decision_trace_id": f"{decision_snapshot_id}:{event_id}",
             "setup_timeframe": setup_timeframe,
-            "ai_scalper_approved": True,
-            "ai_scalper_verdict": str((getattr(ltf_sig, "ai_review", {}) or {}).get("verdict", "COHERENT")),
-            "ai_scalper_action": str((getattr(ltf_sig, "ai_review", {}) or {}).get("execution_action", "ENTER_NOW")),
-            "ai_scalper_reason": str((getattr(ltf_sig, "ai_review", {}) or {}).get("reason", ""))[:400],
+            "decision_authority": "tri_core_setup_engine",
+            "tri_core_direction": tri_core_direction,
+            "ai_review_required": require_ai_approval,
+            "ai_review_status": ai_status,
+            "ai_review_verdict": ai_verdict,
+            "ai_review_reason": str(ai_rev.get("reason") or ai_rev.get("error") or "")[:400],
+            "ai_review_conflicts": list(ai_rev.get("conflicts", []) or [])[:6],
+            "ai_review_evidence": list(ai_rev.get("evidence", []) or [])[:8],
             "idempotency_key": (
                 f"auto-{decision_snapshot_id}"
                 if decision_snapshot_id
@@ -1217,8 +1857,91 @@ class MarketMonitor:
             ),
         }
 
+        if not auto_trade_enabled:
+            logger.info(
+                f"[Auto-Pilot] Candidate {symbol} {direction} passed Execution & Risk; "
+                "Order submission withheld because auto_trade_enabled is false (Ready for manual execution)"
+            )
+            return None
+
+        if not await candidate_lifecycle.transition(
+            symbol=symbol,
+            snapshot_id=decision_snapshot_id,
+            event_id=event_id,
+            new_state=CandidateState.ORDER_PENDING,
+            reason_code="OMS_SUBMIT",
+        ):
+            return None
+
+        observability.inc(
+            "ai_trade_oms_submissions",
+            order_type=order_type,
+        )
+        await decision_trace.record(
+            snapshot_id=decision_snapshot_id,
+            event_id=event_id,
+            symbol=symbol,
+            stage="OMS_SUBMIT",
+            facts={
+                "direction": direction,
+                "order_type": order_type,
+                "entry": exec_entry,
+                "stop_loss": exec_sl,
+                "take_profit": exec_tp,
+                "position_size": qty,
+                "idempotency_key": order_payload.get("idempotency_key"),
+            },
+        )
+
         try:
             res = await paper_oms.place_order(order_payload)
+            oms_status = str((res or {}).get("status", "")).lower()
+            observability.inc(
+                "ai_trade_oms_results",
+                status=oms_status or "unknown",
+            )
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="OMS_RESULT",
+                facts={
+                    "oms_id": (res or {}).get("id"),
+                    "order_id": (res or {}).get("order_id"),
+                    "status": (res or {}).get("status"),
+                    "filled_at": (res or {}).get("filled_at"),
+                    "fill_price": (res or {}).get("fill_price") or (res or {}).get("entry_price"),
+                    "filled_quantity": (res or {}).get("filled_quantity") or (res or {}).get("quantity"),
+                    "entry_fee": (res or {}).get("entry_fee"),
+                    "entry_spread_cost": (res or {}).get("entry_spread_cost"),
+                    "entry_slippage": (res or {}).get("entry_slippage"),
+                    "entry_latency_ms": (res or {}).get("entry_latency_ms"),
+                },
+            )
+            if oms_status in {"partial", "partially_filled", "partially-filled"}:
+                await candidate_lifecycle.transition(
+                    symbol=symbol,
+                    snapshot_id=decision_snapshot_id,
+                    event_id=event_id,
+                    new_state=CandidateState.PARTIALLY_FILLED,
+                    reason_code="OMS_PARTIAL_FILL",
+                )
+            elif oms_status in {"closed", "cancelled", "canceled"}:
+                await candidate_lifecycle.transition(
+                    symbol=symbol,
+                    snapshot_id=decision_snapshot_id,
+                    event_id=event_id,
+                    new_state=CandidateState.CLOSED,
+                    reason_code=f"OMS_{oms_status.upper()}",
+                )
+            elif oms_status not in {"pending", "new", "accepted"}:
+                await candidate_lifecycle.transition(
+                    symbol=symbol,
+                    snapshot_id=decision_snapshot_id,
+                    event_id=event_id,
+                    new_state=CandidateState.OPEN,
+                    reason_code=f"OMS_{(oms_status or 'FILLED').upper()}",
+                )
             _AUTO_TRADE_HISTORY[history_key] = now_ts
             logger.info(f"🚀 [AUTO-PILOT EXECUTED] {direction.upper()} {qty} {symbol} @ {exec_entry} ({grade_label})")
             await broadcast({"type": "auto_trade_executed", "data": res})
@@ -1234,6 +1957,29 @@ class MarketMonitor:
             )
             return res
         except Exception as exc:
+            observability.inc(
+                "ai_trade_oms_results",
+                status="error",
+            )
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="OMS_RESULT",
+                facts={
+                    "status": "error",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:300],
+                },
+            )
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=CandidateState.INVALIDATED,
+                reason_code="OMS_SUBMIT_FAILED",
+                reason=str(exc)[:300],
+            )
             logger.error(f"[Auto-Pilot] Failed to place order for {symbol}: {exc}")
             return None
 

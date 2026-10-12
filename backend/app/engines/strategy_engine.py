@@ -82,6 +82,16 @@ class StrategyResult:
         }
 
 
+def validate_btc_anchor(
+    symbol: str,
+    direction: str,
+    systemic_risk: dict[str, Any] | None = None,
+) -> tuple[bool, str | None]:
+    """Validate BTC Market Anchor for crypto altcoins."""
+    from app.services.btc_market_anchor import validate_btc_anchor as _val
+    return _val(symbol, direction, systemic_risk)
+
+
 # ---------------------------------------------------------------------------
 # Strategy Engine
 # ---------------------------------------------------------------------------
@@ -109,60 +119,92 @@ class StrategyEngine:
     # ------------------------------------------------------------------
 
     def evaluate(self, signal: SMCSignal) -> StrategyResult:
-        """Approve only a deterministic causal Tri-Core plan.
+        """Validate and project one deterministic Tri-Core candidate.
 
-        Regime, HMM, VPIN, inducement and legacy Scenario are retained as
-        analytics/risk context; they no longer veto an otherwise valid entry.
+        TriCoreSetupEngine owns setup eligibility, direction, flow/SMC
+        confirmation, entry policy and structural R:R.  This layer must not
+        recreate those gates.  It only rejects malformed or inconsistent
+        projections before downstream review/risk/execution.
         """
-        raw_direction = signal.direction if signal.direction in {"long", "short"} else "wait"
+        setup = getattr(signal, "tri_core_setup", {}) or {}
+        direction = str(setup.get("direction", "wait")).lower()
         result = StrategyResult(
             strategy_name=self._strategy.get("name", "Unknown"),
-            setup_direction=raw_direction,
+            setup_direction=direction if direction in {"long", "short"} else "wait",
         )
-        filters = deepcopy(self._strategy.get("filters", DEFAULT_STRATEGY["filters"]))
-        override = self._strategy.get("symbol_overrides", {}).get(signal.symbol, {})
-        filters.update(override.get("filters", {}))
-        setup = getattr(signal, "tri_core_setup", {}) or {}
+
         if setup.get("actionable") is not True:
-            reasons = setup.get("rejection_reasons") or ["No causal SMC+CVD setup"]
+            reasons = setup.get("rejection_reasons") or ["No actionable Tri-Core setup"]
             result.rejection_reasons.extend(str(reason) for reason in reasons[:3])
             return result
-        direction = str(setup.get("direction", "wait"))
-        if direction not in filters.get("allowed_directions", ["long", "short"]):
-            result.rejection_reasons.append(f"Direction {direction} not allowed")
+
+        if direction not in {"long", "short"}:
+            result.rejection_reasons.append("Tri-Core direction must be long or short")
             return result
-        if not setup.get("smc_confirmed") or not setup.get("flow_confirmed"):
-            result.rejection_reasons.append("Both causal SMC and trusted aggressor-flow confirmation are required")
-        if getattr(signal, "volume_quality", "unavailable") != "exchange_aggressor":
-            result.rejection_reasons.append("Trusted exchange-derived aggressor CVD is required")
+
+        signal_direction = str(getattr(signal, "direction", "wait")).lower()
+        if signal_direction in {"long", "short"} and signal_direction != direction:
+            result.rejection_reasons.append(
+                f"Signal direction {signal_direction} conflicts with Tri-Core direction {direction}"
+            )
+
         levels = (signal.entry, signal.stop_loss, signal.take_profit)
-        if any(level is None or not math.isfinite(float(level)) or float(level) <= 0 for level in levels):
-            result.rejection_reasons.append("Structural entry, invalidation and target are required")
+        if any(
+            level is None
+            or not math.isfinite(float(level))
+            or float(level) <= 0
+            for level in levels
+        ):
+            result.rejection_reasons.append(
+                "Structural entry, invalidation and target are required"
+            )
         elif direction == "long" and not signal.stop_loss < signal.entry < signal.take_profit:
             result.rejection_reasons.append("Invalid LONG geometry")
         elif direction == "short" and not signal.take_profit < signal.entry < signal.stop_loss:
             result.rejection_reasons.append("Invalid SHORT geometry")
-        min_rr = float(filters.get("min_rr", 2.0))
-        if float(getattr(signal, "risk_reward", 0.0)) < min_rr:
-            result.rejection_reasons.append(f"R:R {signal.risk_reward:.2f} < minimum {min_rr:.2f}")
+
+        # BTC Market Anchor systemic risk veto
+        systemic = getattr(signal, "systemic_risk", {}) or {}
+        if systemic and systemic.get("execution_allowed", True) is False:
+            reason = systemic.get("reason") or systemic.get("reason_code") or "BTC_REGIME_CONFLICT"
+            result.rejection_reasons.append(f"BTC Market Anchor: {reason}")
 
         regime = getattr(signal, "market_regime", {}) or {}
         policy = regime.get("policy", {}) if isinstance(regime, dict) else {}
         result.market_regime = str(regime.get("regime", "unknown"))
         result.effective_policy = deepcopy(policy) if isinstance(policy, dict) else {}
-        result.effective_policy.setdefault("min_confluence", 65.0)
-        result.effective_policy.setdefault("min_rr", min_rr)
         result.effective_policy.setdefault("risk_multiplier", 1.0)
+
         for label, value in (
-            ("VPIN toxicity", (getattr(signal, "order_flow", {}) or {}).get("toxic_flow_detected")),
-            ("Inducement nearby", getattr(signal, "active_zone_type", "") == "inducement_trap"),
-            ("Crowded derivatives", (getattr(signal, "derivatives_sentiment", {}) or {}).get("sentiment_bias") in {"CROWDED_LONG", "CROWDED_SHORT"}),
+            (
+                "VPIN toxicity",
+                (getattr(signal, "order_flow", {}) or {}).get("toxic_flow_detected"),
+            ),
+            (
+                "Inducement nearby",
+                getattr(signal, "active_zone_type", "") == "inducement_trap",
+            ),
+            (
+                "Crowded derivatives",
+                (getattr(signal, "derivatives_sentiment", {}) or {}).get(
+                    "sentiment_bias"
+                )
+                in {"CROWDED_LONG", "CROWDED_SHORT"},
+            ),
         ):
             if value:
                 result.warnings.append(label)
-        result.score = int(getattr(signal, "confluence_score", getattr(signal, "confluence", 0)))
-        result.passed_checks.extend(["Causal SMC setup confirmed", "Exchange-derived CVD confirmation aligned",
-                                     f"Structural R:R {signal.risk_reward:.2f} OK"])
+
+        result.score = int(
+            getattr(signal, "confluence_score", getattr(signal, "confluence", 0))
+        )
+        result.passed_checks.extend(
+            [
+                "Tri-Core candidate is actionable",
+                "Tri-Core direction is consistent",
+                "Structural entry/SL/TP geometry is valid",
+            ]
+        )
         result.direction = direction if not result.rejection_reasons else "wait"
         result.approved = not result.rejection_reasons
         return result

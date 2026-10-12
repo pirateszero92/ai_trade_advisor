@@ -509,6 +509,159 @@ class MTFAnalysisService:
         config["risk_parameters"]["mtf_hierarchy_required"] = False
         return config
 
+    @staticmethod
+    def _review_stage_summary(
+        *,
+        timeframe: str,
+        signal: SMCSignal,
+        last_closed_candle: str,
+        source: str,
+        presentation_status: str | None = None,
+        reasons: list[str] | None = None,
+    ) -> dict[str, Any]:
+        metadata = {
+            "authority": "context_only",
+            "source": source,
+            "timeframe": timeframe,
+            "timestamp": last_closed_candle,
+            "freshness": "closed_candle",
+            "data_quality": "closed_candle_research_context",
+            "measurement": "measured",
+            "measured_vs_estimated": "measured",
+        }
+        return {
+            **metadata,
+            "metadata": metadata,
+            "decision_influence": "none",
+            "last_closed_candle": last_closed_candle,
+            "presentation_status": presentation_status,
+            "presentation_reasons": list(reasons or []),
+            "bias": signal.bias,
+            "swing_bias": signal.swing_bias,
+            "internal_bias": signal.internal_bias,
+            "bias_source": signal.structure_bias_source,
+            "bos": signal.bos,
+            "choch": signal.choch,
+            "structure_event_age": signal.structure_event_age,
+            "liquidity_swept": signal.liquidity_swept,
+            "sweep_direction": signal.sweep_direction,
+            "zone_position": signal.zone_position,
+            "confluence": signal.confluence_score,
+            "volume_quality": signal.volume_quality,
+            "flow_source": signal.flow_source,
+            "flow_granularity": signal.flow_granularity,
+            "delta": signal.volume_delta,
+            "delta_ratio": signal.delta_ratio,
+            "absorption": signal.delta_absorption,
+            "cvd_divergence": signal.cvd_divergence,
+            "market_regime": deepcopy(signal.market_regime),
+        }
+
+    async def get_review_context(
+        self,
+        *,
+        symbol: str,
+        market_type: str,
+        exchange: str,
+        entry_mode: str,
+    ) -> dict[str, Any]:
+        """Return higher-timeframe evidence for AI review only.
+
+        The 1D/4H stages reuse the cached MTF research snapshot. A separate
+        1H closed-candle analysis is added only for reviewer context. None of
+        these values are fed into StrategyEngine, RiskEngine, or OMS.
+        """
+        analysis = await self.get(
+            symbol=symbol,
+            market_type=market_type,
+            exchange=exchange,
+            entry_mode=entry_mode,
+        )
+        config = self._config_snapshot()
+        profiles = config["timeframe_profiles"]
+
+        stages: dict[str, Any] = {}
+        for role in ("bias", "setup"):
+            stage = analysis.stages[role]
+            stages[stage.timeframe] = self._review_stage_summary(
+                timeframe=stage.timeframe,
+                signal=stage.signal,
+                last_closed_candle=stage.last_closed_candle,
+                source=f"mtf_{role}_closed_candle_snapshot",
+                presentation_status=stage.status,
+                reasons=stage.reasons,
+            )
+
+        one_hour = await self._market.get_ohlcv(
+            symbol,
+            "1h",
+            market_type,
+            exchange,
+            limit=300,
+            closed_only=True,
+        )
+        if one_hour is not None and not one_hour.empty:
+            setup_profile = profiles["roles"]["setup"]
+            indicator_config = resolve_profile_indicator_config(
+                setup_profile,
+                config.get("indicator_core"),
+            )
+            one_hour_signal = SMCEngine(**setup_profile["smc"]).analyze(
+                one_hour.copy(),
+                symbol,
+                "1h",
+                htf_bias="neutral",
+                entry_mode=entry_mode,
+                indicator_config=indicator_config,
+                regime_config=config.get("regime_policy"),
+                tri_core_policy=config.get("tri_core_policy"),
+            )
+            stages["1h"] = self._review_stage_summary(
+                timeframe="1h",
+                signal=one_hour_signal,
+                last_closed_candle=pd.Timestamp(one_hour.index[-1]).isoformat(),
+                source="ai_research_1h_closed_candle_snapshot",
+            )
+        else:
+            unavailable_meta = {
+                "authority": "context_only",
+                "source": "ai_research_1h_closed_candle_snapshot",
+                "timeframe": "1h",
+                "timestamp": None,
+                "freshness": "unavailable",
+                "data_quality": "unavailable",
+                "measurement": "measured",
+                "measured_vs_estimated": "measured",
+            }
+            stages["1h"] = {
+                **unavailable_meta,
+                "metadata": unavailable_meta,
+                "decision_influence": "none",
+                "status": "unavailable",
+            }
+
+        generated_at = analysis.generated_at.isoformat() if analysis.generated_at else None
+        valid_until = analysis.valid_until.isoformat() if analysis.valid_until else None
+        metadata = {
+            "authority": "context_only",
+            "source": "mtf_analysis_service",
+            "timeframe": None,
+            "timestamp": generated_at,
+            "freshness": "valid" if analysis.valid_until and datetime.now(timezone.utc) < analysis.valid_until else "expired",
+            "data_quality": "closed_candle_research_context",
+            "measurement": "measured",
+            "measured_vs_estimated": "measured",
+        }
+        return {
+            **metadata,
+            "metadata": metadata,
+            "decision_influence": "none",
+            "snapshot_id": analysis.snapshot_id,
+            "generated_at": generated_at,
+            "valid_until": valid_until,
+            "timeframes": stages,
+        }
+
     async def get(
         self,
         *,

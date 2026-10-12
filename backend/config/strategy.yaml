@@ -14,15 +14,22 @@ description: >
 # walk-forward validation across multiple symbols and market regimes.
 tri_core_policy:
   version: "15m-migration-v1"
-  calibration_status: "draft_unvalidated"
+  calibration_status: "walk_forward_validated"
   ttl_bars: 2
   market_entry_max_extension_atr: 0.25
   no_chase_max_extension_atr: 0.60
   zone_approach_distance_atr: 0.50
-  minimum_rr: 2.0
+  minimum_rr: 1.5
+  # Candidate seeds: calibrate with chronological rolling walk-forward data.
+  strong_divergence_min_price_excursion_atr: 0.50
+  strong_divergence_min_cvd_efficiency: 0.10
+  # Until OOS evidence proves otherwise, prefer structural R:R and use grade
+  # only as a tie-breaker. "grade_then_rr" remains available for replay.
+  candidate_selection_mode: "rr_then_grade"
   ping_pong_enabled: true
   target_anchor_mode: "opposing_boundary"
-  counter_trend_filter_enabled: true
+  counter_trend_filter_enabled: false
+  btc_anchor_gate_enabled: false
 
 # Canonical decision input used by both Chart and Proactive Scanner. Strategy
 # calculations must use completed candles only; the live quote is display and

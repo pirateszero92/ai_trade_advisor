@@ -1,5 +1,6 @@
 ﻿import pytest
 import pandas as pd
+from unittest.mock import AsyncMock
 from app.engines.market_data import (
     MarketDataEngine,
     closed_candle_frame,
@@ -118,3 +119,32 @@ async def test_ohlcv_rejects_conflicting_candle_policies():
             closed_only=True,
             include_forming=True,
         )
+
+
+@pytest.mark.anyio
+async def test_stock_without_alpaca_credentials_is_explicitly_watch_only(monkeypatch):
+    engine = MarketDataEngine()
+    monkeypatch.setattr(engine.cfg, "alpaca_api_key", "")
+    monkeypatch.setattr(engine.cfg, "alpaca_api_secret", "")
+    current_bucket = pd.Timestamp.now(tz="UTC").floor("15min")
+    frame = pd.DataFrame(
+        {
+            "open": [100.0] * 8,
+            "high": [101.0] * 8,
+            "low": [99.0] * 8,
+            "close": [100.5] * 8,
+            "volume": [1000.0] * 8,
+        },
+        index=pd.date_range(end=current_bucket, periods=8, freq="15min"),
+    )
+    monkeypatch.setattr(engine, "_get_yfinance", AsyncMock(return_value=frame))
+    _OHLCV_CACHE.clear()
+
+    result = await engine.get_ohlcv(
+        "AAPL", "15m", "stock", exchange="alpaca", limit=6,
+        include_forming=True,
+    )
+
+    assert result.attrs["market_data_status"]["market"] == "US_EQUITY"
+    assert result.attrs["market_data_status"]["data_provider"] == "yfinance_watch_only"
+    assert result.attrs["market_data_status"]["execution_mode"] == "shadow_manual"

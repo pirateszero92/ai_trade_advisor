@@ -110,7 +110,7 @@ async def test_ai_engine_gives_ollama_enough_visible_output_tokens(monkeypatch):
         async def __aexit__(self, *_args):
             return None
 
-        async def post(self, url, json):
+        async def post(self, url, json, **_kwargs):
             captured["url"] = url
             captured["payload"] = json
             return FakeResponse()

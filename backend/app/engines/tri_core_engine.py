@@ -34,6 +34,7 @@ class TriCorePolicy:
     ping_pong_enabled: bool = False
     target_anchor_mode: str = "opposing_boundary"
     counter_trend_filter_enabled: bool = True
+    candidate_selection_mode: Literal["rr_then_grade", "grade_then_rr"] = "rr_then_grade"
 
     @classmethod
     def from_mapping(cls, raw: Any) -> "TriCorePolicy":
@@ -56,6 +57,9 @@ class TriCorePolicy:
             target_anchor_mode=str(values.get("target_anchor_mode", cls.target_anchor_mode)),
             counter_trend_filter_enabled=bool(values.get(
                 "counter_trend_filter_enabled", cls.counter_trend_filter_enabled
+            )),
+            candidate_selection_mode=str(values.get(
+                "candidate_selection_mode", cls.candidate_selection_mode
             )),
         )
         if policy.calibration_status not in {"draft_unvalidated", "walk_forward_validated"}:
@@ -378,8 +382,12 @@ def _nearest_active_zone(signal: Any, frame: pd.DataFrame) -> tuple[Any | None, 
     """Return the closest currently-active SMC zone and distance from it."""
     close = float(frame["close"].iloc[-1])
     candidates = [
-        zone for zone in [*signal.order_blocks, *signal.fvgs, *getattr(signal, "breaker_blocks", [])]
-        if not zone.mitigated and float(zone.bottom) <= float(zone.top)
+        zone for zone in [
+            *getattr(signal, "order_blocks", []),
+            *getattr(signal, "fvgs", []),
+            *getattr(signal, "breaker_blocks", []),
+        ]
+        if not getattr(zone, "mitigated", False) and float(getattr(zone, "bottom", 0.0)) <= float(getattr(zone, "top", 0.0))
     ]
     if not candidates:
         return None, float("inf")
@@ -585,6 +593,11 @@ class TriCoreSetupEngine:
         policy = TriCorePolicy.from_mapping(policy_config)
         if frame is None or frame.empty:
             return TriCoreSetup(rejection_reasons=["Closed-candle data unavailable"])
+        market_status = getattr(frame, "attrs", {}).get("market_data_status", {})
+        if isinstance(market_status, dict) and market_status.get("market") == "US_EQUITY":
+            if not market_status.get("regular_session_open", True):
+                return TriCoreSetup(rejection_reasons=["US regular trading session is closed"])
+
         if getattr(signal, "volume_quality", "unavailable") != "exchange_aggressor":
             return TriCoreSetup(rejection_reasons=[
                 "Trusted exchange-derived aggressor CVD is unavailable"
@@ -624,6 +637,15 @@ class TriCoreSetupEngine:
                         continue
 
             expected_sweep = "low" if side == "long" else "high"
+            in_prem = getattr(signal, "in_premium", False)
+            in_disc = getattr(signal, "in_discount", False)
+            if side == "long" and in_prem:
+                rejected.append("Adverse location: Cannot LONG in Premium")
+                continue
+            if side == "short" and in_disc:
+                rejected.append("Adverse location: Cannot SHORT in Discount")
+                continue
+
             if (getattr(signal, "liquidity_swept", False)
                     and getattr(signal, "sweep_direction", "none") == expected_sweep):
                 saw_sweep = True
@@ -767,7 +789,13 @@ class TriCoreSetupEngine:
                         if z.direction == "bullish" and not z.mitigated
                         and float(z.bottom) - buffer <= entry <= float(z.top) + atr * 0.75
                     ]
-                    at_demand = getattr(signal, "in_discount", False) or bool(bullish_obs) or bool(bullish_fvgs)
+                    # Location Rule: Ping-Pong LONG MUST be strictly in Discount; NEVER in Premium or Equilibrium
+                    in_prem = getattr(signal, "in_premium", False)
+                    in_disc = getattr(signal, "in_discount", False)
+                    in_eq = getattr(signal, "in_equilibrium", False)
+                    at_demand = (in_disc or bool(bullish_obs) or bool(bullish_fvgs)) and not in_prem and not in_eq
+                    if in_eq:
+                        rejected.append("Ping-Pong LONG rejected: Cannot enter in Equilibrium / mid-range zone")
                     if at_demand:
                         if bullish_obs:
                             stop = min(float(z.bottom) for z in bullish_obs) - buffer
@@ -814,7 +842,13 @@ class TriCoreSetupEngine:
                         if z.direction == "bearish" and not z.mitigated
                         and float(z.bottom) - atr * 0.75 <= entry <= float(z.top) + buffer
                     ]
-                    at_supply = getattr(signal, "in_premium", False) or bool(bearish_obs) or bool(bearish_fvgs)
+                    # Location Rule: Ping-Pong SHORT MUST be strictly in Premium; NEVER in Discount or Equilibrium
+                    in_prem = getattr(signal, "in_premium", False)
+                    in_disc = getattr(signal, "in_discount", False)
+                    in_eq = getattr(signal, "in_equilibrium", False)
+                    at_supply = (in_prem or bool(bearish_obs) or bool(bearish_fvgs)) and not in_disc and not in_eq
+                    if in_eq:
+                        rejected.append("Ping-Pong SHORT rejected: Cannot enter in Equilibrium / mid-range zone")
                     if at_supply:
                         if bearish_obs:
                             stop = max(float(z.top) for z in bearish_obs) + buffer
@@ -901,8 +935,7 @@ class TriCoreSetupEngine:
                 policy_version=policy.version,
                 calibration_status=policy.calibration_status,
             )
-        actionable.sort(key=lambda candidate: (candidate.grade == "S", candidate.risk_reward), reverse=True)
-        return actionable[0]
+        return _select_actionable_candidate(actionable, policy)
 
     @classmethod
     def evaluate_with_micro_trigger(
@@ -978,4 +1011,26 @@ class TriCoreSetupEngine:
             setup.rejection_reasons = []
 
         return setup
+
+
+def _select_actionable_candidate(
+    candidates: list[TriCoreSetup],
+    policy: TriCorePolicy | None = None,
+) -> TriCoreSetup:
+    """Select the best actionable candidate according to the policy's candidate_selection_mode."""
+    if not candidates:
+        return TriCoreSetup()
+    pol = policy or TriCorePolicy()
+    if pol.candidate_selection_mode == "grade_then_rr":
+        return sorted(
+            candidates,
+            key=lambda c: (c.grade == "S", c.risk_reward),
+            reverse=True,
+        )[0]
+    # Default: "rr_then_grade"
+    return sorted(
+        candidates,
+        key=lambda c: (c.risk_reward, c.grade == "S"),
+        reverse=True,
+    )[0]
 

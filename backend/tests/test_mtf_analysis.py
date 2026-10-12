@@ -359,3 +359,121 @@ def test_mtf_flag_true_is_ignored_for_decision(monkeypatch):
     assert result.actionable is True
     assert result.direction == "long"
     assert result.strategy.direction == "long"
+
+
+@pytest.mark.anyio
+async def test_mtf_review_context_exposes_1d_4h_1h_as_context_only(monkeypatch):
+    from types import SimpleNamespace
+    from app.services.mtf_analysis import MTFAnalysisService, TimeframeStage
+
+    service = MTFAnalysisService()
+    now = pd.Timestamp.now(tz="UTC").to_pydatetime()
+    bias_signal = _signal("1d", "short")
+    setup_signal = _signal("4h", "short")
+    fake_analysis = SimpleNamespace(
+        snapshot_id="mtf-review-snapshot",
+        generated_at=now,
+        valid_until=now + pd.Timedelta(minutes=15),
+        stages={
+            "bias": TimeframeStage(
+                role="bias",
+                timeframe="1d",
+                status="ready",
+                direction="short",
+                signal=bias_signal,
+                last_closed_candle=pd.Timestamp.now(tz="UTC").isoformat(),
+            ),
+            "setup": TimeframeStage(
+                role="setup",
+                timeframe="4h",
+                status="ready",
+                direction="short",
+                signal=setup_signal,
+                last_closed_candle=pd.Timestamp.now(tz="UTC").isoformat(),
+            ),
+        },
+    )
+
+    async def fake_get(**_kwargs):
+        return fake_analysis
+
+    async def fake_ohlcv(*_args, **_kwargs):
+        return _frame(300, "1h")
+
+    def fake_analyze(_self, _df, _symbol, timeframe, *_args, **_kwargs):
+        return _signal(timeframe, "long")
+
+    monkeypatch.setattr(service, "get", fake_get)
+    monkeypatch.setattr(service._market, "get_ohlcv", fake_ohlcv)
+    monkeypatch.setattr(service, "_config_snapshot", lambda: _config())
+    monkeypatch.setattr("app.services.mtf_analysis.SMCEngine.analyze", fake_analyze)
+
+    context = await service.get_review_context(
+        symbol="BTC/USDT",
+        market_type="crypto",
+        exchange="binance",
+        entry_mode="limit",
+    )
+
+    assert context["authority"] == "context_only"
+    assert context["decision_influence"] == "none"
+    assert set(context["timeframes"]) == {"1d", "4h", "1h"}
+    for timeframe in ("1d", "4h", "1h"):
+        assert context["timeframes"][timeframe]["authority"] == "context_only"
+        assert context["timeframes"][timeframe]["decision_influence"] == "none"
+
+
+@pytest.mark.anyio
+async def test_mtf_review_context_metadata_contract(monkeypatch):
+    from types import SimpleNamespace
+    from app.services.mtf_analysis import MTFAnalysisService, TimeframeStage
+
+    service = MTFAnalysisService()
+    now = pd.Timestamp.now(tz="UTC").to_pydatetime()
+    fake_analysis = SimpleNamespace(
+        snapshot_id="mtf-meta",
+        generated_at=now,
+        valid_until=now + pd.Timedelta(minutes=15),
+        stages={
+            "bias": TimeframeStage(
+                role="bias", timeframe="1d", status="ready", direction="long",
+                signal=_signal("1d", "long"),
+                last_closed_candle=pd.Timestamp.now(tz="UTC").isoformat(),
+            ),
+            "setup": TimeframeStage(
+                role="setup", timeframe="4h", status="ready", direction="long",
+                signal=_signal("4h", "long"),
+                last_closed_candle=pd.Timestamp.now(tz="UTC").isoformat(),
+            ),
+        },
+    )
+
+    async def fake_get(**_kwargs):
+        return fake_analysis
+
+    async def fake_ohlcv(*_args, **_kwargs):
+        return _frame(300, "1h")
+
+    def fake_analyze(_self, _df, _symbol, timeframe, *_args, **_kwargs):
+        return _signal(timeframe, "long")
+
+    monkeypatch.setattr(service, "get", fake_get)
+    monkeypatch.setattr(service._market, "get_ohlcv", fake_ohlcv)
+    monkeypatch.setattr(service, "_config_snapshot", lambda: _config())
+    monkeypatch.setattr("app.services.mtf_analysis.SMCEngine.analyze", fake_analyze)
+
+    context = await service.get_review_context(
+        symbol="BTC/USDT",
+        market_type="crypto",
+        exchange="binance",
+        entry_mode="limit",
+    )
+
+    required = {
+        "authority", "source", "timeframe", "timestamp",
+        "freshness", "data_quality", "measurement", "measured_vs_estimated",
+    }
+    assert required.issubset(context["metadata"])
+    for timeframe in ("1d", "4h", "1h"):
+        assert required.issubset(context["timeframes"][timeframe]["metadata"])
+        assert context["timeframes"][timeframe]["metadata"]["authority"] == "context_only"

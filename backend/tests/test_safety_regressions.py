@@ -218,21 +218,22 @@ def test_ai_cross_timeframe_guard_allows_only_execution_timeframe():
 
 
 @pytest.mark.anyio
-async def test_ai_analysis_rejects_provider_output_using_another_timeframe(monkeypatch):
+async def test_ai_analysis_selected_provider_fails_closed_on_cross_timeframe_output(monkeypatch):
     engine = AIEngine()
     engine.active_provider = "local"
+    providers = []
 
     async def fake_dispatch(provider, _messages):
-        if provider == "local":
-            return '{"recommendation":"buy","confidence":90,"reasoning":"4H confirms the trade"}'
-        return '{"recommendation":"buy","confidence":80,"reasoning":"Execution structure is valid"}'
+        providers.append(provider)
+        return '{"recommendation":"buy","confidence":90,"reasoning":"4H confirms the trade"}'
 
     monkeypatch.setattr(engine, "_dispatch", fake_dispatch)
     result = await engine.analyze(_signal(timeframe="15m"))
 
-    assert result.provider == "gemini"
-    assert result.recommendation == "buy"
-    assert "4H" not in result.reasoning
+    assert providers == ["local"]
+    assert result.provider == "unavailable"
+    assert result.recommendation == "wait"
+    assert result.confidence == 0
 
 
 @pytest.mark.anyio
@@ -335,3 +336,105 @@ def test_chart_never_exposes_execution_levels_when_strategy_gate_rejects():
         "take_profit": None,
         "risk_reward": 0.0,
     }
+
+
+@pytest.mark.anyio
+async def test_order_placement_level_matching_handles_display_rounding(monkeypatch):
+    """Verify that BTC floating-point SL (e.g. 84389.988115 vs display 84389.99) matches cleanly."""
+    from types import SimpleNamespace
+    from app.services.execution_analysis import execution_analyses
+    from app.services.authority_status import build_authority_status
+    from app.api.trades import place_order, PlaceOrderRequest
+    from unittest.mock import AsyncMock, patch
+
+    snap_id = "1234567890abcdef12345678"
+    sig = SimpleNamespace(
+        direction="short",
+        entry=84256.23,
+        stop_loss=84389.988115, # Full precision
+        take_profit=83579.36,
+        risk_reward=5.06,
+        tri_core_setup={"event_id": "test-event-btc", "actionable": True},
+    )
+    mock_snapshot = SimpleNamespace(
+        symbol="BTC/USDT",
+        signal=sig,
+        valid_until=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    monkeypatch.setattr(execution_analyses, "get_by_snapshot_id", lambda sid: mock_snapshot if sid == snap_id else None)
+
+    req = PlaceOrderRequest(
+        symbol="BTC/USDT",
+        direction="short",
+        entry=84256.23,
+        stop_loss=84389.99, # Display rounded to 2 decimals
+        take_profit=83579.36,
+        order_type="market",
+        position_size=0.1,
+        mode="paper",
+        decision_snapshot_id=snap_id,
+        tri_core_event_id="test-event-btc",
+        setup_grade="A",
+        setup_type="sweep_reversal",
+        setup_timeframe="15m",
+    )
+
+    with patch("app.services.authority_status.build_authority_status", AsyncMock(return_value={
+        "order": {"ready": True},
+        "risk": {"position_size": 0.1, "risk_pct": 1.0},
+        "candidate_id": "cand-1",
+    })), patch("app.services.paper_oms.paper_oms.place_order", AsyncMock(return_value={"status": "open", "order_id": "ord-1"})):
+        result = await place_order(req, _key="dummy")
+        assert result["status"] == "open"
+
+
+@pytest.mark.anyio
+async def test_order_placement_rejects_genuine_level_mismatch(monkeypatch):
+    """Verify that an altered SL/TP beyond rounding is strictly rejected with 409."""
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from app.services.execution_analysis import execution_analyses
+    from app.api.trades import place_order, PlaceOrderRequest
+    from unittest.mock import AsyncMock, patch
+
+    snap_id = "abcdef1234567890abcdef12"
+    sig = SimpleNamespace(
+        direction="short",
+        entry=84256.23,
+        stop_loss=84389.988115,
+        take_profit=83579.36,
+        risk_reward=5.06,
+        tri_core_setup={"event_id": "test-event-btc", "actionable": True},
+    )
+    mock_snapshot = SimpleNamespace(
+        symbol="BTC/USDT",
+        signal=sig,
+        valid_until=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    monkeypatch.setattr(execution_analyses, "get_by_snapshot_id", lambda sid: mock_snapshot if sid == snap_id else None)
+
+    req = PlaceOrderRequest(
+        symbol="BTC/USDT",
+        direction="short",
+        entry=84256.23,
+        stop_loss=84500.0, # Completely changed SL (above entry, but != snapshot 84389.988115)
+        take_profit=83579.36,
+        order_type="market",
+        position_size=0.1,
+        mode="paper",
+        decision_snapshot_id=snap_id,
+        tri_core_event_id="test-event-btc",
+        setup_grade="A",
+        setup_type="sweep_reversal",
+        setup_timeframe="15m",
+    )
+
+    with patch("app.services.authority_status.build_authority_status", AsyncMock(return_value={
+        "order": {"ready": True},
+        "risk": {"position_size": 0.1, "risk_pct": 1.0},
+        "candidate_id": "cand-1",
+    })):
+        with pytest.raises(HTTPException) as exc_info:
+            await place_order(req, _key="dummy")
+        assert exc_info.value.status_code == 409
+        assert "Order levels do not match the immutable decision snapshot" in str(exc_info.value.detail)

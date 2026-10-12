@@ -26,7 +26,7 @@ from app.engines.smc_engine import SMCSignal
 
 PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts"
 FALLBACK_CHAIN: list[str] = ["local", "gemini", "openrouter"]
-CHAT_OUTPUT_TOKEN_BUDGET = 2048
+CHAT_OUTPUT_TOKEN_BUDGET = 4096
 
 SINGLE_TIMEFRAME_DIRECTIVE = (
     "NON-NEGOTIABLE DECISION BOUNDARY: Use only the execution timeframe supplied "
@@ -74,8 +74,8 @@ class AIAnalysis:
                         p = json.loads(match.group(0))
                         if isinstance(p, dict) and p.get("reasoning"):
                             return str(p["reasoning"])
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"[AI] Embedded reasoning JSON parse failed; using text fallback: {exc}")
             msg = re.sub(r"^```(?:json)?\s*|\s*```$", "", msg, flags=re.MULTILINE).strip()
             return msg
         return self.risk_notes or "No AI analysis is available."
@@ -115,6 +115,29 @@ class AIEngine:
             self._http_lock = asyncio.Lock()
         return self._http_lock
 
+    def provider_model(self, provider: Optional[str] = None) -> str:
+        """Return the effective model, including Settings UI overrides.
+
+        Runtime settings are the authoritative source for non-secret provider
+        selections. Reading them at dispatch time also means a model change does
+        not require a backend process restart.
+        """
+        selected = provider or self.active_provider
+        runtime = load_runtime_config()
+        if selected == "local":
+            return str(runtime.get("local_model") or self.cfg.local_llm_model).strip()
+        if selected == "gemini":
+            return str(runtime.get("gemini_model") or self.cfg.gemini_model).strip()
+        if selected == "openrouter":
+            return str(runtime.get("openrouter_model") or self.cfg.openrouter_model).strip()
+        raise ValueError(f"Unknown provider: {selected}")
+
+    def local_endpoint(self) -> str:
+        runtime = load_runtime_config()
+        return str(
+            runtime.get("local_endpoint") or self.cfg.local_llm_endpoint
+        ).strip()
+
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or lazily create a pooled httpx.AsyncClient."""
         if self._http_client is None or self._http_client.is_closed:
@@ -148,27 +171,24 @@ class AIEngine:
             {"role": "user", "content": context_msg},
         ]
 
-        active = getattr(self, "active_provider", "local")
-        chain = [active] + [p for p in FALLBACK_CHAIN if p != active]
-
-        for provider in chain:
-            try:
-                raw = await self._dispatch(provider, messages)
-                if self._contains_cross_timeframe_reference(raw, signal.timeframe):
-                    raise ValueError(
-                        "Provider response crossed the execution-timeframe boundary"
-                    )
-                analysis = self._parse_response(raw)
-                analysis.provider = provider
-                logger.info(
-                    f"[AI] {provider} -> {analysis.recommendation} "
-                    f"(confidence={analysis.confidence})"
+        provider = getattr(self, "active_provider", "local")
+        try:
+            raw = await self._dispatch(provider, messages)
+            if self._contains_cross_timeframe_reference(raw, signal.timeframe):
+                raise ValueError(
+                    "Provider response crossed the execution-timeframe boundary"
                 )
-                return analysis
-            except Exception as exc:
-                logger.warning(f"[AI] Provider {provider} failed: {exc}")
+            analysis = self._parse_response(raw)
+            analysis.provider = provider
+            logger.info(
+                f"[AI] {provider} -> {analysis.recommendation} "
+                f"(confidence={analysis.confidence})"
+            )
+            return analysis
+        except Exception as exc:
+            logger.warning(f"[AI] Selected provider {provider} failed: {exc}")
 
-        logger.warning("[AI] All configured LLM providers are unavailable")
+        logger.warning("[AI] Selected LLM provider is unavailable")
         return AIAnalysis(
             provider="unavailable",
             recommendation="wait",
@@ -402,28 +422,25 @@ class AIEngine:
             })
         full_messages.extend(messages)
 
-        active = getattr(self, "active_provider", "local")
-        chain = [active] + [p for p in FALLBACK_CHAIN if p != active]
+        provider = getattr(self, "active_provider", "local")
+        try:
+            res = await self._dispatch(provider, full_messages)
+            if (
+                res
+                and res.strip()
+                and not self._contains_cross_timeframe_reference(
+                    res, execution_timeframe
+                )
+            ):
+                return res
+            if res and res.strip():
+                logger.warning(
+                    "[AI] Chat response rejected: crossed execution-timeframe boundary"
+                )
+        except Exception as exc:
+            logger.warning(f"[AI] Selected chat provider {provider} failed: {exc}")
 
-        for provider in chain:
-            try:
-                res = await self._dispatch(provider, full_messages)
-                if (
-                    res
-                    and res.strip()
-                    and not self._contains_cross_timeframe_reference(
-                        res, execution_timeframe
-                    )
-                ):
-                    return res
-                if res and res.strip():
-                    logger.warning(
-                        "[AI] Chat response rejected: crossed execution-timeframe boundary"
-                    )
-            except Exception as exc:
-                logger.warning(f"[AI] Chat provider {provider} failed: {exc}")
-
-        # Fallback if external LLM fails
+        # Offline notice if the selected provider fails
         sym = context.get('symbol', 'Asset') if context else 'Asset'
         try:
             price = float(context.get('price', 0.0)) if context else 0.0
@@ -525,9 +542,10 @@ class AIEngine:
         ]
         try:
             if provider == "local":
-                endpoint = (custom_endpoint or self.cfg.local_llm_endpoint).strip()
-                model = (custom_model or self.cfg.local_llm_model).strip()
-                response = await self._call_local_custom(test_messages, endpoint, model)
+                endpoint = (custom_endpoint or self.local_endpoint()).strip()
+                model = (custom_model or self.provider_model("local")).strip()
+                key = (custom_key or self.cfg.local_llm_api_key).strip()
+                response = await self._call_local_custom(test_messages, endpoint, model, api_key=key)
                 latency = int((time.perf_counter() - t0) * 1000)
                 return {"provider": provider, "ok": True, "latency_ms": latency, "model": model, "reply": response}
             elif provider == "gemini":
@@ -549,7 +567,7 @@ class AIEngine:
             err_msg = str(exc)
             if custom_key and len(custom_key) > 4:
                 err_msg = err_msg.replace(custom_key, "[REDACTED]")
-            for secret in [self.cfg.gemini_api_key, self.cfg.openrouter_api_key, self.cfg.app_secret_key]:
+            for secret in [self.cfg.gemini_api_key, self.cfg.openrouter_api_key, self.cfg.local_llm_api_key, self.cfg.app_secret_key]:
                 if secret and len(secret) > 4:
                     err_msg = err_msg.replace(secret, "[REDACTED]")
             err_msg = re.sub(r'(?:AIza|sk-[a-zA-Z0-9_-])[A-Za-z0-9_-]{10,}', '[REDACTED_KEY]', err_msg)
@@ -568,8 +586,8 @@ class AIEngine:
                     results["ollama"] = models
                     results["ollama_endpoint"] = base
                     break
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[AI] Ollama discovery endpoint {base} unavailable: {exc}")
 
         # Check LM Studio
         for base in ["http://host.docker.internal:1234/v1", "http://127.0.0.1:1234/v1"]:
@@ -580,8 +598,8 @@ class AIEngine:
                     results["lmstudio"] = models
                     results["lmstudio_endpoint"] = base
                     break
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[AI] LM Studio discovery endpoint {base} unavailable: {exc}")
 
         return results
 
@@ -635,22 +653,31 @@ class AIEngine:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4))
     async def _call_local(self, messages: list[dict]) -> str:
-        cfg = get_settings()
-        return await self._call_local_custom(messages, cfg.local_llm_endpoint, cfg.local_llm_model)
+        return await self._call_local_custom(
+            messages,
+            self.local_endpoint(),
+            self.provider_model("local"),
+            api_key=self.cfg.local_llm_api_key,
+        )
 
     @staticmethod
     def _local_chat_target(endpoint: str) -> tuple[str, bool]:
         """Return the chat URL and whether the endpoint is native Ollama.
 
-        Ollama also exposes an OpenAI-compatible ``/v1`` API.  Users therefore
-        commonly save ``http://host:11434/v1`` in Settings.  Port 11434 still
-        identifies Ollama and should use its native endpoint; the old path test
-        misclassified that valid configuration and imposed the short generic
-        provider timeout.
+        Ollama also exposes an OpenAI-compatible ``/v1`` API. Users therefore
+        commonly save ``http://host:11434/v1`` in Settings. Port 11434 or
+        domain names containing "ollama" identify Ollama and should use its native
+        endpoint /api/chat.
         """
         parsed = urlparse(endpoint.rstrip("/"))
-        if parsed.port == 11434:
-            path = parsed.path.rstrip("/")
+        path = parsed.path.rstrip("/")
+        if path.endswith("/api/chat"):
+            return endpoint.rstrip("/"), True
+        if path.endswith("/chat/completions"):
+            return endpoint.rstrip("/"), False
+
+        hostname = (parsed.hostname or "").lower()
+        if parsed.port == 11434 or "ollama" in hostname:
             if path.endswith("/v1"):
                 path = path[:-3]
             base = urlunparse(
@@ -663,12 +690,21 @@ class AIEngine:
             host_url = f"{host_url}/v1"
         return f"{host_url}/chat/completions", False
 
-    async def _call_local_custom(self, messages: list[dict], endpoint: str, model: str) -> str:
+    async def _call_local_custom(
+        self,
+        messages: list[dict],
+        endpoint: str,
+        model: str,
+        api_key: Optional[str] = None,
+    ) -> str:
         allowed_hosts = configured_host_set(self.cfg.allowed_llm_hosts)
         from urllib.parse import urlparse
         configured_host = urlparse(self.cfg.local_llm_endpoint).hostname
         if configured_host:
             allowed_hosts.add(configured_host.lower())
+        ep_host = urlparse(endpoint).hostname
+        if ep_host and ("ollama.com" in ep_host.lower() or "openai.com" in ep_host.lower()):
+            allowed_hosts.add(ep_host.lower())
         host_url = validate_service_url(
             endpoint,
             allowed_hosts=allowed_hosts,
@@ -690,7 +726,7 @@ class AIEngine:
                 "options": {
                     "temperature": 0.3,
                     # This budget includes hidden reasoning tokens for models
-                    # such as gpt-oss.  The previous 768-token cap could leave
+                    # such as gpt-oss. The previous 768-token cap could leave
                     # the visible Thai answer ending in the middle of a clause.
                     "num_predict": CHAT_OUTPUT_TOKEN_BUDGET,
                 },
@@ -699,19 +735,25 @@ class AIEngine:
         else:
             payload = {
                 "model": target_model,
-                "messages": messages,
+                "messages": self._openai_multimodal_messages(messages),
                 "temperature": 0.3,
                 "max_tokens": CHAT_OUTPUT_TOKEN_BUDGET,
                 "stream": False,
             }
 
+        token = (api_key if api_key is not None else getattr(self.cfg, "local_llm_api_key", "")).strip()
+        headers: dict[str, str] = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
         # A remote-backed Ollama model can take longer than a local model to
-        # process the full trading system prompt.  Keep a bounded timeout below
+        # process the full trading system prompt. Keep a bounded timeout below
         # the client's 120 second request budget, while avoiding the previous
         # false offline response after only 12 seconds.
-        timeout = httpx.Timeout(connect=5.0, read=45.0, write=15.0, pool=5.0)
+        read_timeout = max(60.0, float(getattr(self.cfg, "scanner_ai_timeout_seconds", 60.0)))
+        timeout = httpx.Timeout(connect=5.0, read=read_timeout, write=15.0, pool=5.0)
         client = await self._get_client()
-        r = await client.post(api_url, json=payload)
+        r = await client.post(api_url, json=payload, headers=headers, timeout=timeout)
         if r.status_code == 200:
             resp_data = r.json()
             if is_ollama_native:
@@ -748,12 +790,12 @@ class AIEngine:
             )
             fallback_payload = {
                 "model": target_model,
-                "messages": messages,
+                "messages": self._openai_multimodal_messages(messages),
                 "temperature": 0.3,
                 "max_tokens": CHAT_OUTPUT_TOKEN_BUDGET,
                 "stream": False,
             }
-            r2 = await client.post(fallback_url, json=fallback_payload)
+            r2 = await client.post(fallback_url, json=fallback_payload, headers=headers, timeout=timeout)
             if r2.status_code == 200:
                 choices = r2.json().get("choices", [])
                 if choices:
@@ -765,6 +807,34 @@ class AIEngine:
             raise ValueError(f"AI provider returned HTTP {r.status_code}")
 
         raise ValueError(f"Could not get response from Local LLM at {api_url}")
+
+    @staticmethod
+    def _openai_multimodal_messages(messages: list[dict]) -> list[dict]:
+        """Translate Ollama-native base64 image fields to OpenAI content parts.
+
+        The application's internal message contract uses ``images`` because the
+        configured port-11434 endpoint is normally native Ollama.  This adapter
+        preserves the same request when that endpoint falls back to ``/v1`` or
+        when an OpenAI-compatible local server is configured directly.
+        """
+        converted: list[dict] = []
+        for message in messages:
+            images = message.get("images")
+            if not isinstance(images, list) or not images:
+                converted.append(dict(message))
+                continue
+            parts: list[dict[str, Any]] = [
+                {"type": "text", "text": str(message.get("content", ""))}
+            ]
+            for encoded in images[:4]:
+                if not isinstance(encoded, str) or not encoded:
+                    continue
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{encoded}"},
+                })
+            converted.append({"role": message.get("role", "user"), "content": parts})
+        return converted
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4))
     async def _call_gemini(self, messages: list[dict]) -> str:
@@ -1010,8 +1080,8 @@ class AIEngine:
         if match:
             try:
                 data = json.loads(match.group(0))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[AI] Complete JSON response parse failed; using regex fallback: {exc}")
 
         # 2. If complete JSON failed (e.g. truncated JSON), extract fields via regex!
         if not data:

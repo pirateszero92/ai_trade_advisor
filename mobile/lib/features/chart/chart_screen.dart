@@ -9,6 +9,7 @@ import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/ws_client.dart';
 import '../../core/trading/strategy_gate_view.dart';
+import '../../core/trading/authority_pipeline_panel.dart';
 import '../settings/settings_screen.dart';
 import 'smc_interactive_chart.dart';
 
@@ -995,7 +996,17 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     final setupTimeframe = _smcOverlayData?['execution_timeframe']?.toString();
     final hasAuditableGrade = directionMatches &&
         const {'A', 'S'}.contains(gate.coreSetupGrade) &&
-        const {'sweep_reversal', 'displacement_retest'}.contains(setupType) &&
+        const {
+          'sweep_reversal',
+          'displacement_retest',
+          'breaker_retest',
+          'fvg_retest',
+          'breaker_shallow_retest',
+          'fvg_shallow_retest',
+          'range_boundary_ping_pong',
+          'micro_sniper_3m',
+          'micro_sniper_5m',
+        }.contains(setupType) &&
         snapshotId != null &&
         snapshotId.isNotEmpty &&
         setupTimeframe != null &&
@@ -1577,15 +1588,21 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             cancelToken: _requestCancelToken,
           ),
           builder: (ctx, snapshot) {
-            final data = snapshot.data?.data as Map<String, dynamic>? ?? {};
+            final rawData = snapshot.data?.data;
+            final data = rawData is Map
+                ? Map<String, dynamic>.from(rawData)
+                : const <String, dynamic>{};
             final script = data['script']?.toString() ??
                 'กำลังประมวลผลบทสรุปตลาดเช้าจาก Apex AI...';
             final regime = data['regime']?.toString() ??
                 'Accumulation / Re-accumulation Structure';
-            final setups = (data['key_focus_setups'] as List<dynamic>?)
-                    ?.map((e) => e as Map<String, dynamic>)
-                    .toList() ??
-                [];
+            final setupsRaw = data['key_focus_setups'];
+            final setups = setupsRaw is List
+                ? setupsRaw
+                    .whereType<Map>()
+                    .map((e) => Map<String, dynamic>.from(e))
+                    .toList()
+                : <Map<String, dynamic>>[];
 
             return Padding(
               padding: EdgeInsets.only(
@@ -1748,11 +1765,13 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                             fontWeight: FontWeight.bold,
                             color: Colors.white70)),
                     const SizedBox(height: 6),
-                    Row(
-                      children: setups.map((s) {
-                        return Expanded(
-                          child: Container(
-                            margin: const EdgeInsets.only(right: 6),
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: setups.map((s) {
+                          return Container(
+                            width: 140,
+                            margin: const EdgeInsets.only(right: 8),
                             padding: const EdgeInsets.all(8),
                             decoration: BoxDecoration(
                               color: const Color(0xFF161C2A),
@@ -1782,9 +1801,9 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                                     overflow: TextOverflow.ellipsis),
                               ],
                             ),
-                          ),
-                        );
-                      }).toList(),
+                          );
+                        }).toList(),
+                      ),
                     ),
                   ],
                 ],
@@ -2904,7 +2923,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  'C$minConfluence · RR ${minRr.toStringAsFixed(1)} · RISK ×${riskMultiplier.toStringAsFixed(2)}',
+                  'NEED ≥$minConfluence · RR ${minRr.toStringAsFixed(1)} · RISK ×${riskMultiplier.toStringAsFixed(2)}',
                   style: const TextStyle(
                       fontSize: 9,
                       color: AppColors.textMuted,
@@ -2912,7 +2931,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  entryAllowed ? 'SELECTIVE ENTRY' : 'NO NEW ENTRY',
+                  entryAllowed ? 'REGIME: ENTRY PERMITTED' : 'REGIME: NO ENTRY',
                   style: TextStyle(
                       fontSize: 9,
                       color:
@@ -3140,7 +3159,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
     final score = (decision['score'] as num? ?? 0).round();
     final coverage = (decision['coverage'] as num? ?? 0).toDouble();
     final ready = decision['ready'] == true;
-    final stateColor = ready ? AppColors.bullish : AppColors.bearish;
+    final scoreColor = score >= 70
+        ? AppColors.bullish
+        : (score >= 45 ? const Color(0xFFFF9900) : const Color(0xFF90A4AE));
+    final dataOkColor = ready ? const Color(0xFF00E5FF) : AppColors.bearish;
     final volumeQuality =
         (_smcOverlayData?['volume_quality'] ?? 'unavailable').toString();
     final flowSource =
@@ -3165,7 +3187,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     size: 13, color: Color(0xFF00E5FF)),
                 const SizedBox(width: 5),
                 const Text(
-                  'SMC + CVD CORE',
+                  'SMC + CVD EVIDENCE',
                   style: TextStyle(
                     fontSize: 9.5,
                     fontWeight: FontWeight.w700,
@@ -3177,18 +3199,37 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
-                    color: stateColor.withValues(alpha: 0.13),
+                    color: scoreColor.withValues(alpha: 0.13),
                     borderRadius: BorderRadius.circular(4),
                     border: Border.all(
-                        color: stateColor.withValues(alpha: 0.55), width: 0.8),
+                        color: scoreColor.withValues(alpha: 0.55), width: 0.8),
                   ),
-                  child: Text(
-                    '$score/100 · ${ready ? 'DATA OK' : 'DATA BLOCK'}',
-                    style: TextStyle(
-                      fontSize: 9.5,
-                      color: stateColor,
-                      fontWeight: FontWeight.bold,
-                    ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'EVIDENCE $score/100',
+                        style: TextStyle(
+                          fontSize: 9.5,
+                          color: scoreColor,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      const Text(
+                        '·',
+                        style: TextStyle(fontSize: 9.5, color: Colors.white38),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        ready ? 'DATA OK' : 'DATA BLOCK',
+                        style: TextStyle(
+                          fontSize: 9.0,
+                          color: dataOkColor,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -3203,7 +3244,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   ),
                   child: Text(
                     volumeQuality == 'exchange_aggressor'
-                        ? 'CVD ${flowSource == 'binance_taker_volume' ? 'KLINE' : 'AGGTRADES'} · BINANCE'
+                        ? 'CVD ${flowSource == 'binance_taker_volume' ? 'TAKER/KLINE' : 'AGGTRADES'} · BINANCE'
                         : (volumeQuality == 'estimated'
                             ? 'CVD ESTIMATED'
                             : 'CVD N/A'),
@@ -4901,8 +4942,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
             ? _symbolBlueprints[_selectedSymbol]
             : null);
 
-    // Strategy Gate is the only execution authority. AI blueprints and raw
-    // market bias may explain a setup, but can never grant an order.
+    // TriCore owns the deterministic setup. AI review, execution
+    // revalidation, RiskEngine and OMS remain separate downstream authorities.
     final isBull = gate.allowsLong;
     final isBear = gate.allowsShort;
     final setupIsBull = gate.setupDirection == 'long';
@@ -5044,8 +5085,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                           const SizedBox(width: 4),
                           Text(
                             gate.approved
-                                ? '● Strategy Gate อนุมัติ ($_selectedSymbol)'
-                                : '● Strategy Gate: WAIT ($_selectedSymbol)',
+                                ? '● TriCore setup พร้อม ($_selectedSymbol)'
+                                : '● TriCore: WAIT ($_selectedSymbol)',
                             style: TextStyle(
                               fontSize: 9,
                               color: gate.approved
@@ -5081,9 +5122,10 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                 ),
               ],
             ),
+            AuthorityPipelinePanel(payload: _smcOverlayData),
             const SizedBox(height: 10),
 
-            // Confluence Score Gauge
+            // Deterministic evidence context only; not a merged authority score.
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -5097,11 +5139,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text('Institutional Confluence',
+                      const Text('Deterministic Evidence Context',
                           style: TextStyle(
                               fontSize: 12, color: AppColors.textMuted)),
                       Text(
-                        '$confluence / 100 ${confluence >= 80 ? '(Grade A+)' : (confluence >= 65 ? '(Grade B)' : '(Grade C)')}',
+                        'Evidence $confluence / 100',
                         style: TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.bold,

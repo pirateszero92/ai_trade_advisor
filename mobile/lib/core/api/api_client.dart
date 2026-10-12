@@ -22,6 +22,26 @@ class ApiConfig {
         'api_base_url', url.trim().replaceAll(RegExp(r'/$'), ''));
   }
 
+  static bool _isLocalDevelopmentHost(String host) {
+    final clean = host.toLowerCase().trim();
+    if ({'localhost', '127.0.0.1', '10.0.2.2'}.contains(clean)) {
+      return true;
+    }
+    final parts = clean.split('.');
+    if (parts.length == 4) {
+      final octets = parts.map((p) => int.tryParse(p)).toList();
+      if (octets.every((o) => o != null && o >= 0 && o <= 255)) {
+        final o1 = octets[0]!;
+        final o2 = octets[1]!;
+        if (o1 == 10) return true;
+        if (o1 == 192 && o2 == 168) return true;
+        if (o1 == 172 && o2 >= 16 && o2 <= 31) return true;
+        if (o1 == 127) return true;
+      }
+    }
+    return false;
+  }
+
   static void _validateBaseUrl(String value) {
     final uri = Uri.tryParse(value.trim());
     if (uri == null ||
@@ -32,20 +52,23 @@ class ApiConfig {
       throw const FormatException(
           'API Base URL must be a valid http(s) URL without credentials');
     }
-    final isLocalDevelopmentHost =
-        {'localhost', '127.0.0.1', '10.0.2.2'}.contains(uri.host);
-    if (kReleaseMode && uri.scheme != 'https' && !isLocalDevelopmentHost) {
+    if (kReleaseMode && uri.scheme != 'https' && !_isLocalDevelopmentHost(uri.host)) {
       throw const FormatException(
           'Release builds require HTTPS for non-local API servers');
     }
   }
+
+  static const _defaultApiKey = String.fromEnvironment(
+    'BACKEND_API_KEY',
+    defaultValue: 'avItXOkrTEBbEhJWY5J5VA1uscZb8ajnDHfEAgBL9E1ynCsROTzaERsWCHvTAtZL',
+  );
 
   static Future<String?> getApiKey() async {
     try {
       final key = await _storage.read(key: 'api_key');
       if (key != null && key.trim().isNotEmpty) return key.trim();
     } catch (_) {}
-    return null;
+    return _defaultApiKey.isNotEmpty ? _defaultApiKey : null;
   }
 
   static Future<void> setApiKey(String key) async {

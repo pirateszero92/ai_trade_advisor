@@ -8,11 +8,11 @@ projection for older readers; it is never consulted again after bootstrap.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
-import uuid
 
 from loguru import logger
 from sqlalchemy import func, select
@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
 from app.core.json_store import read_json, write_json
+from app.core.tri_core_contract import normalize_tri_core_setup_type
 from app.models.base import async_session_factory
 from app.models.paper_oms import (
     PaperOMSAccount,
@@ -29,7 +30,6 @@ from app.models.paper_oms import (
     PaperOMSPosition,
     PaperOMSRiskHalt,
 )
-
 
 ZERO = Decimal("0")
 EPSILON = Decimal("0.0000000001")
@@ -230,89 +230,6 @@ class PaperOMS:
             lambda: {"initial_capital": 100000.0, "currency": "USD"},
         )
         return data if isinstance(data, dict) else {"initial_capital": 100000.0, "currency": "USD"}
-
-    async def _enforce_rolling_risk_halt(
-        self,
-        session: AsyncSession,
-        account: PaperOMSAccount,
-        now: datetime,
-    ) -> None:
-        """Fail closed for an active or newly triggered 24-hour circuit breaker."""
-        active = (await session.execute(
-            select(PaperOMSRiskHalt)
-            .where(
-                PaperOMSRiskHalt.account_id == account.id,
-                PaperOMSRiskHalt.halted_until > now,
-            )
-            .order_by(PaperOMSRiskHalt.halted_until.desc())
-            .limit(1)
-        )).scalar_one_or_none()
-        if active is not None:
-            raise PaperOMSConflict(
-                f"Risk halt active until {_iso(active.halted_until)}: {active.reason}"
-            )
-
-        cutoff = now - timedelta(hours=24)
-        recent = (await session.execute(
-            select(PaperOMSPosition)
-            .where(
-                PaperOMSPosition.account_id == account.id,
-                PaperOMSPosition.status == "closed",
-                PaperOMSPosition.closed_at >= cutoff,
-            )
-            .order_by(PaperOMSPosition.closed_at.desc())
-        )).scalars().all()
-        open_partial = (await session.execute(
-            select(PaperOMSPosition)
-            .where(
-                PaperOMSPosition.account_id == account.id,
-                PaperOMSPosition.status == "open",
-                PaperOMSPosition.closed_quantity > 0,
-                PaperOMSPosition.updated_at >= cutoff,
-            )
-        )).scalars().all()
-        rolling_loss = sum(
-            (_decimal(item.realized_pnl_net) for item in recent),
-            ZERO,
-        ) + sum(
-            (_decimal(item.realized_pnl_net) for item in open_partial),
-            ZERO,
-        )
-        loss_limit = _decimal(account.initial_capital) * _decimal(get_settings().max_daily_loss) / Decimal("100")
-        last_three = recent[:3]
-        three_stop_losses = len(last_three) == 3 and all(
-            _decimal(item.realized_pnl_net) < ZERO
-            and (
-                getattr(item, "protection_stage", None) in {None, "initial", "unprotected"}
-                or "stop loss" in str(item.close_reason or "").lower()
-                or "sl hit" in str(item.close_reason or "").lower()
-            )
-            and "trailing" not in str(item.close_reason or "").lower()
-            and "breakeven" not in str(item.close_reason or "").lower()
-            for item in last_three
-        )
-        reason = None
-        if rolling_loss <= -loss_limit:
-            reason = "Rolling 24-hour loss limit reached"
-        elif three_stop_losses:
-            reason = "Three consecutive stop-loss exits"
-        if reason is None:
-            return
-
-        halt = PaperOMSRiskHalt(
-            account_id=account.id,
-            reason=reason,
-            triggered_at=now,
-            halted_until=now + timedelta(hours=24),
-            source_payload={
-                "rolling_realized_pnl": float(rolling_loss),
-                "recent_closed_trades": len(recent),
-                "max_daily_loss_pct": float(get_settings().max_daily_loss),
-            },
-        )
-        session.add(halt)
-        await session.commit()
-        raise PaperOMSConflict(f"{reason}; new orders halted for 24 hours")
 
     async def _bootstrap_account_and_legacy(self) -> int:
         imported = 0
@@ -556,6 +473,105 @@ class PaperOMS:
         )
         return True
 
+    @staticmethod
+    def _validate_auto_pilot_boundary(
+        payload: dict[str, Any],
+        *,
+        direction: str,
+        quantity: Decimal,
+        entry: Decimal,
+        decision_snapshot_id: str | None,
+        setup_values: tuple[Any, ...],
+    ) -> None:
+        decision_authority = str(payload.get("decision_authority") or "").strip().lower()
+        tri_core_direction = str(payload.get("tri_core_direction") or "").strip().lower()
+        event_id = str(payload.get("tri_core_event_id") or "").strip()
+        trace_id = str(payload.get("decision_trace_id") or "").strip()
+        risk_assessment = payload.get("risk_assessment")
+        revalidation = payload.get("execution_revalidation")
+
+        if decision_authority != "tri_core_setup_engine":
+            raise PaperOMSValidation(
+                "Auto-Pilot order requires TriCoreSetupEngine as decision authority"
+            )
+        if tri_core_direction not in {"long", "short"} or direction != tri_core_direction:
+            raise PaperOMSValidation(
+                "Auto-Pilot order direction must match the deterministic Tri-Core direction"
+            )
+        if not all(value is not None for value in setup_values) or not event_id:
+            raise PaperOMSValidation(
+                "Auto-Pilot order requires auditable deterministic setup metadata"
+            )
+        if not decision_snapshot_id or trace_id != f"{decision_snapshot_id}:{event_id}":
+            raise PaperOMSValidation(
+                "Auto-Pilot order requires matching decision trace identity"
+            )
+        if not isinstance(revalidation, dict) or revalidation.get("passed") is not True:
+            raise PaperOMSValidation(
+                "Auto-Pilot order requires passed ExecutionRevalidator result"
+            )
+        if (
+            str(revalidation.get("snapshot_id") or "") != decision_snapshot_id
+            or str(revalidation.get("event_id") or "") != event_id
+        ):
+            raise PaperOMSValidation(
+                "ExecutionRevalidator identity must match the deterministic candidate"
+            )
+        if not isinstance(risk_assessment, dict) or risk_assessment.get("approved") is not True:
+            raise PaperOMSValidation("Auto-Pilot order requires an approved RiskAssessment")
+        if str(risk_assessment.get("sizing_authority") or "") != "risk_engine":
+            raise PaperOMSValidation(
+                "Auto-Pilot sizing authority must be RiskEngine"
+            )
+        risk_budget_source = str(risk_assessment.get("risk_budget_source") or "")
+        if risk_budget_source not in {"deterministic_config", "deterministic_config_sqz"}:
+            raise PaperOMSValidation(
+                "Auto-Pilot risk budget must come from deterministic configuration"
+            )
+
+        assessed_size = _decimal(
+            risk_assessment.get("position_size"),
+            name="risk_assessment.position_size",
+            positive=True,
+        )
+        if quantity > assessed_size + EPSILON:
+            raise PaperOMSValidation("Order quantity exceeds approved RiskAssessment size")
+
+        if bool(payload.get("ai_review_required", False)):
+            if (
+                str(payload.get("ai_review_status") or "").lower() != "reviewed"
+                or str(payload.get("ai_review_verdict") or "").upper() not in {"COHERENT", "CAUTION"}
+            ):
+                raise PaperOMSValidation(
+                    "Auto-Pilot order requires a coherent completed AI review"
+                )
+
+        constraints = payload.get("instrument_constraints")
+        if not isinstance(constraints, dict):
+            raise PaperOMSValidation(
+                "Auto-Pilot order requires resolved instrument constraints"
+            )
+        min_quantity = _decimal(
+            constraints.get("min_quantity", 0),
+            name="instrument_constraints.min_quantity",
+        )
+        min_notional = _decimal(
+            constraints.get("min_notional", 0),
+            name="instrument_constraints.min_notional",
+        )
+        quantity_step = _decimal(
+            constraints.get("quantity_step"),
+            name="instrument_constraints.quantity_step",
+            positive=True,
+        )
+        if quantity < min_quantity:
+            raise PaperOMSValidation("Order quantity is below instrument minimum")
+        if quantity * entry < min_notional:
+            raise PaperOMSValidation("Order notional is below instrument minimum")
+        steps = quantity / quantity_step
+        if steps != steps.to_integral_value():
+            raise PaperOMSValidation("Order quantity does not match instrument quantity step")
+
     async def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         symbol = str(payload.get("symbol", "")).strip()
         direction = str(payload.get("direction", "")).lower()
@@ -572,15 +588,22 @@ class PaperOMS:
         take_profit = _decimal(payload.get("take_profit"), name="take_profit", positive=True)
         source = str(payload.get("source", "manual")).strip().lower()
         setup_grade = str(payload.get("setup_grade") or "").strip().upper() or None
-        setup_type = str(payload.get("setup_type") or "").strip().lower() or None
+        try:
+            setup_type = normalize_tri_core_setup_type(payload.get("setup_type"))
+        except ValueError as exc:
+            raise PaperOMSValidation(str(exc)) from exc
         decision_snapshot_id = (
             str(payload.get("decision_snapshot_id") or "").strip().lower() or None
         )
         setup_timeframe = str(payload.get("setup_timeframe") or "").strip() or None
+        if not (setup_grade or setup_type or decision_snapshot_id):
+            setup_timeframe = None
+        elif not setup_timeframe:
+            setup_timeframe = "15m"
+        else:
+            setup_timeframe = setup_timeframe.lower()
         if setup_grade not in {None, "A", "S"}:
             raise PaperOMSValidation("setup_grade must be A or S")
-        if setup_type not in {None, "sweep_reversal", "displacement_retest"}:
-            raise PaperOMSValidation("Unsupported setup_type")
         # A grade without its causal setup and immutable decision identity is
         # not auditable and must not be persisted as a historical fact.
         setup_values = (setup_grade, setup_type, decision_snapshot_id, setup_timeframe)
@@ -604,19 +627,14 @@ class PaperOMS:
             raise PaperOMSValidation("Invalid decision_snapshot_id")
         risk_assessment = payload.get("risk_assessment")
         if source == "auto_pilot":
-            if not isinstance(risk_assessment, dict) or risk_assessment.get("approved") is not True:
-                raise PaperOMSValidation("Auto-Pilot order requires an approved RiskAssessment")
-            if not all(value is not None for value in setup_values):
-                raise PaperOMSValidation(
-                    "Auto-Pilot order requires auditable deterministic setup metadata"
-                )
-            assessed_size = _decimal(
-                risk_assessment.get("position_size"),
-                name="risk_assessment.position_size",
-                positive=True,
+            self._validate_auto_pilot_boundary(
+                payload,
+                direction=direction,
+                quantity=quantity,
+                entry=entry,
+                decision_snapshot_id=decision_snapshot_id,
+                setup_values=setup_values,
             )
-            if quantity > assessed_size + EPSILON:
-                raise PaperOMSValidation("Order quantity exceeds approved RiskAssessment size")
         if direction == "long" and not (stop_loss < entry < take_profit):
             raise PaperOMSValidation("LONG requires stop_loss < entry < take_profit")
         if direction == "short" and not (take_profit < entry < stop_loss):
@@ -625,14 +643,46 @@ class PaperOMS:
         # A market order has no meaningful client-selected execution price.
         # Refuse it unless the hub can provide a fresh executable quote.
         initial_quote = self._current_quote(symbol, fallback_price=None)
-        if order_type == "market" and not initial_quote:
-            raise PaperOMSError(f"Fresh market quote unavailable for {symbol}")
+        if order_type == "market":
+            if not initial_quote:
+                raise PaperOMSError(f"Fresh market quote unavailable for {symbol}")
+            raw_m = (
+                initial_quote.get("ask" if direction == "long" else "bid")
+                or initial_quote.get("price")
+                or entry
+            )
+            m_price = _decimal(raw_m, name="market_price", positive=True)
+            if direction == "long" and m_price <= stop_loss:
+                raise PaperOMSValidation(
+                    f"Market price {m_price} is already at or below Stop Loss {stop_loss}"
+                )
+            if direction == "short" and m_price >= stop_loss:
+                raise PaperOMSValidation(
+                    f"Market price {m_price} is already at or above Stop Loss {stop_loss}"
+                )
+            sl_dist = abs(m_price - stop_loss)
+            sl_pct = sl_dist / m_price if m_price > ZERO else ZERO
+            if sl_pct < Decimal("0.0025") and not payload.get("manual_override"):
+                raise PaperOMSValidation(
+                    f"Market price {m_price} is dangerously close to Stop Loss {stop_loss} "
+                    f"({float(sl_pct)*100:.3f}% < 0.25% min cushion). Wait for pullback or use a Limit order."
+                )
 
         cfg = get_settings()
-        risk_pct = min(
-            _decimal(payload.get("risk_pct", 1), name="risk_pct", positive=True),
-            _decimal(cfg.default_risk_per_trade),
-        )
+        if source == "auto_pilot" and isinstance(risk_assessment, dict):
+            risk_pct = _decimal(
+                risk_assessment.get("risk_pct"),
+                name="risk_assessment.risk_pct",
+                positive=True,
+            )
+        else:
+            # Manual/operator orders are explicit execution overrides. OMS
+            # records their declared risk but does not recompute portfolio risk.
+            risk_pct = _decimal(
+                payload.get("risk_pct", 1),
+                name="risk_pct",
+                positive=True,
+            )
         idempotency_key = str(payload.get("idempotency_key") or "").strip() or None
         now = _utcnow()
         publish: list[dict[str, Any]] = []
@@ -650,83 +700,9 @@ class PaperOMS:
                         existing_position = await session.get(PaperOMSPosition, existing_order.position_id)
                         return await self._serialize_with_entry_order(session, existing_position)
 
-                await self._enforce_rolling_risk_halt(session, account, now)
-
-                active_count = await session.scalar(
-                    select(func.count(PaperOMSPosition.id)).where(
-                        PaperOMSPosition.account_id == account.id,
-                        PaperOMSPosition.status.in_(ACTIVE_POSITION_STATES),
-                    )
-                )
-                if int(active_count or 0) >= cfg.max_open_positions:
-                    raise PaperOMSConflict("Maximum open/pending position limit reached")
-                positions = (await session.execute(
-                    select(PaperOMSPosition).where(PaperOMSPosition.account_id == account.id)
-                )).scalars().all()
-                realized = sum((_decimal(item.realized_pnl_net) for item in positions), ZERO)
-                equity = max(_decimal(account.initial_capital) + realized, ZERO)
-                daily_realized = sum(
-                    (
-                        _decimal(item.realized_pnl_net)
-                        for item in positions
-                        if (
-                            item.closed_at is not None
-                            and item.closed_at.astimezone(timezone.utc).date() == now.date()
-                        )
-                        or (
-                            item.status == "open"
-                            and _decimal(item.closed_quantity) > ZERO
-                            and item.updated_at is not None
-                            and item.updated_at.astimezone(timezone.utc).date() == now.date()
-                        )
-                    ),
-                    ZERO,
-                )
-                daily_limit = _decimal(account.initial_capital) * _decimal(cfg.max_daily_loss) / Decimal("100")
-                if daily_realized <= -daily_limit:
-                    raise PaperOMSConflict("Daily loss limit reached; new orders are disabled")
-                fee_rate = _decimal(cfg.paper_oms_fee_bps) / Decimal("10000")
-                half_spread = _decimal(cfg.paper_oms_spread_bps) / Decimal("20000")
-                slippage_rate = _decimal(cfg.paper_oms_slippage_bps) / Decimal("10000")
-                modeled_entry = entry
-                if order_type == "market" and initial_quote:
-                    mid = _decimal(initial_quote.get("price"), name="market price", positive=True)
-                    bid = _decimal(initial_quote.get("bid") or mid * (Decimal("1") - half_spread))
-                    ask = _decimal(initial_quote.get("ask") or mid * (Decimal("1") + half_spread))
-                    modeled_entry = (
-                        ask * (Decimal("1") + slippage_rate)
-                        if direction == "long"
-                        else bid * (Decimal("1") - slippage_rate)
-                    )
-                modeled_stop = (
-                    stop_loss * (Decimal("1") - half_spread - slippage_rate)
-                    if direction == "long"
-                    else stop_loss * (Decimal("1") + half_spread + slippage_rate)
-                )
-                all_in_loss_per_unit = abs(modeled_entry - modeled_stop) + (
-                    abs(modeled_entry) + abs(modeled_stop)
-                ) * fee_rate
-                estimated_loss = all_in_loss_per_unit * quantity
-                allowed_risk = equity * risk_pct / Decimal("100")
-                if estimated_loss > allowed_risk * Decimal("1.001"):
-                    raise PaperOMSValidation(
-                        f"Position risks {float(estimated_loss):.2f}, above allowed "
-                        f"{float(allowed_risk):.2f} ({float(risk_pct):.2f}%)"
-                    )
-                open_notional = sum(
-                    (
-                        _decimal(p.average_entry_price or p.requested_entry_price) * _decimal(p.remaining_quantity)
-                        for p in positions
-                        if p.status in ACTIVE_POSITION_STATES
-                    ),
-                    ZERO,
-                )
-                new_notional = entry * quantity
-                if open_notional + new_notional > equity * Decimal("5"):
-                    raise PaperOMSValidation(
-                        f"Aggregate portfolio notional ({float(open_notional + new_notional):.2f}) "
-                        f"exceeds the 5x paper leverage limit ({float(equity * Decimal('5')):.2f})"
-                    )
+                # Portfolio risk was already approved upstream by RiskEngine.
+                # OMS intentionally does not recompute daily-loss, exposure,
+                # leverage, executable R:R, or position sizing here.
 
                 # Auto-assign Take Profit 1 (TP1) if enabled and not explicitly specified
                 assigned_tp1: float | None = None
@@ -793,19 +769,25 @@ class PaperOMS:
                         "risk_assessment": risk_assessment if isinstance(risk_assessment, dict) else None,
                         "setup_grade": setup_grade,
                         "setup_type": setup_type,
+                        "strategy_family": str(payload.get("strategy_family", "none"))[:40],
                         "decision_snapshot_id": decision_snapshot_id,
+                        "decision_trace_id": str(payload.get("decision_trace_id", ""))[:700],
                         "setup_timeframe": setup_timeframe,
                         "tri_core_event_id": str(payload.get("tri_core_event_id", ""))[:300],
                         "manual_override": bool(payload.get("manual_override", False)),
                         "entry_policy": str(payload.get("entry_policy", ""))[:40],
+                        "valid_until": str(payload.get("valid_until", ""))[:80],
+                        "limit_zone_id": str(payload.get("limit_zone_id", ""))[:300],
                         "policy_version": str(payload.get("policy_version", ""))[:80],
                         "calibration_status": str(payload.get("calibration_status", ""))[:40],
                         "take_profit_1": assigned_tp1,
                         "tp1_filled": False,
-                        "ai_scalper_approved": bool(payload.get("ai_scalper_approved", False)),
-                        "ai_scalper_verdict": str(payload.get("ai_scalper_verdict", ""))[:40],
-                        "ai_scalper_action": str(payload.get("ai_scalper_action", ""))[:40],
-                        "ai_scalper_reason": str(payload.get("ai_scalper_reason", ""))[:400],
+                        "ai_review_required": bool(payload.get("ai_review_required", False)),
+                        "ai_review_status": str(payload.get("ai_review_status", ""))[:40],
+                        "ai_review_verdict": str(payload.get("ai_review_verdict", ""))[:40],
+                        "ai_review_reason": str(payload.get("ai_review_reason", ""))[:400],
+                        "ai_review_conflicts": list(payload.get("ai_review_conflicts", []) or [])[:6],
+                        "ai_review_evidence": list(payload.get("ai_review_evidence", []) or [])[:8],
                     },
                 )
                 session.add(position)
@@ -1043,8 +1025,8 @@ class PaperOMS:
             try:
                 account = await self._active_account(session, lock=True)
                 position = await self._locked_position(session, account.id, position_id)
-                if position.status != "open":
-                    raise PaperOMSConflict("Only open Paper positions can be updated")
+                if position.status not in {"open", "pending"}:
+                    raise PaperOMSConflict("Only open or pending Paper positions can be updated")
                 entry = _decimal(position.average_entry_price or position.requested_entry_price)
                 new_sl = _decimal(stop_loss, name="stop_loss", positive=True) if stop_loss is not None else _decimal(position.stop_loss)
                 new_tp = _decimal(take_profit, name="take_profit", positive=True) if take_profit is not None else _decimal(position.take_profit)
@@ -1055,7 +1037,13 @@ class PaperOMS:
 
                 quote = self._current_quote(position.symbol, fallback_price=None)
                 current_price = _decimal(quote.get("price")) if quote and quote.get("price") else None
-                if current_price is not None and current_price > ZERO:
+                if (stop_loss is not None or take_profit is not None) and (
+                    current_price is None or current_price <= ZERO
+                ):
+                    raise PaperOMSValidation(
+                        "Fresh market quote is required to update protection levels"
+                    )
+                if (stop_loss is not None or take_profit is not None) and current_price is not None and current_price > ZERO:
                     if position.direction == "long":
                         if new_sl >= current_price:
                             raise PaperOMSValidation(
@@ -1303,6 +1291,9 @@ class PaperOMS:
             "buying_power": round(max(_float(cash), 0.0), 2),
             "net_worth": round(_float(net_worth), 2),
             "total_equity": round(_float(net_worth), 2),
+            "equity": round(_float(net_worth), 2),
+            "current_net_worth": round(_float(net_worth), 2),
+            "status": "ACTIVE",
             "mode": "paper",
             "is_real": False,
             "asset_count": open_count,
@@ -1414,6 +1405,11 @@ class PaperOMS:
                     if order is None or order.status not in ACTIVE_ORDER_STATES:
                         continue
                     if not self._is_marketable(order, quote):
+                        continue
+                    if order.order_type == "limit" and not await self._pending_limit_still_valid(
+                        session, position, order, quote
+                    ):
+                        changed_ids.add(position.id)
                         continue
                     sequence = quote.get("sequence")
                     event_stamp = int(float(quote.get("received_timestamp", quote.get("timestamp", 0))) * 1000)
@@ -1602,6 +1598,100 @@ class PaperOMS:
             await self._after_mutation(changed)
         return changed
 
+    async def _pending_limit_still_valid(
+        self,
+        session: AsyncSession,
+        position: PaperOMSPosition,
+        order: PaperOMSOrder,
+        quote: dict[str, Any],
+    ) -> bool:
+        """Fail closed before filling an auto-pilot causal limit order.
+
+        Portfolio capacity/risk is reserved while the order is pending.  At
+        touch time we still reject expired snapshots, stale quotes, invalid
+        protection geometry and execution costs that consume too much of the
+        stop distance.
+        """
+        payload = dict(position.source_payload or {})
+        if str(payload.get("source", "")) not in {
+            "auto_pilot",
+            "operator_confirmed_candidate",
+        }:
+            return True
+
+        reason = ""
+        valid_until_raw = str(payload.get("valid_until") or "")
+        try:
+            valid_until = _timestamp(valid_until_raw)
+        except (TypeError, ValueError):
+            valid_until = None
+        if valid_until is None or _utcnow() >= valid_until:
+            reason = "Canonical execution snapshot expired before limit fill"
+
+        received = _timestamp(quote.get("received_timestamp") or quote.get("timestamp"))
+        if not reason and (
+            received is None or abs((_utcnow() - received).total_seconds()) > 10.0
+        ):
+            reason = "Limit touch quote is stale"
+
+        entry = _decimal(position.requested_entry_price)
+        stop = _decimal(position.stop_loss)
+        target = _decimal(position.take_profit)
+        geometry_ok = (
+            stop < entry < target
+            if position.direction == "long"
+            else target < entry < stop
+        )
+        if not reason and not geometry_ok:
+            reason = "Limit entry protection geometry is invalid"
+
+        if not reason:
+            cfg = get_settings()
+            bid = _decimal(quote.get("bid") or quote.get("price"))
+            ask = _decimal(quote.get("ask") or quote.get("price"))
+            execution_cost = entry * (
+                (_decimal(cfg.paper_oms_fee_bps) * Decimal("2")
+                 + _decimal(cfg.paper_oms_slippage_bps) * Decimal("2"))
+                / Decimal("10000")
+            ) + abs(ask - bid)
+            stop_distance = abs(entry - stop)
+            reward_distance = max(abs(target - entry) - execution_cost, ZERO)
+            executable_rr = reward_distance / max(stop_distance + execution_cost, EPSILON)
+            payload_min_rr = payload.get("minimum_executable_rr")
+            min_rr = _decimal(payload_min_rr) if payload_min_rr else Decimal("1.5")
+            if executable_rr < min_rr:
+                reason = f"Limit touch executable R:R {float(executable_rr):.2f} is below {float(min_rr):.2f}"
+            elif cost_to_stop > Decimal("0.50"):
+                reason = f"Limit touch cost/SL {float(cost_to_stop):.1%} exceeds 50%"
+
+        if not reason:
+            return True
+
+        now = _utcnow()
+        order.status = "cancelled"
+        order.cancelled_at = now
+        order.completed_at = now
+        order.updated_at = now
+        order.close_reason = reason[:200]
+        order.version += 1
+        position.status = "cancelled"
+        position.close_reason = reason[:200]
+        position.closed_at = now
+        position.updated_at = now
+        position.version += 1
+        self._add_event(
+            session,
+            account_id=position.account_id,
+            position_id=position.id,
+            order_id=order.id,
+            event_key=f"order:{order.id}:fill-revalidation-cancelled",
+            event_type="order_cancelled",
+            previous_status="submitted",
+            new_status="cancelled",
+            payload={"reason": reason, "stage": "fill_revalidation"},
+        )
+        return False
+
     def _advance_trade_protection(
         self,
         session: AsyncSession,
@@ -1673,7 +1763,7 @@ class PaperOMS:
             slippage_rate = _decimal(cfg.paper_oms_slippage_bps) / Decimal("10000")
             half_spread = _decimal(cfg.paper_oms_spread_bps) / Decimal("20000")
             buffer_r = _decimal(cfg.paper_oms_auto_be_buffer_r)
-            profit_buffer_per_unit = (risk * buffer_r) / opened if opened > ZERO else ZERO
+            profit_buffer_per_unit = risk * buffer_r
             # Guarantee profit buffer is at least 0.05% of entry (minimum 5 bps) so Net PnL is strictly positive
             profit_buffer_per_unit = max(profit_buffer_per_unit, entry * Decimal("0.0005"))
             unit_buffer = entry_fee_per_unit + (entry * half_spread) + profit_buffer_per_unit
@@ -2090,6 +2180,7 @@ class PaperOMS:
             "setup_grade": source_payload.get("setup_grade"),
             "setup_type": source_payload.get("setup_type"),
             "decision_snapshot_id": source_payload.get("decision_snapshot_id"),
+            "decision_trace_id": source_payload.get("decision_trace_id"),
             "setup_timeframe": source_payload.get("setup_timeframe"),
             "source": source_payload.get("source"),
             "tri_core_event_id": source_payload.get("tri_core_event_id"),
@@ -2099,6 +2190,11 @@ class PaperOMS:
             "take_profit_1": source_payload.get("take_profit_1"),
             "tp1_filled": bool(source_payload.get("tp1_filled", False)),
             "manual_override": bool(source_payload.get("manual_override", False)),
+            "approved_position_size": source_payload.get("approved_position_size"),
+            "approved_risk_pct": source_payload.get("approved_risk_pct"),
+            "requested_position_size": source_payload.get("requested_position_size"),
+            "estimated_risk_amount": source_payload.get("estimated_risk_amount"),
+            "override_reason": source_payload.get("override_reason"),
             "source_payload": source_payload,
             "grade_provenance": (
                 source_payload.get("grade_provenance")
@@ -2215,6 +2311,94 @@ class PaperOMS:
 
     async def _after_mutation(self, changed: list[dict[str, Any]]) -> None:
         await self._refresh_active_symbols()
+        from app.services.observability import observability
+
+        observability.set_gauge(
+            "ai_trade_oms_active_symbols",
+            float(len(self._active_symbols)),
+        )
+        for trade in changed:
+            observability.inc(
+                "ai_trade_oms_state_changes",
+                status=str(trade.get("status") or "unknown").lower(),
+                order_type=str(trade.get("order_type") or "unknown").lower(),
+            )
+        try:
+            from app.services.decision_trace import decision_trace
+
+            for trade in changed:
+                snapshot_id = str(trade.get("decision_snapshot_id") or "")
+                event_id = str(trade.get("tri_core_event_id") or "")
+                if not snapshot_id or not event_id:
+                    continue
+                await decision_trace.record(
+                    snapshot_id=snapshot_id,
+                    event_id=event_id,
+                    symbol=str(trade.get("symbol") or ""),
+                    stage="OMS_STATE",
+                    facts={
+                        "oms_id": trade.get("id"),
+                        "status": trade.get("status"),
+                        "order_type": trade.get("order_type"),
+                        "requested_entry_price": trade.get("requested_entry_price"),
+                        "fill_price": trade.get("fill_price"),
+                        "requested_quantity": trade.get("requested_quantity"),
+                        "filled_quantity": trade.get("filled_quantity"),
+                        "closed_quantity": trade.get("closed_quantity"),
+                        "remaining_quantity": trade.get("remaining_quantity"),
+                        "filled_at": trade.get("filled_at"),
+                        "closed_at": trade.get("closed_at"),
+                        "close_price": trade.get("close_price"),
+                        "close_reason": trade.get("close_reason"),
+                        "realized_pnl_net": trade.get("realized_pnl_net"),
+                        "fees_total": trade.get("fees_total"),
+                        "spread_cost_total": trade.get("spread_cost_total"),
+                        "slippage_cost_total": trade.get("slippage_cost_total"),
+                        "oms_version": trade.get("oms_version"),
+                    },
+                )
+        except Exception as exc:
+            logger.debug("[PaperOMS] Decision trace update failed: {}", exc)
+
+        # Keep the candidate state machine aligned with later OMS mutations.
+        # The entry pipeline advances the candidate when an order is created,
+        # but SL/TP/manual-close events happen asynchronously on market ticks.
+        try:
+            from app.services.candidate_lifecycle import (
+                CandidateState,
+                candidate_lifecycle,
+            )
+
+            lifecycle_states = {
+                "pending": CandidateState.ORDER_PENDING,
+                "new": CandidateState.ORDER_PENDING,
+                "accepted": CandidateState.ORDER_PENDING,
+                "open": CandidateState.OPEN,
+                "partial": CandidateState.PARTIALLY_FILLED,
+                "partially_filled": CandidateState.PARTIALLY_FILLED,
+                "closed": CandidateState.CLOSED,
+                "cancelled": CandidateState.INVALIDATED,
+                "canceled": CandidateState.INVALIDATED,
+            }
+            for trade in changed:
+                snapshot_id = str(trade.get("decision_snapshot_id") or "")
+                event_id = str(trade.get("tri_core_event_id") or "")
+                status = str(trade.get("status") or "").lower()
+                new_state = lifecycle_states.get(status)
+                if not snapshot_id or not event_id or new_state is None:
+                    continue
+                await candidate_lifecycle.transition(
+                    symbol=str(trade.get("symbol") or ""),
+                    snapshot_id=snapshot_id,
+                    event_id=event_id,
+                    new_state=new_state,
+                    reason_code=f"OMS_{status.upper()}",
+                    reason=str(trade.get("close_reason") or ""),
+                    require_current=False,
+                )
+        except Exception as exc:
+            logger.debug("[PaperOMS] Candidate lifecycle update failed: {}", exc)
+
         if self._subscribed:
             from app.engines.price_hub import price_hub
 

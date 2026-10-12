@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import threading
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
+from urllib.parse import quote
 import pandas as pd
 import yfinance as yf
 import httpx
 from loguru import logger
 
 from app.core.config import get_settings
+from app.engines.equity_flow import classify_and_aggregate_equity_flow
 
 _YF_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="yf_worker")
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
@@ -142,8 +145,10 @@ async def _get_usd_thb_rate_cached() -> float:
             if new_rate > 20.0:
                 _USD_THB_CACHE = (now, new_rate)
                 return new_rate
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            f"[MarketData] USD/THB refresh failed; using cached/fallback rate {rate or 34.0}: {exc}"
+        )
     return rate or 34.0
 
 
@@ -169,6 +174,7 @@ def normalize_yfinance_symbol(symbol: str, market_type: str) -> str:
 
 _TICKER_CACHE: dict[str, tuple[float, dict]] = {}
 _OHLCV_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
+_EQUITY_FLOW_CACHE: dict[str, pd.DataFrame] = {}
 CACHE_TTL_SECONDS = 5.0
 CACHE_OHLCV_TTL = 8.0
 
@@ -184,6 +190,9 @@ def _prune_caches(now: float) -> None:
         expired_ohlcv = [k for k, (ts, _) in _OHLCV_CACHE.items() if now - ts > CACHE_OHLCV_TTL * 3]
         for k in expired_ohlcv:
             _OHLCV_CACHE.pop(k, None)
+    if len(_EQUITY_FLOW_CACHE) > 300:
+        for key in list(_EQUITY_FLOW_CACHE)[:-200]:
+            _EQUITY_FLOW_CACHE.pop(key, None)
 
 
 class MarketDataEngine:
@@ -193,6 +202,180 @@ class MarketDataEngine:
 
     async def get_usd_thb_rate(self) -> float:
         return await _get_usd_thb_rate_cached()
+
+    @staticmethod
+    def _alpaca_headers() -> dict[str, str]:
+        cfg = get_settings()
+        return {
+            "APCA-API-KEY-ID": cfg.alpaca_api_key.strip(),
+            "APCA-API-SECRET-KEY": cfg.alpaca_api_secret.strip(),
+        }
+
+    @staticmethod
+    def _alpaca_timeframe(timeframe: str) -> str:
+        mapping = {
+            "1m": "1Min", "2m": "2Min", "3m": "3Min",
+            "5m": "5Min", "15m": "15Min", "30m": "30Min",
+            "1h": "1Hour", "2h": "2Hour", "4h": "4Hour",
+            "1d": "1Day", "1w": "1Week",
+        }
+        try:
+            return mapping[canonical_timeframe(timeframe)]
+        except KeyError as exc:
+            raise ValueError(f"Alpaca does not support timeframe {timeframe}") from exc
+
+    async def _alpaca_tick_pages(
+        self,
+        *,
+        symbol: str,
+        tick_type: Literal["trades", "quotes"],
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        cfg = get_settings()
+        client = get_shared_http_client()
+        token: str | None = None
+        rows: list[dict[str, Any]] = []
+        complete = False
+        for _ in range(cfg.equity_flow_max_pages):
+            params: dict[str, Any] = {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "limit": 10_000,
+                "feed": cfg.alpaca_data_feed,
+                "sort": "asc",
+            }
+            if token:
+                params["page_token"] = token
+            response = await client.get(
+                f"{cfg.alpaca_data_url.rstrip('/')}/v2/stocks/"
+                f"{quote(symbol.upper(), safe='')}/{tick_type}",
+                headers=self._alpaca_headers(),
+                params=params,
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            page = payload.get(tick_type) or []
+            if not isinstance(page, list):
+                raise ValueError(f"Invalid Alpaca {tick_type} payload")
+            rows.extend(item for item in page if isinstance(item, dict))
+            token = payload.get("next_page_token")
+            if not token:
+                complete = True
+                break
+        return rows, complete
+
+    async def _attach_alpaca_equity_flow(
+        self,
+        bars: pd.DataFrame,
+        *,
+        symbol: str,
+        timeframe: str,
+    ) -> pd.DataFrame:
+        cfg = get_settings()
+        result = bars.copy()
+        if result.empty or timeframe in {"1d", "1w", "1M"}:
+            result["flow_source"] = "alpaca_bars_only"
+            result["flow_granularity"] = "unavailable"
+            return result
+
+        lookback = min(cfg.equity_flow_lookback_bars, len(result))
+        start = pd.Timestamp(result.index[-lookback]).tz_convert("UTC")
+        seconds = _FIXED_TIMEFRAME_SECONDS[canonical_timeframe(timeframe)]
+        end = pd.Timestamp(result.index[-1]).tz_convert("UTC") + pd.Timedelta(seconds=seconds)
+        cache_key = f"{symbol.upper()}:{timeframe}:{end.isoformat()}:{cfg.alpaca_data_feed}"
+        cached = _EQUITY_FLOW_CACHE.get(cache_key)
+        if cached is not None:
+            flow = cached.copy()
+        else:
+            trades_task = self._alpaca_tick_pages(
+                symbol=symbol, tick_type="trades", start=start, end=end
+            )
+            quotes_task = self._alpaca_tick_pages(
+                symbol=symbol, tick_type="quotes", start=start, end=end
+            )
+            (trades, trades_complete), (quotes, quotes_complete) = await asyncio.gather(
+                trades_task, quotes_task
+            )
+            flow, quality = classify_and_aggregate_equity_flow(
+                trades,
+                quotes,
+                timeframe=timeframe,
+                source_complete=trades_complete and quotes_complete,
+                min_quote_coverage=cfg.equity_flow_min_quote_coverage,
+                min_trades_per_bar=cfg.equity_flow_min_trades_per_bar,
+            )
+            flow.attrs["equity_flow_quality"] = quality.__dict__
+            _EQUITY_FLOW_CACHE[cache_key] = flow.copy()
+
+        if flow.empty:
+            result["flow_source"] = "alpaca_bars_only"
+            result["flow_granularity"] = "unavailable"
+            return result
+        columns = [
+            "buy_volume", "sell_volume", "classified_volume",
+            "quote_classified_volume", "trade_count", "flow_coverage",
+            "quote_coverage", "flow_source", "flow_granularity",
+        ]
+        overlap = [c for c in columns if c in flow.columns and c in result.columns]
+        result = result.drop(columns=overlap, errors="ignore").join(
+            flow[[c for c in columns if c in flow.columns]], how="left"
+        )
+        result["flow_source"] = result["flow_source"].fillna("alpaca_bars_only")
+        result["flow_granularity"] = result["flow_granularity"].fillna("unavailable")
+        result.attrs["equity_flow_quality"] = flow.attrs.get("equity_flow_quality", {})
+        return result
+
+    async def _get_alpaca_stock_bars(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+    ) -> pd.DataFrame:
+        cfg = get_settings()
+        if not cfg.alpaca_api_key.strip() or not cfg.alpaca_api_secret.strip():
+            raise ValueError("Alpaca Market Data credentials are not configured")
+        tf = canonical_timeframe(timeframe)
+        seconds = _FIXED_TIMEFRAME_SECONDS.get(tf, 86400)
+        end = datetime.now(timezone.utc)
+        # Calendar padding covers weekends and exchange holidays without
+        # pretending to implement an exchange calendar in the transport layer.
+        start = end - timedelta(seconds=max(limit * seconds * 3, 7 * 86400))
+        response = await get_shared_http_client().get(
+            f"{cfg.alpaca_data_url.rstrip('/')}/v2/stocks/"
+            f"{quote(symbol.upper(), safe='')}/bars",
+            headers=self._alpaca_headers(),
+            params={
+                "timeframe": self._alpaca_timeframe(tf),
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "limit": min(limit, 10_000),
+                "feed": cfg.alpaca_data_feed,
+                "adjustment": "all",
+                "sort": "desc",
+            },
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        rows = response.json().get("bars") or []
+        if not isinstance(rows, list) or not rows:
+            return pd.DataFrame()
+        frame = pd.DataFrame(rows).rename(columns={
+            "t": "timestamp", "o": "open", "h": "high", "l": "low",
+            "c": "close", "v": "volume", "n": "trade_count", "vw": "vwap",
+        })
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+        frame = frame.dropna(subset=["timestamp"]).set_index("timestamp").sort_index()
+        frame = frame[[
+            c for c in ("open", "high", "low", "close", "volume", "trade_count", "vwap")
+            if c in frame.columns
+        ]].tail(limit)
+        frame = await self._attach_alpaca_equity_flow(
+            frame, symbol=symbol, timeframe=tf
+        )
+        frame.attrs["data_provider"] = f"alpaca_{cfg.alpaca_data_feed}"
+        return frame
 
     async def get_crypto_history(
         self,
@@ -334,7 +517,15 @@ class MarketDataEngine:
                 # not a similarly-priced crypto token proxy.
                 df = await self._get_yfinance(symbol, tf, market_type, fetch_limit)
             elif market_type == "stock":
-                df = await self._get_yfinance(symbol, tf, market_type, fetch_limit)
+                if (
+                    exchange.lower() == "alpaca"
+                    and self.cfg.alpaca_api_key.strip()
+                    and self.cfg.alpaca_api_secret.strip()
+                ):
+                    df = await self._get_alpaca_stock_bars(symbol, tf, fetch_limit)
+                else:
+                    df = await self._get_yfinance(symbol, tf, market_type, fetch_limit)
+                    df.attrs["data_provider"] = "yfinance_watch_only"
         except Exception as e:
             logger.warning(f"[MarketData] Primary fetch failed for {symbol} ({e}), trying yfinance fallback...")
 
@@ -342,10 +533,29 @@ class MarketDataEngine:
         if df.empty or len(df) < 5:
             try:
                 df = await self._get_yfinance(symbol, tf, market_type, fetch_limit)
+                if market_type == "stock":
+                    df.attrs["data_provider"] = "yfinance_watch_only"
             except Exception as e:
                 logger.warning(f"[MarketData] Yahoo Finance fallback failed for {symbol}: {e}")
 
         if not df.empty and len(df) >= 5:
+            if market_type == "stock":
+                from app.services.market_session import us_equity_market_status
+
+                status = us_equity_market_status(
+                    pd.Timestamp(df.index[-1]).to_pydatetime(),
+                    tf,
+                )
+                status["data_provider"] = str(
+                    df.attrs.get("data_provider") or "unknown"
+                )
+                status["flow_source"] = str(
+                    df.get("flow_source", pd.Series(["unavailable"])).iloc[-1]
+                )
+                status["execution_mode"] = (
+                    "paper_auto" if self.cfg.equity_auto_trade_enabled else "shadow_manual"
+                )
+                df.attrs["market_data_status"] = status
             _OHLCV_CACHE[cache_key] = (now, df)
             return finalize(df)
 
@@ -506,7 +716,8 @@ class MarketDataEngine:
                         }
                         _TICKER_CACHE[cache_key] = (now, res)
                         return res
-                except Exception:
+                except Exception as exc:
+                    logger.debug(f"[MarketData] Binance ticker host {host} failed for {symbol}: {exc}")
                     continue
 
         # 3. Non-blocking ThreadPool Executor for Yahoo Finance with strict timeout
@@ -526,8 +737,8 @@ class MarketDataEngine:
                     day_h = float(getattr(fi, "day_high", None) or (last_p * 1.01 if last_p > 0 else 0.0))
                     day_l = float(getattr(fi, "day_low", None) or (last_p * 0.99 if last_p > 0 else 0.0))
                     day_v = float(getattr(fi, "last_volume", None) or 100000.0)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"[MarketData] YFinance fast_info unavailable for {symbol}: {exc}")
 
                 if last_p <= 0.0:
                     hist = t.history(period="2d", interval="5m")
@@ -693,8 +904,11 @@ class MarketDataEngine:
                             last_raw = float(df["close"].iloc[-1])
                             if last_raw > 0:
                                 usd_thb = float(ix_data["price"]) / last_raw
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        f"[MarketData] InnovestX THB calibration unavailable for {symbol}; "
+                        f"using USD/THB rate: {exc}"
+                    )
 
                 for col in ["open", "high", "low", "close"]:
                     df[col] = df[col] * usd_thb

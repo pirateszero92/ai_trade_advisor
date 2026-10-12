@@ -158,9 +158,17 @@ def test_strategy_treats_regime_as_risk_context_not_entry_gate():
     assert range_with_sweep.effective_policy["min_rr"] == pytest.approx(2.0)
 
 
-def test_strategy_keeps_short_setup_direction_when_gate_rejects():
+def test_strategy_preserves_tri_core_short_direction_in_regime_context():
     signal = _signal(
         direction="short",
+        tri_core_setup={
+            "actionable": True,
+            "direction": "short",
+            "grade": "A",
+            "smc_confirmed": True,
+            "cvd_confirmed": True,
+            "flow_confirmed": True,
+        },
         bias="bearish",
         htf_bias="bearish",
         in_discount=False,
@@ -182,10 +190,10 @@ def test_strategy_keeps_short_setup_direction_when_gate_rejects():
 
     result = StrategyEngine().evaluate(signal)
 
-    assert result.approved is False
-    assert result.direction == "wait"
+    assert result.approved is True
+    assert result.direction == "short"
     assert result.setup_direction == "short"
-    assert result.to_dict()["status"] == "wait"
+    assert result.to_dict()["status"] == "ready"
 
 
 def test_risk_budget_is_reduced_by_regime_multiplier():

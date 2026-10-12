@@ -34,7 +34,14 @@ from app.core.url_security import configured_host_set, validate_service_url
 from app.core.runtime_config import (
     get_runtime_trading_mode,
     load_runtime_config,
+    runtime_config_revision,
     update_runtime_config,
+)
+from app.core.config_contract import (
+    CONFIG_CONTRACT_VERSION,
+    LEGACY_RUNTIME_ALIASES,
+    RUNTIME_OWNERSHIP,
+    config_manifest,
 )
 from app.models.base import get_db
 from app.models.phase3 import BacktestRun, ReleaseGateEvaluation
@@ -169,6 +176,8 @@ class LLMConfigRequest(BaseModel):
     provider: Optional[Literal["local", "gemini", "openrouter"]] = "local"
     local_endpoint: Optional[str] = Field(default=None, max_length=500)
     local_model: Optional[str] = Field(default=None, max_length=200)
+    local_key: Optional[str] = Field(default=None, max_length=1000)
+    local_api_key: Optional[str] = Field(default=None, max_length=1000)
     gemini_key: Optional[str] = Field(default=None, max_length=1000)
     gemini_api_key: Optional[str] = Field(default=None, max_length=1000)
     gemini_model: Optional[str] = Field(default=None, max_length=200)
@@ -186,6 +195,9 @@ def _validate_llm_endpoint(endpoint: str) -> str:
     current_host = urlparse(cfg.local_llm_endpoint).hostname
     if current_host:
         allowed.add(current_host.lower())
+    ep_host = urlparse(endpoint).hostname
+    if ep_host and ("ollama.com" in ep_host.lower() or "openai.com" in ep_host.lower()):
+        allowed.add(ep_host.lower())
     return validate_service_url(endpoint, allowed_hosts=allowed, allow_private_ip=True)
 
 
@@ -267,6 +279,8 @@ async def get_llm_config(_key: str = Depends(verify_api_key)):
         "provider": getattr(_ai, "active_provider", "local"),
         "local_endpoint": cfg.local_llm_endpoint,
         "local_model": cfg.local_llm_model,
+        "local_key": _mask_secret(cfg.local_llm_api_key),
+        "local_configured": bool(cfg.local_llm_api_key),
         "gemini_key": _mask_secret(cfg.gemini_api_key),
         "gemini_configured": bool(cfg.gemini_api_key),
         "gemini_model": cfg.gemini_model,
@@ -297,6 +311,14 @@ async def update_llm_config(req: LLMConfigRequest, _key: str = Depends(verify_ap
     if req.local_model is not None:
         update_runtime_setting("local_llm_model", req.local_model.strip())
     
+    loc_k = req.local_api_key if req.local_api_key is not None else req.local_key
+    if loc_k is not None:
+        clean_loc = loc_k.strip()
+        if clean_loc and "*" not in clean_loc:
+            update_runtime_setting("local_llm_api_key", clean_loc)
+        elif clean_loc == "":
+            update_runtime_setting("local_llm_api_key", "")
+
     gem_k = req.gemini_api_key if req.gemini_api_key is not None else req.gemini_key
     if gem_k is not None:
         clean_gem = gem_k.strip()
@@ -329,7 +351,7 @@ async def update_llm_config(req: LLMConfigRequest, _key: str = Depends(verify_ap
             "local_model": cfg.local_llm_model,
             "gemini_model": cfg.gemini_model,
             "openrouter_model": cfg.openrouter_model,
-        }, removals=("gemini_key", "gemini_api_key", "openrouter_key", "openrouter_api_key"))
+        }, removals=("local_key", "local_api_key", "gemini_key", "gemini_api_key", "openrouter_key", "openrouter_api_key"))
     except Exception as e:
         logger.error(f"Failed to save runtime settings: {e}")
         raise HTTPException(status_code=500, detail="Unable to persist LLM configuration") from e
@@ -448,7 +470,7 @@ async def test_prompt(_key: str = Depends(verify_api_key)):
         "market_structure": "Bullish BOS in Discount zone with Bullish Order Block",
     }
     messages = [
-        {"role": "user", "content": "ช่วยวิเคราะห์สัญญาณ BTC/USDT (LONG) Confluence 80/100 สั้นๆ ให้หน่อย"}
+        {"role": "user", "content": "Ã Â¸Å Ã Â¹Ë†Ã Â¸Â§Ã Â¸Â¢Ã Â¸Â§Ã Â¸Â´Ã Â¹â‚¬Ã Â¸â€žÃ Â¸Â£Ã Â¸Â²Ã Â¸Â°Ã Â¸Â«Ã Â¹Å’Ã Â¸ÂªÃ Â¸Â±Ã Â¸ÂÃ Â¸ÂÃ Â¸Â²Ã Â¸â€œ BTC/USDT (LONG) Confluence 80/100 Ã Â¸ÂªÃ Â¸Â±Ã Â¹â€°Ã Â¸â„¢Ã Â¹â€  Ã Â¹Æ’Ã Â¸Â«Ã Â¹â€°Ã Â¸Â«Ã Â¸â„¢Ã Â¹Ë†Ã Â¸Â­Ã Â¸Â¢"}
     ]
     resp = await _ai.chat(messages, context=sample_signal)
     return {
@@ -661,7 +683,7 @@ async def test_notifications(
                 url = f"https://api.telegram.org/bot{req.telegram_bot_token}/sendMessage"
                 payload = {
                     "chat_id": req.telegram_chat_id,
-                    "text": "🔔 Apex AI Trade Advisor: Test Notification Alert Successful! ✅",
+                    "text": "Ã°Å¸â€â€ Apex AI Trade Advisor: Test Notification Alert Successful! Ã¢Å“â€¦",
                 }
                 resp = await client.post(url, json=payload)
                 results["telegram"] = resp.status_code == 200
@@ -674,7 +696,7 @@ async def test_notifications(
                 resp = await client.post(
                     "https://notify-api.line.me/api/notify",
                     headers={"Authorization": f"Bearer {req.line_notify_token}"},
-                    data={"message": "\nApex AI Trade Advisor: Test Notification Alert Successful! ✅"},
+                    data={"message": "\nApex AI Trade Advisor: Test Notification Alert Successful! Ã¢Å“â€¦"},
                 )
                 results["line"] = resp.status_code == 200
         except Exception:
@@ -825,8 +847,8 @@ async def get_assets_catalog(_key: str = Depends(verify_api_key)):
             pairs = await client.get_formatted_symbols()
             if pairs:
                 innovestx_symbols = [p["symbol"] for p in pairs]
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"[Settings] InnovestX asset catalog unavailable; using fallback catalog: {exc}")
         
     if not innovestx_symbols:
         innovestx_symbols = [
@@ -1283,7 +1305,7 @@ async def test_broker_connection(req: BrokerTestRequest, _key: str = Depends(ver
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get("https://api.binance.com/api/v3/ping")
                 if resp.status_code == 200:
-                    return {"status": "ok", "message": "Connected to Binance API successfully (Ping OK) ✅"}
+                    return {"status": "ok", "message": "Connected to Binance API successfully (Ping OK) Ã¢Å“â€¦"}
                 return {"status": "error", "message": f"Binance Ping failed: {resp.status_code}"}
         except Exception as e:
             return {"status": "error", "message": f"Binance Connection failed: {e}"}
@@ -1293,7 +1315,7 @@ async def test_broker_connection(req: BrokerTestRequest, _key: str = Depends(ver
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get("https://api.bybit.com/v5/market/time")
                 if resp.status_code == 200:
-                    return {"status": "ok", "message": "Connected to Bybit API successfully ✅"}
+                    return {"status": "ok", "message": "Connected to Bybit API successfully Ã¢Å“â€¦"}
                 return {"status": "error", "message": f"Bybit check failed: {resp.status_code}"}
         except Exception as e:
             return {"status": "error", "message": f"Bybit Connection failed: {e}"}
@@ -1321,12 +1343,12 @@ async def test_broker_connection(req: BrokerTestRequest, _key: str = Depends(ver
                     buying_power = acc.get("buying_power", "0")
                     return {
                         "status": "ok",
-                        "message": f"Connected to Alpaca! Account #{acc_no} (Status: {status}, Buying Power: ${float(buying_power):,.2f}) ✅",
+                        "message": f"Connected to Alpaca! Account #{acc_no} (Status: {status}, Buying Power: ${float(buying_power):,.2f}) Ã¢Å“â€¦",
                     }
                 elif resp.status_code == 401:
                     return {
                         "status": "error",
-                        "message": "Alpaca 401 Unauthorized: Key หรือ Secret ไม่ถูกต้อง (ระวังการ Copy ไม่ครบตัวอักษร หรือกด Generate Key ใหม่)",
+                        "message": "Alpaca 401 Unauthorized: Key Ã Â¸Â«Ã Â¸Â£Ã Â¸Â·Ã Â¸Â­ Secret Ã Â¹â€žÃ Â¸Â¡Ã Â¹Ë†Ã Â¸â€“Ã Â¸Â¹Ã Â¸ÂÃ Â¸â€¢Ã Â¹â€°Ã Â¸Â­Ã Â¸â€¡ (Ã Â¸Â£Ã Â¸Â°Ã Â¸Â§Ã Â¸Â±Ã Â¸â€¡Ã Â¸ÂÃ Â¸Â²Ã Â¸Â£ Copy Ã Â¹â€žÃ Â¸Â¡Ã Â¹Ë†Ã Â¸â€žÃ Â¸Â£Ã Â¸Å¡Ã Â¸â€¢Ã Â¸Â±Ã Â¸Â§Ã Â¸Â­Ã Â¸Â±Ã Â¸ÂÃ Â¸Â©Ã Â¸Â£ Ã Â¸Â«Ã Â¸Â£Ã Â¸Â·Ã Â¸Â­Ã Â¸ÂÃ Â¸â€ Generate Key Ã Â¹Æ’Ã Â¸Â«Ã Â¸Â¡Ã Â¹Ë†)",
                     }
                 return {"status": "error", "message": f"Alpaca auth failed (HTTP {resp.status_code})"}
         except Exception as e:
@@ -1339,7 +1361,7 @@ async def test_broker_connection(req: BrokerTestRequest, _key: str = Depends(ver
             return {"status": "error", "message": "Please enter MT5 Account Login ID and Server Name"}
         return {
             "status": "ok",
-            "message": f"MT5 Credentials validated for Account #{login} on Server '{server}'. (Bridge ready for Terminal hook) ✅",
+            "message": f"MT5 Credentials validated for Account #{login} on Server '{server}'. (Bridge ready for Terminal hook) Ã¢Å“â€¦",
         }
 
     return {"status": "error", "message": f"Unknown broker type: {req.broker_type}"}
@@ -1386,6 +1408,41 @@ class RiskConfigRequest(BaseModel):
     auto_trade_entry_type: Optional[Literal["momentum_market", "limit_pullback"]] = None
     auto_trade_cooldown_seconds: Optional[int] = Field(default=None, ge=30, le=3600)
     mtf_hierarchy_required: Optional[bool] = None
+    btc_anchor_filter_enabled: Optional[bool] = None
+    btc_anchor_dump_threshold_pct: Optional[float] = Field(default=None, ge=0.2, le=5.0)
+    cluster_loss_cooldown_enabled: Optional[bool] = None
+    cluster_loss_cooldown_minutes: Optional[int] = Field(default=None, ge=5, le=240)
+
+
+def _runtime_contract_metadata(runtime: dict[str, Any]) -> dict[str, Any]:
+    from app.services.evidence import fingerprint
+    return {
+        "contract_version": CONFIG_CONTRACT_VERSION,
+        "runtime_revision": runtime_config_revision(),
+        "runtime_hash": fingerprint(runtime),
+        "field_ownership": {
+            key: RUNTIME_OWNERSHIP.get(key, "unclassified")
+            for key in runtime
+        },
+        "legacy_aliases": LEGACY_RUNTIME_ALIASES,
+    }
+
+
+@router.get("/config/contract")
+async def get_config_contract(_key: str = Depends(verify_api_key)):
+    """Return auditable config ownership/version/hash without exposing secrets."""
+    from app.core.strategy_config_store import read_strategy_config
+    from app.engines.strategy_engine import STRATEGY_FILE
+
+    runtime = load_runtime_config()
+    strategy = read_strategy_config(STRATEGY_FILE)
+    if not isinstance(strategy, dict):
+        strategy = {}
+    return config_manifest(
+        strategy=strategy,
+        runtime=runtime,
+        runtime_revision=runtime_config_revision(),
+    )
 
 
 @router.get("/risk/config")
@@ -1402,6 +1459,10 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
     auto_trade_entry_type = "momentum_market"
     auto_trade_cooldown_seconds = 300
     mtf_hierarchy_required = False
+    btc_anchor_filter_enabled = bool(cfg.btc_anchor_filter_enabled)
+    btc_anchor_dump_threshold_pct = float(cfg.btc_anchor_dump_threshold_pct)
+    cluster_loss_cooldown_enabled = bool(cfg.cluster_loss_cooldown_enabled)
+    cluster_loss_cooldown_minutes = int(cfg.cluster_loss_cooldown_minutes)
     try:
         data = load_runtime_config()
         entry_mode = data.get("entry_mode", "limit")
@@ -1414,6 +1475,18 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
         auto_trade_entry_type = str(data.get("auto_trade_entry_type", "momentum_market"))
         auto_trade_cooldown_seconds = int(data.get("auto_trade_cooldown_seconds", 300))
         mtf_hierarchy_required = False
+        btc_anchor_filter_enabled = bool(data.get(
+            "btc_anchor_filter_enabled", cfg.btc_anchor_filter_enabled
+        ))
+        btc_anchor_dump_threshold_pct = float(data.get(
+            "btc_anchor_dump_threshold_pct", cfg.btc_anchor_dump_threshold_pct
+        ))
+        cluster_loss_cooldown_enabled = bool(data.get(
+            "cluster_loss_cooldown_enabled", cfg.cluster_loss_cooldown_enabled
+        ))
+        cluster_loss_cooldown_minutes = int(data.get(
+            "cluster_loss_cooldown_minutes", cfg.cluster_loss_cooldown_minutes
+        ))
     except Exception as exc:
         logger.error(f"Failed to load risk config: {exc}")
         raise HTTPException(status_code=500, detail="Unable to load risk configuration") from exc
@@ -1426,12 +1499,19 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
         "max_daily_loss": cfg.max_daily_loss,
         "max_open_positions": cfg.max_open_positions,
         "target_rr": target_rr,
+        "minimum_executable_rr": target_rr,
         "default_sl_pct": default_sl_pct,
+        "max_stop_distance_pct": default_sl_pct,
         "auto_trade_enabled": auto_trade_enabled,
         "auto_trade_min_grade": auto_trade_min_grade,
         "auto_trade_entry_type": auto_trade_entry_type,
         "auto_trade_cooldown_seconds": auto_trade_cooldown_seconds,
         "mtf_hierarchy_required": mtf_hierarchy_required,
+        "btc_anchor_filter_enabled": btc_anchor_filter_enabled,
+        "btc_anchor_dump_threshold_pct": btc_anchor_dump_threshold_pct,
+        "cluster_loss_cooldown_enabled": cluster_loss_cooldown_enabled,
+        "cluster_loss_cooldown_minutes": cluster_loss_cooldown_minutes,
+        "config_contract": _runtime_contract_metadata(data),
     }
 
 
@@ -1514,6 +1594,14 @@ async def update_risk_config(
             updates["auto_trade_entry_type"] = req.auto_trade_entry_type
         if req.auto_trade_cooldown_seconds is not None:
             updates["auto_trade_cooldown_seconds"] = req.auto_trade_cooldown_seconds
+        if req.btc_anchor_filter_enabled is not None:
+            updates["btc_anchor_filter_enabled"] = req.btc_anchor_filter_enabled
+        if req.btc_anchor_dump_threshold_pct is not None:
+            updates["btc_anchor_dump_threshold_pct"] = req.btc_anchor_dump_threshold_pct
+        if req.cluster_loss_cooldown_enabled is not None:
+            updates["cluster_loss_cooldown_enabled"] = req.cluster_loss_cooldown_enabled
+        if req.cluster_loss_cooldown_minutes is not None:
+            updates["cluster_loss_cooldown_minutes"] = req.cluster_loss_cooldown_minutes
         # MTF is permanently informational-only.
         updates["mtf_hierarchy_required"] = False
         saved = update_runtime_config(updates)
@@ -1534,22 +1622,50 @@ async def update_risk_config(
             "max_daily_loss": cfg.max_daily_loss,
             "max_open_positions": cfg.max_open_positions,
             "target_rr": saved.get("target_rr", 2.0),
+            "minimum_executable_rr": saved.get("target_rr", 2.0),
             "default_sl_pct": saved.get("default_sl_pct", 1.0),
+            "max_stop_distance_pct": saved.get("default_sl_pct", 1.0),
             "auto_trade_enabled": saved.get("auto_trade_enabled", False),
             "auto_trade_min_grade": saved.get("auto_trade_min_grade", "A"),
             "auto_trade_entry_type": saved.get("auto_trade_entry_type", "momentum_market"),
             "auto_trade_cooldown_seconds": saved.get("auto_trade_cooldown_seconds", 300),
             "mtf_hierarchy_required": False,
+            "btc_anchor_filter_enabled": saved.get(
+                "btc_anchor_filter_enabled", cfg.btc_anchor_filter_enabled
+            ),
+            "btc_anchor_dump_threshold_pct": saved.get(
+                "btc_anchor_dump_threshold_pct", cfg.btc_anchor_dump_threshold_pct
+            ),
+            "cluster_loss_cooldown_enabled": saved.get(
+                "cluster_loss_cooldown_enabled", cfg.cluster_loss_cooldown_enabled
+            ),
+            "cluster_loss_cooldown_minutes": saved.get(
+                "cluster_loss_cooldown_minutes", cfg.cluster_loss_cooldown_minutes
+            ),
+            "config_contract": _runtime_contract_metadata(saved),
         },
     }
 
 
 class RuntimeSettingsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    auto_sl_tp: Optional[bool] = None
+    auto_invalidation: Optional[bool] = None
     auto_trade_enabled: Optional[bool] = None
     auto_trade_min_grade: Optional[Literal["S", "A"]] = None
     auto_trade_entry_type: Optional[Literal["momentum_market", "limit_pullback"]] = None
     auto_trade_cooldown_seconds: Optional[int] = Field(default=None, ge=30, le=3600)
+
+
+@router.get("/runtime")
+async def get_runtime_settings(_key: str = Depends(verify_api_key)):
+    """Return active runtime configuration for Auto-Pilot, risk flags, and contract."""
+    current = load_runtime_config()
+    return {
+        "status": "ok",
+        "config": current,
+        "config_contract": _runtime_contract_metadata(current),
+    }
 
 
 @router.post("/runtime")
@@ -1559,6 +1675,10 @@ async def update_runtime_settings(
 ):
     """Fast-path update for runtime settings (e.g. quick toggle from UI)."""
     updates = {}
+    if req.auto_sl_tp is not None:
+        updates["auto_sl_tp"] = req.auto_sl_tp
+    if req.auto_invalidation is not None:
+        updates["auto_invalidation"] = req.auto_invalidation
     if req.auto_trade_enabled is not None:
         updates["auto_trade_enabled"] = req.auto_trade_enabled
     if req.auto_trade_min_grade is not None:
@@ -1572,6 +1692,14 @@ async def update_runtime_settings(
         saved = update_runtime_config(updates)
         from app.services.event_trigger import invalidate_runtime_settings_cache
         invalidate_runtime_settings_cache()
-        return {"status": "ok", "config": saved}
-    return {"status": "ok"}
+        return {
+            "status": "ok",
+            "config": saved,
+            "config_contract": _runtime_contract_metadata(saved),
+        }
+    current = load_runtime_config()
+    return {
+        "status": "ok",
+        "config_contract": _runtime_contract_metadata(current),
+    }
 
