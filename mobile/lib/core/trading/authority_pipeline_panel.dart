@@ -49,7 +49,12 @@ class AuthorityPipelinePanel extends StatelessWidget {
                     color: Colors.lightBlueAccent,
                     fontWeight: FontWeight.bold)),
           ]),
-          if (view.lifecycleReason.isNotEmpty && !compact)
+          if (view.lifecycleReason.isNotEmpty &&
+              !compact &&
+              !view.stages.any((s) =>
+                  s.reason.trim() == view.lifecycleReason.trim() ||
+                  (s.reason.isNotEmpty &&
+                      view.lifecycleReason.contains(s.reason))))
             Padding(
               padding: const EdgeInsets.only(top: 3),
               child: Text(view.lifecycleReason,
