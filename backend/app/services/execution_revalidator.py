@@ -200,7 +200,35 @@ class ExecutionRevalidator:
         order_type = str(setup.get("order_type", "none"))
         result.entry_policy = entry_policy
         result.limit_zone_id = str(setup.get("limit_zone_id", ""))
-        if entry_policy == "market_eligible" and order_type == "market":
+
+        # Respect user configured entry_mode ("limit" vs "market").
+        # If entry_mode is "limit", do not execute as immediate market chase;
+        # require a limit entry at structural entry or wait for limit retest.
+        configured_entry_mode = getattr(analysis, "entry_mode", "")
+        if configured_entry_mode == "limit" and order_type == "market":
+            zone_id = result.limit_zone_id
+            if self._active_limit_zone(signal, zone_id):
+                executable_entry = structural_entry
+                order_type = "limit"
+                entry_policy = "limit_retest_only"
+                result.order_type = order_type
+                result.entry_policy = entry_policy
+                result.auto_armed_limit = True
+                result.reasons.append(
+                    f"Entry mode is 'limit'; armed causal limit {zone_id} at structural entry {structural_entry}"
+                )
+            else:
+                # If no causal limit zone is attached to this market setup, arm limit at structural entry
+                executable_entry = structural_entry
+                order_type = "limit"
+                entry_policy = "limit_retest_only"
+                result.order_type = order_type
+                result.entry_policy = entry_policy
+                result.auto_armed_limit = True
+                result.reasons.append(
+                    f"Entry mode is 'limit'; armed limit at structural entry {structural_entry}"
+                )
+        elif entry_policy == "market_eligible" and order_type == "market":
             executable_entry = ask if direction == "long" else bid
             atr = self._atr(analysis.frame)
             if atr <= 0:

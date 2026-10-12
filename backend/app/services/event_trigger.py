@@ -1647,6 +1647,11 @@ class MarketMonitor:
                 if "default_sl_pct" in r_cfg and float(r_cfg["default_sl_pct"]) > 0
                 else None
             ),
+            min_stop_distance_pct=(
+                float(r_cfg["min_sl_pct"])
+                if "min_sl_pct" in r_cfg and float(r_cfg["min_sl_pct"]) > 0
+                else (float(r_cfg["default_sl_pct"]) if "default_sl_pct" in r_cfg and float(r_cfg["default_sl_pct"]) > 0 else 1.5)
+            ),
             atr_pct=float(atr_pct) if atr_pct is not None else None,
         )
         observability.inc(

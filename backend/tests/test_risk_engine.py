@@ -512,3 +512,36 @@ def test_ai_conflict_or_unavailable_does_not_rescale_risk_engine_math():
     assert len({r.position_size for r in results}) == 1
     assert len({r.risk_pct for r in results}) == 1
     assert len({r.risk_amount for r in results}) == 1
+
+
+def test_risk_engine_enforces_configurable_min_stop_distance_pct():
+    """Ensure trades with SL distance below configured min_stop_distance_pct are rejected."""
+    engine = RiskEngine()
+    signal = SMCSignal(
+        symbol="NEAR/USDT",
+        timeframe="15m",
+        direction="long",
+        entry=5.6447,
+        stop_loss=5.5810,  # 1.13% distance
+        take_profit=5.8060,
+        risk_reward=2.5,
+    )
+
+    # When min_stop_distance_pct is 1.5%, a 1.13% stop should be rejected
+    res = engine.evaluate(
+        signal=signal,
+        account_balance=10000.0,
+        min_stop_distance_pct=1.5,
+    )
+    assert res.approved is False
+    assert "SL is too tight" in (res.rejection_reason or "")
+    assert "min 1.50%" in (res.rejection_reason or "")
+
+    # When min_stop_distance_pct is 1.0%, a 1.13% stop passes
+    res_ok = engine.evaluate(
+        signal=signal,
+        account_balance=10000.0,
+        min_stop_distance_pct=1.0,
+    )
+    assert res_ok.approved is True
+

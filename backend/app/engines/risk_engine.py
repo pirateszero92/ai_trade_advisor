@@ -218,6 +218,7 @@ class RiskEngine:
         risk_per_trade_pct: float | None = None,
         minimum_rr: float | None = None,
         max_stop_distance_pct: float | None = None,
+        min_stop_distance_pct: float | None = None,
         atr_pct: float | None = None,
     ) -> RiskAssessment:
         """
@@ -387,11 +388,18 @@ class RiskEngine:
             )
             return assessment
 
-        if sl_pct < self.SL_MIN_PCT:
+        effective_min_stop_pct = self.SL_MIN_PCT
+        if min_stop_distance_pct is not None:
+            if not math.isfinite(float(min_stop_distance_pct)) or float(min_stop_distance_pct) <= 0:
+                assessment.rejection_reason = "Minimum stop distance must be positive"
+                return assessment
+            effective_min_stop_pct = max(effective_min_stop_pct, float(min_stop_distance_pct) / 100.0)
+
+        if sl_pct < effective_min_stop_pct:
             assessment.sl_valid = False
             assessment.approved = False
             assessment.rejection_reason = (
-                f"SL is too tight ({sl_pct*100:.3f}% of entry; min {self.SL_MIN_PCT*100:.2f}%); "
+                f"SL is too tight ({sl_pct*100:.3f}% of entry; min {effective_min_stop_pct*100:.2f}%); "
                 "market noise and execution costs exceed structural risk margin"
             )
             return assessment

@@ -447,3 +447,26 @@ def test_execution_intents_are_classified_correctly():
     assert res_wide.intent == ExecutionIntent.WAIT
     assert res_wide.reason_code == "SPREAD_TOO_WIDE"
 
+
+def test_execution_revalidator_respects_limit_entry_mode():
+    """When analysis.entry_mode is 'limit', market setups must convert to limit orders."""
+    analysis = _analysis(causal_market_zone=True)
+    analysis.entry_mode = "limit"
+
+    result = ExecutionRevalidator().validate(
+        analysis=analysis,
+        decision_snapshot_id="snap-1",
+        tri_core_event_id="event-1",
+        quote=_quote(bid=100.01, ask=100.02),
+        direction="long",
+        minimum_executable_rr=2.0,
+        instrument_rules=Rules(),
+    )
+
+    assert result.passed is True
+    assert result.order_type == "limit"
+    assert result.entry_policy == "limit_retest_only"
+    assert result.auto_armed_limit is True
+    assert result.intent == ExecutionIntent.PLACE_LIMIT
+
+
