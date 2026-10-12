@@ -9,7 +9,6 @@ services:
       # The bundled Nginx listener is HTTP-only and is intentionally local.
       # Put a TLS reverse proxy in front before exposing this deployment.
       - "3000:80"
-      - "8080:80"
     volumes:
       - ./web_dist:/usr/share/nginx/html:ro
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
@@ -58,7 +57,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env file}
       POSTGRES_DB: ${POSTGRES_DB:-ai_trade_db}
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
