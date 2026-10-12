@@ -692,8 +692,12 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
               ? _buildErrorBanner()
               : RefreshIndicator(
                   onRefresh: () async {
-                    _fetchTrades();
-                    _fetchAccountInfo();
+                    await Future.wait([
+                      _fetchTrades(),
+                      _fetchAccountInfo(),
+                      _fetchScorecard(),
+                    ]);
+                    AppWebSocketClient.instance.reconnect();
                   },
                   color: AppColors.bullish,
                   child: ListView(

@@ -937,34 +937,76 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                 ? const Center(
                     child: CircularProgressIndicator(color: AppColors.bullish))
                 : _errorMessage != null && _signals.isEmpty
-                    ? _buildErrorBanner()
+                    ? RefreshIndicator(
+                        color: AppColors.bullish,
+                        onRefresh: () async {
+                          await Future.wait([
+                            _fetchSignals(),
+                            _fetchPositions(),
+                          ]);
+                          AppWebSocketClient.instance.reconnect();
+                        },
+                        child: SingleChildScrollView(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          child: SizedBox(
+                            height: MediaQuery.of(context).size.height * 0.65,
+                            child: _buildErrorBanner(),
+                          ),
+                        ),
+                      )
                     : filtered.isEmpty
-                        ? Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.radar,
-                                    size: 48, color: AppColors.textMuted),
-                                const SizedBox(height: 12),
-                                const Text(
-                                    'No SMC setups detected in current regime.',
-                                    style: TextStyle(color: Colors.white70)),
-                                const SizedBox(height: 8),
-                                const Text(
-                                    'Scan จะตรวจเฉพาะสินทรัพย์ใน Watchlist ที่หน้า Settings',
-                                    style: TextStyle(
-                                        fontSize: 12,
-                                        color: AppColors.textMuted)),
-                                const SizedBox(height: 16),
-                                ElevatedButton.icon(
-                                  onPressed: _triggerScan,
-                                  icon: const Icon(Icons.refresh),
-                                  label: const Text('Scan Markets'),
+                        ? RefreshIndicator(
+                            color: AppColors.bullish,
+                            onRefresh: () async {
+                              await Future.wait([
+                                _fetchSignals(),
+                                _fetchPositions(),
+                              ]);
+                              AppWebSocketClient.instance.reconnect();
+                            },
+                            child: SingleChildScrollView(
+                              physics: const AlwaysScrollableScrollPhysics(),
+                              child: SizedBox(
+                                height: MediaQuery.of(context).size.height * 0.65,
+                                child: Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(Icons.radar,
+                                          size: 48, color: AppColors.textMuted),
+                                      const SizedBox(height: 12),
+                                      const Text(
+                                          'No SMC setups detected in current regime.',
+                                          style: TextStyle(color: Colors.white70)),
+                                      const SizedBox(height: 8),
+                                      const Text(
+                                          'Scan จะตรวจเฉพาะสินทรัพย์ใน Watchlist ที่หน้า Settings',
+                                          style: TextStyle(
+                                              fontSize: 12,
+                                              color: AppColors.textMuted)),
+                                      const SizedBox(height: 16),
+                                      ElevatedButton.icon(
+                                        onPressed: _triggerScan,
+                                        icon: const Icon(Icons.refresh),
+                                        label: const Text('Scan Markets'),
+                                      ),
+                                    ],
+                                  ),
                                 ),
-                              ],
+                              ),
                             ),
                           )
-                        : ListView.builder(
+                        : RefreshIndicator(
+                            color: AppColors.bullish,
+                            onRefresh: () async {
+                              await Future.wait([
+                                _fetchSignals(),
+                                _fetchPositions(),
+                              ]);
+                              AppWebSocketClient.instance.reconnect();
+                            },
+                            child: ListView.builder(
+                              physics: const AlwaysScrollableScrollPhysics(),
                             padding: const EdgeInsets.fromLTRB(12, 10, 12, 90),
                             itemCount: filtered.length,
                             itemBuilder: (ctx, i) {
@@ -1121,6 +1163,7 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
                               );
                             },
                           ),
+                  ),
           ),
         ],
       ),
