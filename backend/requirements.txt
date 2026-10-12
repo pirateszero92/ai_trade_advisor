@@ -16,8 +16,8 @@ redis[asyncio]>=5.0.0
 celery[redis]>=5.4.0
 
 # Data Analysis (SMC Engine)
-numpy>=2.0.0
-pandas>=2.2.0
+numpy>=1.26.0,<2.0.0
+pandas>=2.2.0,<3.0.0
 Pillow>=12.3.0
 
 # Market Data
