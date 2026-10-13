@@ -1026,6 +1026,12 @@ class MarketMonitor:
             logger.warning(f"[Auto-Pilot] Stale candidate blocked for {symbol}")
             return None
         setup["candidate_lifecycle_state"] = lifecycle_record.state.value
+        if lifecycle_record.state in TERMINAL_STATES:
+            logger.debug(
+                f"[Auto-Pilot] Candidate {symbol} already in terminal state "
+                f"{lifecycle_record.state.value} for event {event_id}"
+            )
+            return None
 
         canonical_analysis = execution_analyses.get_by_snapshot_id(decision_snapshot_id)
         if canonical_analysis is None:
@@ -1650,7 +1656,7 @@ class MarketMonitor:
             min_stop_distance_pct=(
                 float(r_cfg["min_sl_pct"])
                 if "min_sl_pct" in r_cfg and float(r_cfg["min_sl_pct"]) > 0
-                else (float(r_cfg["default_sl_pct"]) if "default_sl_pct" in r_cfg and float(r_cfg["default_sl_pct"]) > 0 else 1.5)
+                else None
             ),
             atr_pct=float(atr_pct) if atr_pct is not None else None,
         )
@@ -1939,7 +1945,15 @@ class MarketMonitor:
                     new_state=CandidateState.CLOSED,
                     reason_code=f"OMS_{oms_status.upper()}",
                 )
-            elif oms_status not in {"pending", "new", "accepted"}:
+            elif oms_status in {"pending", "new", "accepted"}:
+                await candidate_lifecycle.transition(
+                    symbol=symbol,
+                    snapshot_id=decision_snapshot_id,
+                    event_id=event_id,
+                    new_state=CandidateState.LIMIT_ARMED,
+                    reason_code="OMS_LIMIT_ARMED",
+                )
+            else:
                 await candidate_lifecycle.transition(
                     symbol=symbol,
                     snapshot_id=decision_snapshot_id,
