@@ -653,11 +653,13 @@ class AIEngine:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4))
     async def _call_local(self, messages: list[dict]) -> str:
+        runtime = load_runtime_config()
+        local_key = str(runtime.get("local_api_key") or self.cfg.local_llm_api_key or "").strip()
         return await self._call_local_custom(
             messages,
             self.local_endpoint(),
             self.provider_model("local"),
-            api_key=self.cfg.local_llm_api_key,
+            api_key=local_key,
         )
 
     @staticmethod
@@ -666,8 +668,8 @@ class AIEngine:
 
         Ollama also exposes an OpenAI-compatible ``/v1`` API. Users therefore
         commonly save ``http://host:11434/v1`` in Settings. Port 11434 or
-        domain names containing "ollama" identify Ollama and should use its native
-        endpoint /api/chat.
+        local domain names containing "ollama" identify Ollama and should use its native
+        endpoint /api/chat. Note that cloud endpoints like ollama.com provide OpenAI-compatible /v1 only.
         """
         parsed = urlparse(endpoint.rstrip("/"))
         path = parsed.path.rstrip("/")
@@ -677,7 +679,7 @@ class AIEngine:
             return endpoint.rstrip("/"), False
 
         hostname = (parsed.hostname or "").lower()
-        if parsed.port == 11434 or "ollama" in hostname:
+        if (parsed.port == 11434 or "ollama" in hostname) and "ollama.com" not in hostname:
             if path.endswith("/v1"):
                 path = path[:-3]
             base = urlunparse(
@@ -686,6 +688,10 @@ class AIEngine:
             return f"{base}/api/chat", True
 
         host_url = endpoint.rstrip("/")
+        if "ollama.com" in hostname:
+            if not host_url.endswith("/v1"):
+                host_url = f"{host_url}/v1"
+            return f"{host_url}/chat/completions", False
         if not host_url.endswith("/v1") and parsed.port == 1234:
             host_url = f"{host_url}/v1"
         return f"{host_url}/chat/completions", False
@@ -717,7 +723,9 @@ class AIEngine:
 
         target_model = model.strip() if model else ""
         if not target_model:
-            target_model = "gpt-oss:120b-cloud" if is_ollama_native else "google/gemma-4-12b-qat"
+            target_model = "gpt-oss:120b" if "ollama.com" in str(host_url).lower() else ("gpt-oss:120b-cloud" if is_ollama_native else "google/gemma-4-12b-qat")
+        if "ollama.com" in str(host_url).lower() and target_model.endswith("-cloud"):
+            target_model = target_model[:-6]
 
         if is_ollama_native:
             payload = {
