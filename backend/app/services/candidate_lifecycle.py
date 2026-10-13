@@ -37,7 +37,6 @@ class CandidateState(StrEnum):
 
 TERMINAL_STATES = {
     CandidateState.AI_CONFLICT,
-    CandidateState.AI_UNAVAILABLE,
     CandidateState.EXECUTION_REJECTED,
     CandidateState.RISK_REJECTED,
     CandidateState.CLOSED,
@@ -85,6 +84,14 @@ ALLOWED_TRANSITIONS: dict[CandidateState, set[CandidateState]] = {
     },
     CandidateState.AI_CAUTION: {
         CandidateState.EXECUTION_VALIDATING,
+        CandidateState.INVALIDATED,
+        CandidateState.EXPIRED,
+    },
+    CandidateState.AI_UNAVAILABLE: {
+        CandidateState.AI_REVIEW_PENDING,
+        CandidateState.AI_COHERENT,
+        CandidateState.AI_CAUTION,
+        CandidateState.AI_CONFLICT,
         CandidateState.INVALIDATED,
         CandidateState.EXPIRED,
     },

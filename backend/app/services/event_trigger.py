@@ -1027,12 +1027,6 @@ class MarketMonitor:
             logger.warning(f"[Auto-Pilot] Stale candidate blocked for {symbol}")
             return None
         setup["candidate_lifecycle_state"] = lifecycle_record.state.value
-        if lifecycle_record.state in TERMINAL_STATES:
-            logger.debug(
-                f"[Auto-Pilot] Candidate {symbol} already in terminal state "
-                f"{lifecycle_record.state.value} for event {event_id}"
-            )
-            return None
 
         canonical_analysis = execution_analyses.get_by_snapshot_id(decision_snapshot_id)
         if canonical_analysis is None:
