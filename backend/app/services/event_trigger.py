@@ -24,6 +24,7 @@ from app.api.ws import broadcast
 from app.services.candidate_lifecycle import (
     CandidateLifecycleError,
     CandidateState,
+    TERMINAL_STATES,
     candidate_lifecycle,
 )
 from app.services.decision_trace import decision_trace
