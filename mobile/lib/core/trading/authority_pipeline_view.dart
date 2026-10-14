@@ -145,10 +145,7 @@ class AuthorityPipelineView {
       ai: AuthorityStageView(
         name: 'AI Review',
         status: aiDisplayStatus,
-        reason: (ai['reason'] ??
-                ai['failure_type'] ??
-                (conflicts.isNotEmpty ? conflicts.join(' • ') : ''))
-            .toString(),
+        reason: (ai['failure_type'] ?? '').toString(),
         primaryMetric: ai['risk_score'] != null
             ? 'Score ${ai['risk_score']}/100'
             : '',

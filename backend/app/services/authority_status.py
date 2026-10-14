@@ -212,7 +212,7 @@ async def build_authority_status(
         if lifecycle_state in {"UNKNOWN", "REGISTERED", "WAIT", "WAITING_SETUP", "DETECTED", "INVALIDATED"}:
             lifecycle_state = f"AI_{ai_verdict.upper()}"
             lifecycle_reason_code = f"AI_{ai_verdict.upper()}"
-            lifecycle_reason = str(ai.get("reason") or f"AI marked setup as {ai_verdict.upper()}")
+            lifecycle_reason = f"AI marked setup as {ai_verdict.upper()}"
     elif not lifecycle and not actionable:
         if any("session is closed" in str(r).lower() for r in rejection_reasons):
             lifecycle_state = "SESSION_CLOSED"

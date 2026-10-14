@@ -51,10 +51,13 @@ class AuthorityPipelinePanel extends StatelessWidget {
           ]),
           if (view.lifecycleReason.isNotEmpty &&
               !compact &&
+              !view.lifecycleState.startsWith('AI_') &&
+              !view.lifecycleReason.toLowerCase().startsWith('ai') &&
               !view.stages.any((s) =>
                   s.reason.trim() == view.lifecycleReason.trim() ||
                   (s.reason.isNotEmpty &&
-                      view.lifecycleReason.contains(s.reason))))
+                      (view.lifecycleReason.contains(s.reason) ||
+                          s.reason.contains(view.lifecycleReason)))))
             Padding(
               padding: const EdgeInsets.only(top: 3),
               child: Text(view.lifecycleReason,
