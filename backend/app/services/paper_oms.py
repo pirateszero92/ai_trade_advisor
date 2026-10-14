@@ -788,6 +788,14 @@ class PaperOMS:
                         "ai_review_reason": str(payload.get("ai_review_reason", ""))[:400],
                         "ai_review_conflicts": list(payload.get("ai_review_conflicts", []) or [])[:6],
                         "ai_review_evidence": list(payload.get("ai_review_evidence", []) or [])[:8],
+                        "ai_risk_multiplier": float(payload.get("ai_risk_multiplier", 1.0) if payload.get("ai_risk_multiplier") is not None else 1.0),
+                        "ai_risk_score": int(payload.get("ai_risk_score", 0) if payload.get("ai_risk_score") is not None else 0),
+                        "ai_risk_rating": str(payload.get("ai_risk_rating", ""))[:20],
+                        "ai_timing": str(payload.get("ai_timing", ""))[:30],
+                        "ai_timing_advice": str(payload.get("ai_timing_advice") or payload.get("ai_timing", ""))[:30],
+                        "realized_entry_timing": str(payload.get("realized_entry_timing") or order_type).upper()[:20],
+                        "execution_wait_reason": str(payload.get("execution_wait_reason", "none"))[:40],
+                        "entry_timing": str(payload.get("realized_entry_timing") or payload.get("entry_timing") or order_type).upper()[:30],
                     },
                 )
                 session.add(position)
@@ -2196,6 +2204,18 @@ class PaperOMS:
             "estimated_risk_amount": source_payload.get("estimated_risk_amount"),
             "override_reason": source_payload.get("override_reason"),
             "source_payload": source_payload,
+            "ai_review_required": bool(source_payload.get("ai_review_required", False)),
+            "ai_review_status": source_payload.get("ai_review_status"),
+            "ai_review_verdict": source_payload.get("ai_review_verdict"),
+            "ai_risk_multiplier": source_payload.get("ai_risk_multiplier"),
+            "ai_risk_score": source_payload.get("ai_risk_score"),
+            "ai_risk_rating": source_payload.get("ai_risk_rating"),
+            "ai_timing": source_payload.get("ai_timing"),
+            "ai_timing_advice": source_payload.get("ai_timing_advice") or source_payload.get("ai_timing"),
+            "realized_entry_timing": str(source_payload.get("realized_entry_timing") or position.order_type).upper(),
+            "execution_wait_reason": source_payload.get("execution_wait_reason") or "none",
+            "entry_timing": str(source_payload.get("realized_entry_timing") or source_payload.get("entry_timing") or position.order_type).upper(),
+            "market_regime": source_payload.get("market_regime"),
             "grade_provenance": (
                 source_payload.get("grade_provenance")
                 or ("entry_snapshot" if source_payload.get("setup_grade") else "legacy_unavailable")

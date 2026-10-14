@@ -16,7 +16,7 @@ def _latest(events: list[dict[str, Any]], stage: str) -> dict[str, Any]:
 
 def _execution_status(facts: dict[str, Any], actionable: bool = False) -> str:
     if not facts:
-        return "validated" if actionable else "not_run"
+        return "not_run"
     intent = str(facts.get("intent") or "").lower()
     reason_code = str(facts.get("reason_code") or "").upper()
     if intent == "wait" or reason_code in {"MARKET_EXTENSION_EXCEEDED", "EXECUTABLE_RR_TOO_LOW"}:
@@ -28,7 +28,7 @@ def _execution_status(facts: dict[str, Any], actionable: bool = False) -> str:
 
 def _risk_status(facts: dict[str, Any], actionable: bool = False) -> str:
     if not facts:
-        return "approved" if actionable else "not_run"
+        return "not_run"
     return "approved" if facts.get("approved") is True else "rejected"
 
 
@@ -84,6 +84,7 @@ async def build_authority_status(
     event_id: str,
     tri_core_setup: dict[str, Any] | None = None,
     structural_rr: float | None = None,
+    ai_review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     setup = tri_core_setup or {}
     if structural_rr is None and setup.get("risk_reward") is not None:
@@ -94,7 +95,12 @@ async def build_authority_status(
         event_id=event_id,
     )
     events = list((record or {}).get("events") or [])
-    ai = _latest(events, "AI_REVIEW")
+    ai_event = _latest(events, "AI_REVIEW") or {}
+    ai = {**(dict(ai_review) if ai_review else {}), **ai_event}
+    if ai_review:
+        for k in ("setup_evaluation", "market_context", "execution_advice", "independent_market_read"):
+            if k in ai_review and k not in ai_event:
+                ai[k] = ai_review[k]
     systemic_risk = _latest(events, "SYSTEMIC_RISK")
     execution = _latest(events, "EXECUTION_REVALIDATION")
     risk = _latest(events, "RISK")
@@ -125,27 +131,9 @@ async def build_authority_status(
     runtime = load_runtime_config()
     risk_cfg = runtime.get("risk_management", {}) if isinstance(runtime, dict) else {}
     ai_required = bool(risk_cfg.get("auto_trade_require_ai_approval", True))
+    accept_caution = bool(risk_cfg.get("auto_trade_accept_caution", False))
 
     actionable = setup.get("actionable") is True
-    if not execution and actionable:
-        execution = {
-            "passed": True,
-            "reason_code": "SETUP_ACTIONABLE",
-            "reasons": ["TriCore setup confirmed actionable"],
-            "quote_freshness": "fresh",
-            "structural_rr": structural_rr,
-            "executable_rr": structural_rr,
-            "order_type": setup.get("entry_policy") or "limit",
-            "entry_policy": setup.get("entry_policy"),
-            "original_entry": setup.get("entry"),
-            "executable_entry": setup.get("entry"),
-        }
-    if not risk and actionable:
-        risk = {
-            "approved": True,
-            "risk_pct": float(risk_cfg.get("risk_per_trade", 1.0)),
-            "sizing_authority": "default_risk_budget",
-        }
 
     ai_snapshot_matches = not ai or str(ai.get("input_snapshot_id") or snapshot_id) == snapshot_id
     if ai and not ai_snapshot_matches:
@@ -164,6 +152,21 @@ async def build_authority_status(
     ai_coherent = (
         ai_status.lower() == "reviewed"
         and ai_verdict.upper() == "COHERENT"
+    )
+    ai_caution = (
+        ai_status.lower() == "reviewed"
+        and ai_verdict.upper() == "CAUTION"
+    )
+    ai_timing = str((ai.get("execution_advice") or {}).get("suggested_timing") or "").upper()
+    ai_mult = float(ai.get("suggested_risk_multiplier", 1.0) if ai.get("suggested_risk_multiplier") is not None else 1.0)
+    ai_decision = str(ai.get("decision") or "").upper()
+
+    ai_passed = bool(
+        (ai_coherent or (ai_caution and accept_caution) or not ai_required)
+        and (ai_verdict.upper() not in {"CONFLICT", "UNAVAILABLE"})
+        and (ai_decision != "PASS" if ai_status.lower() == "reviewed" else True)
+        and (ai_timing != "STAND_ASIDE")
+        and (ai_mult > 0.0 or not ai_required)
     )
     exec_status = _execution_status(execution, actionable=actionable)
     execution_validated = exec_status in {"validated", "limit_armed"}
@@ -195,7 +198,7 @@ async def build_authority_status(
     order_ready = bool(
         actionable
         and systemic_allowed
-        and (ai_coherent or not ai_required)
+        and ai_passed
         and execution_validated
         and risk_approved
         and not order_already_submitted
@@ -205,6 +208,11 @@ async def build_authority_status(
         lifecycle_state = "RISK_APPROVED"
         lifecycle_reason_code = "PIPELINE_VALIDATED"
         lifecycle_reason = "Pre-trade execution and risk checks approved"
+    elif ai_status.lower() == "reviewed" and ai_verdict.upper() in {"CONFLICT", "CAUTION"}:
+        if lifecycle_state in {"UNKNOWN", "REGISTERED", "WAIT", "WAITING_SETUP", "DETECTED", "INVALIDATED"}:
+            lifecycle_state = f"AI_{ai_verdict.upper()}"
+            lifecycle_reason_code = f"AI_{ai_verdict.upper()}"
+            lifecycle_reason = str(ai.get("reason") or f"AI marked setup as {ai_verdict.upper()}")
     elif not lifecycle and not actionable:
         if any("session is closed" in str(r).lower() for r in rejection_reasons):
             lifecycle_state = "SESSION_CLOSED"
@@ -239,6 +247,7 @@ async def build_authority_status(
         "ai_review": {
             "status": ai_status,
             "verdict": ai_verdict,
+            "decision": ai.get("decision", "PASS"),
             "review_stage": ai.get("review_stage"),
             "stage_updated_at": ai.get("stage_updated_at"),
             "reason": ai.get("reason"),
@@ -249,6 +258,12 @@ async def build_authority_status(
             "required": ai_required,
             "fast_tracked": bool(ai.get("fast_tracked", False)),
             "soft_caution": ai_verdict.upper() == "CAUTION",
+            "risk_rating": ai.get("risk_rating", "MODERATE" if ai_verdict.upper() == "CAUTION" else "LOW" if ai_verdict.upper() == "COHERENT" else "HIGH"),
+            "risk_score": ai.get("risk_score", 50 if ai_verdict.upper() == "CAUTION" else 20 if ai_verdict.upper() == "COHERENT" else 85),
+            "suggested_risk_multiplier": ai.get("suggested_risk_multiplier", 0.5 if ai_verdict.upper() == "CAUTION" else 1.0 if ai_verdict.upper() == "COHERENT" else 0.0),
+            "setup_evaluation": ai.get("setup_evaluation", {}),
+            "market_context": ai.get("market_context", {}),
+            "execution_advice": ai.get("execution_advice", {}),
         },
         "systemic_risk": {
             "status": str(systemic_risk.get("status") or "NOT_APPLICABLE"),
@@ -330,4 +345,169 @@ async def build_authority_status(
                 actionable and not order_ready and not order_already_submitted and exec_status != "waiting_retest"
             ),
         },
+        "decision_id": f"{snapshot_id}:{event_id}",
+        "stages": {
+            "tri_core": {
+                "stage": "TRI_CORE",
+                "passed": actionable,
+                "reason_code": "SETUP_ACTIONABLE" if actionable else (setup.get("rejection_reasons", ["NO_SETUP"])[0] if setup.get("rejection_reasons") else "NO_SETUP"),
+                "reason": f"Grade {setup.get('grade', 'WAIT')} {setup.get('direction', 'wait')} setup" if actionable else "; ".join(str(r) for r in rejection_reasons) or "No actionable setup",
+                "grade": str(setup.get("grade") or "WAIT"),
+                "direction": str(setup.get("direction") or "wait"),
+            },
+            "systemic_risk": {
+                "stage": "SYSTEMIC_RISK",
+                "passed": systemic_allowed,
+                "reason_code": str(systemic_risk.get("reason_code") or ("ALLOWED" if systemic_allowed else "BLOCKED")),
+                "reason": systemic_risk.get("reason") or ("Systemic risk passed" if systemic_allowed else "Systemic risk paused execution"),
+            },
+            "ai_review": {
+                "stage": "AI_REVIEW",
+                "passed": ai_passed,
+                "required": ai_required,
+                "reason_code": (
+                    f"AI_{ai_verdict}"
+                    if ai_status.lower() == "reviewed"
+                    else (
+                        "AI_REQUIRED"
+                        if ai_required and ai_status.lower() == "not_requested"
+                        else (
+                            f"AI_{ai_status.upper()}"
+                            if ai_status.lower() not in {"not_requested", "none"}
+                            else "AI_NOT_REQUESTED"
+                        )
+                    )
+                ),
+                "reason": ai.get("reason") or f"AI verdict is {ai_verdict}",
+                "verdict": ai_verdict,
+                "decision": ai.get("decision", "PASS"),
+                "status": ai_status,
+                "risk_rating": ai.get("risk_rating", "MODERATE" if ai_verdict.upper() == "CAUTION" else "LOW" if ai_verdict.upper() == "COHERENT" else "HIGH"),
+                "risk_score": ai.get("risk_score", 50 if ai_verdict.upper() == "CAUTION" else 20 if ai_verdict.upper() == "COHERENT" else 85),
+                "suggested_risk_multiplier": ai.get("suggested_risk_multiplier", 0.5 if ai_verdict.upper() == "CAUTION" else 1.0 if ai_verdict.upper() == "COHERENT" else 0.0),
+            },
+            "execution": {
+                "stage": "EXECUTION_REVALIDATION",
+                "passed": execution_validated,
+                "reason_code": str(execution.get("reason_code") or ("VALIDATED" if execution_validated else "REJECTED")),
+                "reason": "; ".join(execution.get("reasons", [])) or f"Execution intent: {exec_status}",
+                "status": exec_status,
+            },
+            "risk": {
+                "stage": "RISK",
+                "passed": risk_approved,
+                "reason_code": "RISK_APPROVED" if risk_approved else str(effective_risk_reason or "RISK_REJECTED"),
+                "reason": effective_risk_reason or ("Risk approved" if risk_approved else "Risk limits exceeded"),
+                "status": effective_risk_status,
+            },
+            "oms": {
+                "stage": "OMS",
+                "passed": order_already_submitted,
+                "status": oms_status,
+                "reason_code": f"OMS_{oms_status.upper()}",
+                "reason": oms.get("close_reason") or f"OMS status is {oms_status}",
+            },
+        },
+        "final_decision": (
+            "SUBMITTED" if order_already_submitted
+            else "READY" if order_ready
+            else "BLOCKED" if actionable
+            else "WAIT"
+        ),
     }
+
+
+async def get_authority_status_for_symbol(
+    symbol: str,
+    exchange: str | None = None,
+    timeframe: str | None = None,
+) -> dict[str, Any]:
+    """Retrieve full authority pipeline status and stage breakdown for a specific symbol."""
+    from app.services.event_trigger import MarketMonitor, _compact_symbol
+    monitor = MarketMonitor.get_instance()
+    norm_sym = _compact_symbol(symbol)
+    
+    # Check if there is an active signal in recent_signals
+    # Check if there is an active signal in recent_signals with matching criteria
+    matching_sigs = []
+    for s in monitor.recent_signals:
+        if _compact_symbol(s.get("symbol", "")) != norm_sym:
+            continue
+        if exchange and str(s.get("exchange", "")).lower() != exchange.lower():
+            continue
+        if timeframe and str(s.get("timeframe", "")).lower() != timeframe.lower():
+            continue
+        matching_sigs.append(s)
+
+    matching_sig = None
+    if matching_sigs:
+        matching_sigs.sort(
+            key=lambda x: str(x.get("timestamp") or (x.get("analysis_snapshot") or {}).get("generated_at") or ""),
+            reverse=True,
+        )
+        matching_sig = matching_sigs[0]
+            
+    if matching_sig:
+        analysis_snapshot = matching_sig.get("analysis_snapshot") or {}
+        tri_core = matching_sig.get("tri_core_setup") or {}
+        snapshot_id = str(analysis_snapshot.get("snapshot_id") or "")
+        event_id = str(tri_core.get("event_id") or "")
+        effective_snapshot_id = snapshot_id or f"snap-{symbol}"
+        effective_event_id = event_id or f"wait-{symbol}"
+        return await build_authority_status(
+            symbol=symbol,
+            snapshot_id=effective_snapshot_id,
+            event_id=effective_event_id,
+            tri_core_setup=tri_core,
+            structural_rr=matching_sig.get("risk_reward"),
+            ai_review=matching_sig.get("ai_review"),
+        )
+
+    # Fallback to execution_analyses cache (filter by symbol, exchange, timeframe and pick newest)
+    from app.services.execution_analysis import execution_analyses
+    matching_candidates = []
+    for an in list(execution_analyses._cache.values()):
+        if _compact_symbol(an.symbol) != norm_sym:
+            continue
+        if exchange and str(getattr(an, "exchange", "")).lower() != exchange.lower():
+            continue
+        if timeframe and str(getattr(an, "timeframe", "")).lower() != timeframe.lower():
+            continue
+        matching_candidates.append(an)
+
+    # Sort matching candidates by created_at / generated_at descending if available
+    cached = None
+    if matching_candidates:
+        matching_candidates.sort(
+            key=lambda x: str(getattr(x, "generated_at", "") or getattr(x, "created_at", "") or ""),
+            reverse=True,
+        )
+        cached = matching_candidates[0]
+
+    if cached:
+        tri_core = getattr(cached.signal, "tri_core_setup", {}) or {}
+        ai_rev = getattr(cached.signal, "ai_review", {}) or {}
+        return await build_authority_status(
+            symbol=symbol,
+            snapshot_id=cached.snapshot_id,
+            event_id=str(tri_core.get("event_id") or f"wait-{symbol}"),
+            tri_core_setup=tri_core,
+            structural_rr=getattr(cached.signal, "risk_reward", None),
+            ai_review=ai_rev,
+        )
+
+    # Default/Empty projection
+    return await build_authority_status(
+        symbol=symbol,
+        snapshot_id=f"snap-{symbol}",
+        event_id=f"wait-{symbol}",
+        tri_core_setup={
+            "actionable": False,
+            "grade": "WAIT",
+            "direction": "wait",
+            "reasons": ["No active setup detected for symbol"],
+            "rejection_reasons": ["No active setup detected for symbol"],
+        },
+    )
+
+

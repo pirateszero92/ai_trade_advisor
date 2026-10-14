@@ -561,7 +561,26 @@ async def test_authority_projection_handles_limit_armed_intent():
     assert view["execution"]["status"] == "limit_armed"
     assert view["execution"]["intent"] == "place_limit"
     assert view["execution"]["auto_armed_limit"] is True
-    assert view["order"]["ready"] is True
+    # Without risk trace, order is NOT ready (P0 fix: no fake risk approval)
+    assert view["risk"]["status"] == "not_run"
+    assert view["order"]["ready"] is False
+
+    # Once risk evaluates and approves, order becomes ready
+    await decision_trace.record(
+        snapshot_id="snap-limit",
+        event_id="event-limit",
+        symbol="ETH/USDT",
+        stage="RISK",
+        facts={"approved": True, "reason": "Risk checks passed"},
+    )
+    view_approved = await build_authority_status(
+        symbol="ETH/USDT",
+        snapshot_id="snap-limit",
+        event_id="event-limit",
+        tri_core_setup={"actionable": True, "direction": "long", "grade": "A"},
+        structural_rr=3.0,
+    )
+    assert view_approved["order"]["ready"] is True
 
 
 @pytest.mark.anyio

@@ -1159,9 +1159,7 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                     ),
                     const SizedBox(width: 6),
                     Text(
-                      isLiveAllowed
-                          ? '🟣 บัญชีจริง Live'
-                          : '🟣 บัญชีจริง (ปิดใน Settings)',
+                      'Live Trade',
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.bold,
@@ -1211,7 +1209,7 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                             : Colors.white38),
                     const SizedBox(width: 6),
                     Text(
-                      '🧪 พอร์ตจำลอง Paper (\$)',
+                      'Paper Trade',
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.bold,

@@ -104,3 +104,61 @@ async def reset_paper_account(
     api_key: str = Depends(verify_api_key),
 ):
     return await trades.reset_paper_account(req=req, _key=api_key)
+
+
+@router.get("/evaluation")
+async def get_paper_evaluation(
+    api_key: str = Depends(verify_api_key),
+):
+    from app.services.paper_evaluation import evaluate_live_paper
+    return await evaluate_live_paper()
+
+
+@router.get("/counterfactual/replay")
+async def get_counterfactual_replay_summary(
+    api_key: str = Depends(verify_api_key),
+):
+    from app.services.counterfactual_replay import CounterfactualReplayEngine
+    engine = CounterfactualReplayEngine()
+    cache = engine.load_cache()
+    results = list(cache.values())
+    summary = CounterfactualReplayEngine.summarize_replay(results)
+    return {
+        "status": "ready",
+        "cached_replays_count": len(results),
+        "summary": summary,
+        "sample": results[:20],
+    }
+
+
+@router.post("/counterfactual/replay")
+async def run_counterfactual_replay(
+    limit: int = 100,
+    force_recompute: bool = False,
+    api_key: str = Depends(verify_api_key),
+):
+    from app.engines.market_data import MarketDataEngine
+    from app.services.counterfactual_replay import CounterfactualReplayEngine
+    from app.services.decision_trace import decision_trace
+    from app.services.paper_evaluation import extract_counterfactual_filtered_candidates
+
+    records = await decision_trace.list_records()
+    filtered = extract_counterfactual_filtered_candidates(records)
+    if limit > 0:
+        filtered = filtered[:limit]
+
+    market = MarketDataEngine()
+    engine = CounterfactualReplayEngine()
+    results = await engine.replay_candidates_batch(
+        filtered,
+        market_data_engine=market,
+        force_recompute=force_recompute,
+    )
+    summary = CounterfactualReplayEngine.summarize_replay(results)
+    return {
+        "status": "completed",
+        "candidates_processed": len(results),
+        "summary": summary,
+    }
+
+

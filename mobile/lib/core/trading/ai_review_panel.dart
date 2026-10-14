@@ -105,6 +105,26 @@ class AiReviewPanel extends StatelessWidget {
                   style: TextStyle(
                       color: Colors.greenAccent, fontWeight: FontWeight.bold)),
             ),
+          if (review['risk_score'] != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                'AI Decision Rating: ${review['risk_rating'] ?? ''} • Risk Score: ${review['risk_score']}/100 • Sizing: ${review['suggested_risk_multiplier'] ?? 1.0}x',
+                style: const TextStyle(
+                    color: Colors.amberAccent,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 10),
+              ),
+            ),
+          if (review['execution_advice'] is Map &&
+              (review['execution_advice']['suggested_timing'] ?? '').toString().isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Text(
+                'คำแนะนำ: ${review['execution_advice']['suggested_timing']} ${review['execution_advice']['invalidation_thesis'] != null ? "• Invalidation: ${review['execution_advice']['invalidation_thesis']}" : ""}',
+                style: const TextStyle(color: Colors.white60, fontSize: 10),
+              ),
+            ),
           if (review['reason'] != null) Text('${review['reason']}'),
           if (review['conflicts'] is List &&
               (review['conflicts'] as List).isNotEmpty)

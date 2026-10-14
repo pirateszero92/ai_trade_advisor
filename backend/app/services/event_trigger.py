@@ -1028,11 +1028,40 @@ class MarketMonitor:
             return None
         setup["candidate_lifecycle_state"] = lifecycle_record.state.value
 
+        await decision_trace.record(
+            snapshot_id=decision_snapshot_id,
+            event_id=event_id,
+            symbol=symbol,
+            stage="TRI_CORE",
+            facts={
+                "actionable": True,
+                "direction": direction,
+                "grade": str(setup.get("grade", "WAIT")),
+                "setup_type": str(setup.get("setup_type", "")),
+                "strategy_family": str(setup.get("strategy_family", "none")),
+                "entry_policy": str(setup.get("entry_policy", "")),
+                "structural_rr": setup.get("risk_reward"),
+            },
+        )
+
         canonical_analysis = execution_analyses.get_by_snapshot_id(decision_snapshot_id)
         if canonical_analysis is None:
             logger.warning(f"[Auto-Pilot] Canonical snapshot unavailable for {symbol}")
             return None
         systemic_risk = dict(canonical_analysis.systemic_risk or {})
+        await decision_trace.record(
+            snapshot_id=decision_snapshot_id,
+            event_id=event_id,
+            symbol=symbol,
+            stage="SYSTEMIC_RISK",
+            facts={
+                "execution_allowed": systemic_risk.get("execution_allowed", True),
+                "reason_code": systemic_risk.get("reason_code"),
+                "reason": systemic_risk.get("reason"),
+                "btc_regime": systemic_risk.get("btc_regime"),
+                "btc_1h_pct_change": systemic_risk.get("btc_1h_pct_change"),
+            },
+        )
         if systemic_risk.get("execution_allowed", True) is not True:
             reason_code = str(
                 systemic_risk.get("reason_code") or "SYSTEMIC_RISK_BLOCKED"
@@ -1050,6 +1079,7 @@ class MarketMonitor:
             )
             logger.info(f"[Auto-Pilot] {symbol} waiting on systemic risk: {reason}")
             return None
+
 
         # 2.1 AI review gate. When approval is required this is fail-closed:
         # only a completed, explicitly approved COHERENT review can pass.
@@ -1165,6 +1195,9 @@ class MarketMonitor:
 
         ai_status = str(ai_rev.get("status", "not_requested")).lower()
         ai_verdict = str(ai_rev.get("verdict", "UNAVAILABLE")).upper()
+        accept_caution = bool(r_cfg.get("auto_trade_accept_caution", False))
+        ai_is_coherent = ai_status == "reviewed" and ai_verdict == "COHERENT"
+        ai_is_caution = ai_status == "reviewed" and ai_verdict == "CAUTION"
 
         if ai_rev:
             await decision_trace.record(
@@ -1174,6 +1207,10 @@ class MarketMonitor:
                 stage="AI_REVIEW",
                 occurred_at=str(ai_rev.get("reviewed_at") or datetime.now(timezone.utc).isoformat()),
                 facts={
+                    "stage": "AI_REVIEW",
+                    "passed": ai_is_coherent or (ai_is_caution and accept_caution) or not require_ai_approval,
+                    "reason_code": f"AI_{ai_verdict}" if ai_status == "reviewed" else "AI_UNAVAILABLE",
+                    "reason": ai_rev.get("reason") or ai_rev.get("error") or f"AI verdict is {ai_verdict}",
                     "provider": ai_rev.get("provider"),
                     "model": ai_rev.get("model"),
                     "prompt_version": ai_rev.get("prompt_version"),
@@ -1183,12 +1220,16 @@ class MarketMonitor:
                     "input_timeframe": ai_rev.get("input_timeframe"),
                     "status": ai_rev.get("status"),
                     "verdict": ai_rev.get("verdict"),
+                    "decision": ai_rev.get("decision"),
+                    "risk_rating": ai_rev.get("risk_rating"),
+                    "risk_score": ai_rev.get("risk_score"),
+                    "suggested_risk_multiplier": ai_rev.get("suggested_risk_multiplier"),
                     "latency_ms": ai_rev.get("latency_ms"),
-                    "reason": ai_rev.get("reason") or ai_rev.get("error"),
                     "failure_type": ai_rev.get("failure_type"),
                     "conflicts": ai_rev.get("conflicts"),
                     "evidence": ai_rev.get("evidence"),
                 },
+
             )
 
         if require_ai_approval:
@@ -1235,52 +1276,163 @@ class MarketMonitor:
             )
         ).upper()
 
-        if ai_gate_hard:
-            # Under hard gate:
-            # - COHERENT with BUY/SELL passes with full risk (1.0x).
-            # - CAUTION passes only if explicitly opted-in via auto_trade_accept_caution=True (halved risk).
-            # - By default (accept_caution=False), CAUTION strictly blocks.
-            # - CONFLICT, UNAVAILABLE, or decision=PASS strictly block.
-            if ai_is_caution:
-                ai_approved = accept_caution
+        ai_suggested_mult = float(ai_rev.get("suggested_risk_multiplier", 1.0) if ai_rev.get("suggested_risk_multiplier") is not None else 1.0)
+        ai_timing = str((ai_rev.get("execution_advice") or {}).get("suggested_timing") or "").upper()
+
+        # Reviewer P1 Resolution: Explicit separation of ai_approved, ai_risk_multiplier, and ai_execution_blocked.
+        # When require_ai_approval is True:
+        # CONFLICT, UNAVAILABLE, and PASS strictly enforce multiplier = 0.0 and block execution even under soft gate.
+        if not require_ai_approval:
+            # Deterministic-only / Advisory mode: AI gating is disabled, Tri-Core has full authority
+            ai_risk_multiplier = 1.0
+            ai_execution_blocked = False
+            ai_approved = False
+        elif ai_verdict in {"CONFLICT", "UNAVAILABLE"} or ai_decision == "PASS":
+            ai_risk_multiplier = 0.0
+            ai_execution_blocked = True
+            ai_approved = False
+        elif ai_timing == "STAND_ASIDE":
+            ai_risk_multiplier = 0.0
+            ai_execution_blocked = True
+            ai_approved = False
+        elif ai_is_caution:
+            ai_risk_multiplier = min(
+                float(r_cfg.get("auto_trade_soft_caution_sizing_pct", 0.5)),
+                min(0.5, max(0.1, ai_suggested_mult)),
+            )
+            if ai_gate_hard and not accept_caution:
+                ai_execution_blocked = True
+                ai_approved = False
             else:
-                ai_approved = ai_is_coherent and (ai_decision in {"BUY", "SELL"})
-        else:
-            # Soft gate: TriCore is authority, only hard CONFLICT/UNAVAILABLE warns but allows.
+                ai_execution_blocked = False
+                ai_approved = True
+        elif ai_is_coherent and (ai_decision in {"BUY", "SELL"}):
+            ai_risk_multiplier = min(1.0, max(0.1, ai_suggested_mult))
+            ai_execution_blocked = False
             ai_approved = True
+        else:
+            # Fallback when review is not completed or missing
+            ai_risk_multiplier = 0.0
+            ai_execution_blocked = True
+            ai_approved = False
 
-        caution_sizing_mult = (
-            float(r_cfg.get("auto_trade_soft_caution_sizing_pct", 0.5))
-            if (ai_is_caution and accept_caution)
-            else 1.0
-        )
+        # Phase 3 Guardrail 1: Suggested timing STAND_ASIDE blocks execution
+        if require_ai_approval and ai_timing == "STAND_ASIDE":
+            logger.warning(
+                f"[Auto-Pilot] AI execution advice STAND_ASIDE for {symbol} {direction} — blocking execution"
+            )
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="AI_GATE_FILTER",
+                facts={
+                    "filtered": True,
+                    "action": "STAND_ASIDE",
+                    "reason_code": "AI_STAND_ASIDE",
+                    "reason": "AI execution advice recommended STAND_ASIDE",
+                    "direction": direction,
+                    "entry": float(getattr(ltf_sig, "current_price", 0.0) or getattr(ltf_sig, "entry", 0.0) or live_price or 0.0),
+                    "stop_loss": float(getattr(ltf_sig, "stop_loss", 0.0) or 0.0),
+                    "take_profit": float(getattr(ltf_sig, "take_profit", 0.0) or 0.0),
+                    "timeframe": setup_timeframe,
+                    "verdict": ai_verdict,
+                    "ai_timing_advice": ai_timing,
+                },
+            )
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=CandidateState.RISK_REJECTED,
+                reason_code="AI_STAND_ASIDE",
+                reason="AI execution advice recommended STAND_ASIDE",
+            )
+            return None
 
-        if require_ai_approval and not ai_approved:
+        # Phase 3 Guardrail 2: Suggested timing WAIT_CONFIRMATION defers execution to WAITING_ENTRY
+        if ai_timing == "WAIT_CONFIRMATION":
+            logger.info(
+                f"[Auto-Pilot] AI execution advice WAIT_CONFIRMATION for {symbol} {direction} — transitioning to WAITING_ENTRY"
+            )
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="AI_GATE_FILTER",
+                facts={
+                    "filtered": True,
+                    "action": "WAIT_CONFIRMATION",
+                    "reason_code": "AI_WAIT_CONFIRMATION",
+                    "reason": "AI execution advice recommended waiting for causal confirmation",
+                    "direction": direction,
+                    "entry": float(getattr(ltf_sig, "current_price", 0.0) or getattr(ltf_sig, "entry", 0.0) or live_price or 0.0),
+                    "stop_loss": float(getattr(ltf_sig, "stop_loss", 0.0) or 0.0),
+                    "take_profit": float(getattr(ltf_sig, "take_profit", 0.0) or 0.0),
+                    "timeframe": setup_timeframe,
+                    "verdict": ai_verdict,
+                    "ai_timing_advice": ai_timing,
+                },
+            )
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=CandidateState.WAITING_ENTRY,
+                reason_code="AI_WAIT_CONFIRMATION",
+                reason="AI execution advice recommended waiting for causal confirmation",
+            )
+            return None
+
+        # Phase 3 Guardrail 3: Block execution if multiplier is 0.0 or ai_execution_blocked
+        if ai_execution_blocked or ai_risk_multiplier <= 0.0:
             reasons = ai_rev.get("conflicts", []) or [
                 ai_rev.get("reason")
                 or ai_rev.get("error")
-                or f"AI review decision {ai_decision} (status={ai_status}, verdict={ai_verdict or 'UNAVAILABLE'})"
+                or f"AI review decision {ai_decision} (verdict={ai_verdict})"
             ]
-            if ai_gate_hard:
-                logger.warning(
-                    f"[Auto-Pilot] AI gate blocking {symbol} {direction} (decision={ai_decision}, verdict={ai_verdict}): "
-                    f"{'; '.join(str(r) for r in reasons)}"
-                )
-                return None
-            else:
-                # Soft advisory: log but continue — TriCore is the authority.
-                logger.info(
-                    f"[Auto-Pilot] AI advisory (soft gate): {symbol} {direction} — "
-                    f"{'; '.join(str(r) for r in reasons)} — proceeding on TriCore authority"
-                )
+            logger.warning(
+                f"[Auto-Pilot] AI gate blocking {symbol} {direction} (decision={ai_decision}, verdict={ai_verdict}, multiplier={ai_risk_multiplier}): "
+                f"{'; '.join(str(r) for r in reasons)}"
+            )
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="AI_GATE_FILTER",
+                facts={
+                    "filtered": True,
+                    "action": "BLOCKED",
+                    "reason_code": f"AI_{ai_verdict}_BLOCKED",
+                    "reason": f"AI blocked execution: {'; '.join(str(r) for r in reasons)}"[:300],
+                    "direction": direction,
+                    "entry": float(getattr(ltf_sig, "current_price", 0.0) or getattr(ltf_sig, "entry", 0.0) or live_price or 0.0),
+                    "stop_loss": float(getattr(ltf_sig, "stop_loss", 0.0) or 0.0),
+                    "take_profit": float(getattr(ltf_sig, "take_profit", 0.0) or 0.0),
+                    "timeframe": setup_timeframe,
+                    "verdict": ai_verdict,
+                    "conflicts": reasons,
+                    "ai_timing_advice": ai_timing,
+                },
+            )
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=CandidateState.RISK_REJECTED,
+                reason_code=f"AI_{ai_verdict}_BLOCKED",
+                reason=f"AI blocked execution: {'; '.join(str(r) for r in reasons)}"[:300],
+            )
+            return None
         elif ai_is_caution and accept_caution:
             logger.info(
-                f"[Auto-Pilot] AI Soft Caution accepted for {symbol} {direction} with {caution_sizing_mult:.1f}x sizing: "
+                f"[Auto-Pilot] AI Soft Caution accepted for {symbol} {direction} with {ai_risk_multiplier:.1f}x sizing: "
                 f"{ai_rev.get('reason', '')}"
             )
         elif ai_approved:
             logger.info(
-                f"[Auto-Pilot] AI Decision {ai_decision} APPROVED for {symbol} {direction}: {ai_rev.get('reason', '')}"
+                f"[Auto-Pilot] AI Decision {ai_decision} APPROVED for {symbol} {direction} with {ai_risk_multiplier:.1f}x sizing: "
+                f"{ai_rev.get('reason', '')}"
             )
 
         calib_status = str(setup.get("calibration_status", "walk_forward_validated")).lower()
@@ -1288,15 +1440,27 @@ class MarketMonitor:
             logger.info(
                 f"[Auto-Pilot] Strategy {setup.get('setup_type')} is {calib_status} — Auto-Pilot withheld"
             )
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="CALIBRATION",
+                facts={"passed": False, "reason_code": "CALIBRATION_BLOCKED", "reason": f"Strategy {setup.get('setup_type')} is {calib_status}"},
+            )
             return None
 
         setup_grade = str(setup.get("grade", "WAIT")).upper()
         is_grade_s = setup_grade == "S"
         is_grade_a = setup_grade in {"A", "S"}
         min_grade = str(r_cfg.get("auto_trade_min_grade", "A")).upper()
-        if min_grade == "S" and not is_grade_s:
-            return None
-        if min_grade == "A" and not is_grade_a:
+        if (min_grade == "S" and not is_grade_s) or (min_grade == "A" and not is_grade_a):
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="GRADE_FILTER",
+                facts={"passed": False, "reason_code": "MIN_GRADE_NOT_MET", "grade": setup_grade, "min_grade": min_grade},
+            )
             return None
         grade_label = "👑 SETUP S" if is_grade_s else "💎 SETUP A"
 
@@ -1307,11 +1471,25 @@ class MarketMonitor:
         last_exec = _AUTO_TRADE_HISTORY.get(history_key, 0.0)
         if auto_trade_enabled and (now_ts - last_exec < cooldown_sec):
             logger.debug(f"[Auto-Pilot] Cooldown active for {symbol} ({now_ts - last_exec:.1f}s < {cooldown_sec}s)")
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="COOLDOWN",
+                facts={"passed": False, "reason_code": "COOLDOWN_ACTIVE", "remaining_seconds": cooldown_sec - (now_ts - last_exec)},
+            )
             return None
 
         # 4. OMS & Capacity Check
         from app.services.paper_oms import paper_oms
         if not paper_oms.ready and auto_trade_enabled:
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="OMS_CAPACITY",
+                facts={"passed": False, "reason_code": "OMS_NOT_READY", "reason": "Paper OMS is not ready"},
+            )
             return None
 
         oms_res = await paper_oms.list_positions(include_live=False) if paper_oms.ready else []
@@ -1333,6 +1511,13 @@ class MarketMonitor:
                     logger.debug(
                         f"[Auto-Pilot] Durable cooldown active for {symbol} ({elapsed:.1f}s)"
                     )
+                    await decision_trace.record(
+                        snapshot_id=decision_snapshot_id,
+                        event_id=event_id,
+                        symbol=symbol,
+                        stage="COOLDOWN",
+                        facts={"passed": False, "reason_code": "DURABLE_COOLDOWN_ACTIVE", "elapsed": elapsed, "cooldown_sec": cooldown_sec},
+                    )
                     return None
         active_positions = [
             position for position in all_positions
@@ -1344,11 +1529,25 @@ class MarketMonitor:
         ]
         if auto_trade_enabled and existing_sym:
             logger.debug(f"[Auto-Pilot] Active position already exists for {symbol}")
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="OMS_CAPACITY",
+                facts={"passed": False, "reason_code": "ACTIVE_POSITION_EXISTS", "symbol": symbol},
+            )
             return None
 
         cfg = get_settings()
         if auto_trade_enabled and len(active_positions) >= cfg.max_open_positions:
             logger.warning(f"[Auto-Pilot] Position capacity limit reached ({len(active_positions)}/{cfg.max_open_positions})")
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="OMS_CAPACITY",
+                facts={"passed": False, "reason_code": "CAPACITY_LIMIT_REACHED", "open_positions": len(active_positions), "max": cfg.max_open_positions},
+            )
             return None
 
         quote = paper_oms.quote_snapshot(symbol) if paper_oms.ready else {}
@@ -1366,8 +1565,16 @@ class MarketMonitor:
                 executable_quote = live_price
             else:
                 logger.warning(f"[Auto-Pilot] Fresh executable quote unavailable for {symbol}")
+                await decision_trace.record(
+                    snapshot_id=decision_snapshot_id,
+                    event_id=event_id,
+                    symbol=symbol,
+                    stage="QUOTE",
+                    facts={"passed": False, "reason_code": "QUOTE_UNAVAILABLE", "symbol": symbol},
+                )
                 return None
         live_price = float(executable_quote)
+
 
         # 5. Execution revalidation authority. Re-check the immutable Tri-Core
         # candidate against the current canonical snapshot and fresh executable
@@ -1388,8 +1595,17 @@ class MarketMonitor:
             logger.warning(f"[Auto-Pilot] Lifecycle blocked execution validation for {symbol}")
             return None
 
-        target_rr_cfg = float(r_cfg.get("target_rr", 2.0))
-        exec_min_rr = 1.0 if ai_approved else target_rr_cfg
+        # Single source of truth: Tri-Core policy defines canonical minimum R:R.
+        # target_rr is treated strictly as a fallback compatibility alias.
+        policy = (
+            canonical_analysis.config_snapshot.get("tri_core_policy", {})
+            if isinstance(getattr(canonical_analysis, "config_snapshot", None), dict)
+            else {}
+        )
+        canonical_min_rr = policy.get("minimum_rr")
+        if canonical_min_rr is None:
+            canonical_min_rr = r_cfg.get("target_rr", 2.0)
+        exec_min_rr = float(canonical_min_rr)
 
         revalidation = execution_revalidator.validate(
             analysis=canonical_analysis,
@@ -1501,6 +1717,25 @@ class MarketMonitor:
         exec_sl = revalidation.stop_loss
         exec_tp = revalidation.take_profit
         order_type = revalidation.order_type
+
+        # Phase 3 Guardrail 4: AI timing LIMIT_RETEST_ONLY enforces limit/retest path
+        if ai_timing == "LIMIT_RETEST_ONLY" and order_type != "limit":
+            if getattr(revalidation, "auto_armed_limit", False):
+                order_type = "limit"
+                entry_policy = "limit_retest_only"
+            else:
+                logger.info(
+                    f"[Auto-Pilot] AI timing LIMIT_RETEST_ONLY: blocking market entry for {symbol}, waiting for retest"
+                )
+                await candidate_lifecycle.transition(
+                    symbol=symbol,
+                    snapshot_id=decision_snapshot_id,
+                    event_id=event_id,
+                    new_state=CandidateState.WAITING_ENTRY,
+                    reason_code="AI_LIMIT_RETEST_REQUIRED",
+                    reason="AI execution advice requires limit/retest entry; market entry deferred",
+                )
+                return None
 
         # 6. Mandatory portfolio-aware Risk Engine assessment. Include modeled
         # round-trip spread/slippage/fees so requested risk survives execution.
@@ -1631,6 +1866,21 @@ class MarketMonitor:
             else {}
         )
         atr_pct = regime_metrics.get("atr_pct")
+        calculated_risk_pct = squeeze_adjusted_risk_pct(execution_signal) * ai_risk_multiplier
+        if calculated_risk_pct <= 0:
+            logger.warning(
+                f"[Auto-Pilot] {symbol} calculated risk_per_trade_pct ({calculated_risk_pct:.4f}) <= 0 — blocked before Risk Engine"
+            )
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=CandidateState.RISK_REJECTED,
+                reason_code="ZERO_RISK_MULTIPLIER_BLOCKED",
+                reason="Calculated risk percentage is zero or negative",
+            )
+            return None
+
         risk_assessment = self.risk.evaluate(
             execution_signal,
             account_balance=equity,
@@ -1641,8 +1891,8 @@ class MarketMonitor:
             current_gross_notional=current_gross_notional,
             active_positions=active_positions,
             execution_cost_per_unit=execution_cost_per_unit,
-            risk_per_trade_pct=squeeze_adjusted_risk_pct(execution_signal) * caution_sizing_mult,
-            minimum_rr=float(r_cfg.get("target_rr", 2.0)),
+            risk_per_trade_pct=calculated_risk_pct,
+            minimum_rr=exec_min_rr,
             max_stop_distance_pct=(
                 float(r_cfg["default_sl_pct"])
                 if "default_sl_pct" in r_cfg and float(r_cfg["default_sl_pct"]) > 0
@@ -1856,6 +2106,19 @@ class MarketMonitor:
             "ai_review_reason": str(ai_rev.get("reason") or ai_rev.get("error") or "")[:400],
             "ai_review_conflicts": list(ai_rev.get("conflicts", []) or [])[:6],
             "ai_review_evidence": list(ai_rev.get("evidence", []) or [])[:8],
+            "ai_risk_multiplier": float(ai_risk_multiplier),
+            "ai_risk_score": int(ai_rev.get("risk_score") or 0),
+            "ai_risk_rating": str(ai_rev.get("risk_rating") or ""),
+            "ai_timing": str(ai_timing or (ai_rev.get("execution_advice") or {}).get("suggested_timing") or ""),
+            "ai_timing_advice": str(ai_timing or (ai_rev.get("execution_advice") or {}).get("suggested_timing") or "IMMEDIATE"),
+            "realized_entry_timing": str(order_type).upper(),
+            "execution_wait_reason": str(getattr(revalidation, "reason_code", "") or "none"),
+            "entry_timing": str(order_type).upper(),
+            "market_regime": str(
+                (execution_signal.market_regime.get("regime")
+                 if isinstance(execution_signal.market_regime, dict)
+                 else execution_signal.market_regime) or "unknown"
+            ),
             "idempotency_key": (
                 f"auto-{decision_snapshot_id}"
                 if decision_snapshot_id

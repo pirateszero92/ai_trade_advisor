@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-from app.api import backtest_api, signals, trades, chart, settings_api, journal_api, briefing_api, evidence_api, live_api, market_data_api, paper_api
+from app.api import backtest_api, signals, trades, chart, settings_api, journal_api, briefing_api, evidence_api, live_api, market_data_api, paper_api, authority_api
 from app.api import chat_history_api
 from app.api.ws import router as ws_router
 from app.core.config import get_settings
@@ -115,6 +115,7 @@ def create_app() -> FastAPI:
     app.include_router(evidence_api.router, prefix="/api/v1/evidence", tags=["evidence-replay"])
     app.include_router(backtest_api.router, prefix="/api/v1/backtests", tags=["backtests-release-gates"])
     app.include_router(market_data_api.router, prefix="/api/v1/market-data", tags=["real-time-market-data"])
+    app.include_router(authority_api.router, prefix="/api/v1/authority", tags=["authority-decision-pipeline"])
     # Note: Greenfield /api/v1/opportunities archived under backend/archive/greenfield_v2 per "Evolve, not Revolve" directive.
     app.include_router(ws_router, prefix="/ws", tags=["websocket"])
 

@@ -79,11 +79,17 @@ ALLOWED_TRANSITIONS: dict[CandidateState, set[CandidateState]] = {
     },
     CandidateState.AI_COHERENT: {
         CandidateState.EXECUTION_VALIDATING,
+        CandidateState.WAITING_ENTRY,
+        CandidateState.LIMIT_ARMED,
+        CandidateState.RISK_REJECTED,
         CandidateState.INVALIDATED,
         CandidateState.EXPIRED,
     },
     CandidateState.AI_CAUTION: {
         CandidateState.EXECUTION_VALIDATING,
+        CandidateState.WAITING_ENTRY,
+        CandidateState.LIMIT_ARMED,
+        CandidateState.RISK_REJECTED,
         CandidateState.INVALIDATED,
         CandidateState.EXPIRED,
     },

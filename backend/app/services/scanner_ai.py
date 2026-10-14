@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable, Literal
 
 from loguru import logger
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.core.config import get_settings
 from app.core.json_store import write_json
@@ -211,6 +211,33 @@ def _classify_ai_failure(exc: Exception) -> tuple[str, str]:
     return "PROVIDER_ERROR", "AI provider returned an unexpected error"
 
 
+class SetupEvaluation(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=False)
+    structure_quality: Literal["HIGH", "MEDIUM", "LOW"] = "MEDIUM"
+    location_assessment: Literal[
+        "DISCOUNT", "PREMIUM", "EQUILIBRIUM", "EXTENDED", "FAVORABLE", "UNFAVORABLE"
+    ] = "FAVORABLE"
+    flow_alignment: Literal[
+        "STRONG_ALIGNED", "MODERATE_ALIGNED", "NEUTRAL", "DIVERGENT", "OPPOSING"
+    ] = "NEUTRAL"
+
+
+class MarketContext(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=False)
+    regime_alignment: Literal["SUPPORTIVE", "NEUTRAL", "CHOPPY", "ADVERSE"] = "NEUTRAL"
+    volatility_assessment: Literal["NORMAL", "COMPRESSED", "EXPANDING", "EXTREME"] = "NORMAL"
+    macro_sentiment: Literal["BULLISH", "BEARISH", "NEUTRAL", "UNCERTAIN"] = "NEUTRAL"
+
+
+class ExecutionAdvice(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=False)
+    suggested_timing: Literal[
+        "IMMEDIATE", "LIMIT_RETEST_ONLY", "WAIT_CONFIRMATION", "STAND_ASIDE"
+    ] = "WAIT_CONFIRMATION"
+    invalidation_thesis: str | None = Field(default=None, max_length=500)
+    management_plan: str | None = Field(default=None, max_length=500)
+
+
 class Proposal(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=False)
     verdict: Literal["COHERENT", "CAUTION", "CONFLICT", "UNAVAILABLE"]
@@ -219,6 +246,30 @@ class Proposal(BaseModel):
     conflicts: list[str] = Field(default_factory=list, max_length=6)
     management_note: str | None = Field(default=None, max_length=600)
     evidence: list[str] = Field(default_factory=list, max_length=8)
+    risk_rating: Literal["LOW", "MODERATE", "HIGH", "EXTREME"] = "MODERATE"
+    risk_score: int = Field(default=50)
+    suggested_risk_multiplier: float = Field(default=1.0)
+    setup_evaluation: SetupEvaluation = Field(default_factory=SetupEvaluation)
+    market_context: MarketContext = Field(default_factory=MarketContext)
+    execution_advice: ExecutionAdvice = Field(default_factory=ExecutionAdvice)
+
+    @field_validator("suggested_risk_multiplier", mode="before")
+    @classmethod
+    def _clamp_multiplier(cls, v: Any) -> float:
+        try:
+            val = float(v)
+            return min(1.0, max(0.0, val))
+        except (ValueError, TypeError):
+            return 1.0
+
+    @field_validator("risk_score", mode="before")
+    @classmethod
+    def _clamp_risk_score(cls, v: Any) -> int:
+        try:
+            val = int(v)
+            return min(100, max(0, val))
+        except (ValueError, TypeError):
+            return 50
 
 
 class IndependentMarketRead(BaseModel):
@@ -244,6 +295,30 @@ class SetupComparison(BaseModel):
     conflicts: list[str] = Field(default_factory=list, max_length=6)
     management_note: str | None = Field(default=None, max_length=600)
     evidence: list[str] = Field(default_factory=list, max_length=8)
+    risk_rating: Literal["LOW", "MODERATE", "HIGH", "EXTREME"] = "MODERATE"
+    risk_score: int = Field(default=50)
+    suggested_risk_multiplier: float = Field(default=1.0)
+    setup_evaluation: SetupEvaluation = Field(default_factory=SetupEvaluation)
+    market_context: MarketContext = Field(default_factory=MarketContext)
+    execution_advice: ExecutionAdvice = Field(default_factory=ExecutionAdvice)
+
+    @field_validator("suggested_risk_multiplier", mode="before")
+    @classmethod
+    def _clamp_multiplier(cls, v: Any) -> float:
+        try:
+            val = float(v)
+            return min(1.0, max(0.0, val))
+        except (ValueError, TypeError):
+            return 1.0
+
+    @field_validator("risk_score", mode="before")
+    @classmethod
+    def _clamp_risk_score(cls, v: Any) -> int:
+        try:
+            val = int(v)
+            return min(100, max(0, val))
+        except (ValueError, TypeError):
+            return 50
 
 
 def _clean_and_repair_json(raw: str) -> str:
@@ -709,7 +784,14 @@ def build_context(analysis, mtf_context: dict | None = None):
     signal, frame = analysis.signal, analysis.frame
     close = float(frame["close"].iloc[-1])
     now = datetime.now(timezone.utc)
-    dec = 4 if close < 5.0 else 2
+    if close < 0.0001:
+        dec = 8
+    elif close < 0.01:
+        dec = 6
+    elif close < 5.0:
+        dec = 4
+    else:
+        dec = 2
     levels = set()
     zones = []
     swings = [round(float(p.price), dec) for p in [*signal.swing_highs, *signal.swing_lows]
@@ -1111,6 +1193,38 @@ def validate_advisory(proposal, context, analysis):
     elif verdict == "CAUTION" and getattr(proposal, "decision", "PASS") in {"BUY", "SELL"}:
         canonical_decision = getattr(proposal, "decision", "PASS")
 
+    # Phase 3: Deterministic clamping and guardrails for Decision Manager fields
+    if verdict == "COHERENT":
+        eff_risk_rating = getattr(proposal, "risk_rating", "LOW")
+        if eff_risk_rating not in {"LOW", "MODERATE"}:
+            eff_risk_rating = "LOW"
+        eff_risk_score = min(40, max(0, int(getattr(proposal, "risk_score", 20))))
+        eff_risk_mult = min(1.0, max(0.1, float(getattr(proposal, "suggested_risk_multiplier", 1.0))))
+    elif verdict == "CAUTION":
+        eff_risk_rating = (
+            "MODERATE"
+            if getattr(proposal, "risk_rating", "") in {"LOW", "MODERATE"}
+            else getattr(proposal, "risk_rating", "MODERATE")
+        )
+        eff_risk_score = min(75, max(41, int(getattr(proposal, "risk_score", 50))))
+        eff_risk_mult = min(0.5, max(0.1, float(getattr(proposal, "suggested_risk_multiplier", 0.5))))
+    else:  # CONFLICT or UNAVAILABLE
+        eff_risk_rating = "HIGH" if getattr(proposal, "risk_rating", "") != "EXTREME" else "EXTREME"
+        eff_risk_score = min(100, max(80, int(getattr(proposal, "risk_score", 90))))
+        eff_risk_mult = 0.0
+
+    raw_eval = getattr(proposal, "setup_evaluation", None)
+    setup_eval = raw_eval.model_dump() if hasattr(raw_eval, "model_dump") else (raw_eval if isinstance(raw_eval, dict) else {})
+    raw_ctx = getattr(proposal, "market_context", None)
+    market_ctx = raw_ctx.model_dump() if hasattr(raw_ctx, "model_dump") else (raw_ctx if isinstance(raw_ctx, dict) else {})
+    raw_adv = getattr(proposal, "execution_advice", None)
+    exec_adv = raw_adv.model_dump() if hasattr(raw_adv, "model_dump") else (raw_adv if isinstance(raw_adv, dict) else {})
+
+    if str(setup.get("entry_policy")) == "limit_retest_only" and exec_adv.get("suggested_timing") == "IMMEDIATE":
+        exec_adv["suggested_timing"] = "LIMIT_RETEST_ONLY"
+    elif verdict in {"CONFLICT", "UNAVAILABLE"}:
+        exec_adv["suggested_timing"] = "STAND_ASIDE"
+
     return {
         "verdict": verdict,
         "decision": canonical_decision,
@@ -1120,6 +1234,12 @@ def validate_advisory(proposal, context, analysis):
         "deterministic_direction": direction,
         "deterministic_entry_policy": str(setup.get("entry_policy", "none")),
         "provider_controls_trade_plan": False,
+        "risk_rating": eff_risk_rating,
+        "risk_score": eff_risk_score,
+        "suggested_risk_multiplier": eff_risk_mult,
+        "setup_evaluation": setup_eval,
+        "market_context": market_ctx,
+        "execution_advice": exec_adv,
     }
 
 
@@ -1357,6 +1477,12 @@ class ScannerAI:
                         conflicts=comparison.conflicts,
                         management_note=comparison.management_note,
                         evidence=comparison.evidence,
+                        risk_rating=comparison.risk_rating,
+                        risk_score=comparison.risk_score,
+                        suggested_risk_multiplier=comparison.suggested_risk_multiplier,
+                        setup_evaluation=comparison.setup_evaluation,
+                        market_context=comparison.market_context,
+                        execution_advice=comparison.execution_advice,
                     )
                     review["independent_market_read"] = independent_read.model_dump()
                     review["comparison_verdict"] = comparison.comparison_verdict
@@ -1367,7 +1493,16 @@ class ScannerAI:
                         engine._dispatch(provider, messages),
                         timeout=cfg.scanner_ai_timeout_seconds,
                     )
-                    proposal, normalization = _parse_proposal_response(raw)
+                    try:
+                        proposal, normalization = _parse_proposal_response(raw)
+                    except Exception as parse_err:
+                        logger.error(
+                            "Failed to parse proposal response for {}: {} | Raw snippet: {}",
+                            analysis.symbol,
+                            parse_err,
+                            repr(raw[:400]),
+                        )
+                        raise
                     if normalization:
                         review["response_normalization"] = normalization
                 review["provider_attempts"] = [
@@ -1389,12 +1524,19 @@ class ScannerAI:
             review["failure_type"] = exc.reason_code
             review["error"] = str(exc)
         except Exception as exc:
-            failure_type, message = _classify_ai_failure(exc)
+            underlying = exc
+            if hasattr(exc, "last_attempt") and exc.last_attempt:
+                un = exc.last_attempt.exception()
+                if un:
+                    underlying = un
+            failure_type, message = _classify_ai_failure(underlying)
             logger.warning(
-                "Scanner AI unavailable for {}: {} ({})",
+                "Scanner AI unavailable for {}: {} ({}) | Underlying: {} ({})",
                 analysis.symbol,
                 type(exc).__name__,
                 failure_type,
+                type(underlying).__name__,
+                underlying,
             )
             review["status"] = "error"
             review["verdict"] = "UNAVAILABLE"

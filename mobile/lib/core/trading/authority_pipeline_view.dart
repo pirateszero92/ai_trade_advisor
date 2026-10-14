@@ -149,6 +149,13 @@ class AuthorityPipelineView {
                 ai['failure_type'] ??
                 (conflicts.isNotEmpty ? conflicts.join(' • ') : ''))
             .toString(),
+        primaryMetric: ai['risk_score'] != null
+            ? 'Score ${ai['risk_score']}/100'
+            : '',
+        secondaryMetric: ai['suggested_risk_multiplier'] != null &&
+                (ai['suggested_risk_multiplier'] as num) < 1.0
+            ? '${ai['suggested_risk_multiplier']}x Risk'
+            : (ai['risk_rating'] ?? '').toString(),
       ),
       execution: AuthorityStageView(
         name: 'Execution',

@@ -19,7 +19,7 @@ tri_core_policy:
   market_entry_max_extension_atr: 0.25
   no_chase_max_extension_atr: 0.60
   zone_approach_distance_atr: 0.50
-  minimum_rr: 1.5
+  minimum_rr: 2.0
   # Candidate seeds: calibrate with chronological rolling walk-forward data.
   strong_divergence_min_price_excursion_atr: 0.50
   strong_divergence_min_cvd_efficiency: 0.10

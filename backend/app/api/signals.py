@@ -259,6 +259,7 @@ async def list_signals(
             event_id=effective_event_id,
             tri_core_setup=tri_core,
             structural_rr=s.get("risk_reward"),
+            ai_review=s.get("ai_review"),
         )
         if "message" in s:
             s["message"] = _clean_message_text(s["message"])
@@ -334,11 +335,17 @@ async def trigger_scan(
         filtered_signals = [s for s in filtered_signals if s.get("exchange") != "innovestx" and "thb" not in s.get("symbol", "").lower()]
 
     from app.services.authority_status import build_authority_status
+    from app.services.execution_analysis import execution_analyses
     for signal in filtered_signals:
         snapshot = signal.get("analysis_snapshot") or {}
         tri_core = signal.get("tri_core_setup") or {}
         snapshot_id = str(snapshot.get("snapshot_id") or "")
         event_id = str(tri_core.get("event_id") or "")
+        cached = execution_analyses.get_by_snapshot_id(snapshot_id) if snapshot_id else None
+        if cached is not None:
+            review = getattr(cached.signal, "ai_review", {}) or {}
+            if review.get("status") == "reviewed":
+                signal["ai_review"] = review
         effective_snapshot_id = snapshot_id or f"snap-{signal.get('symbol')}"
         effective_event_id = event_id or f"wait-{signal.get('symbol')}"
         signal["authority_status"] = await build_authority_status(
@@ -347,6 +354,7 @@ async def trigger_scan(
             event_id=effective_event_id,
             tri_core_setup=tri_core,
             structural_rr=signal.get("risk_reward"),
+            ai_review=signal.get("ai_review"),
         )
 
     return {

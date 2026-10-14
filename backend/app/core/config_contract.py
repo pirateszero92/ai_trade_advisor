@@ -31,6 +31,8 @@ RUNTIME_OWNERSHIP: dict[str, str] = {
     "provider": "ai",
     "local_endpoint": "ai",
     "local_model": "ai",
+    "local_key": "ai",
+    "local_api_key": "ai",
     "gemini_model": "ai",
     "openrouter_model": "ai",
     "watchlist": "research",

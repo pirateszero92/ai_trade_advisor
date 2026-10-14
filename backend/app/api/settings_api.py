@@ -1464,11 +1464,20 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
     cluster_loss_cooldown_enabled = bool(cfg.cluster_loss_cooldown_enabled)
     cluster_loss_cooldown_minutes = int(cfg.cluster_loss_cooldown_minutes)
     try:
+        from app.core.strategy_config_store import read_strategy_config
+        from app.engines.strategy_engine import STRATEGY_FILE
+        strat = read_strategy_config(STRATEGY_FILE)
+        canonical_rr = strat.get("tri_core_policy", {}).get("minimum_rr")
+        if canonical_rr is not None:
+            target_rr = float(canonical_rr)
+    except Exception:
+        pass
+    try:
         data = load_runtime_config()
         entry_mode = data.get("entry_mode", "limit")
         auto_sl_tp = data.get("auto_sl_tp", True)
         auto_invalidation = data.get("auto_invalidation", True)
-        target_rr = float(data.get("target_rr", 2.0))
+        target_rr = float(data.get("target_rr", target_rr))
         default_sl_pct = float(data.get("default_sl_pct", 1.0))
         auto_trade_enabled = bool(data.get("auto_trade_enabled", False))
         auto_trade_min_grade = str(data.get("auto_trade_min_grade", "A"))
@@ -1584,6 +1593,15 @@ async def update_risk_config(
             updates["auto_invalidation"] = req.auto_invalidation
         if req.target_rr is not None:
             updates["target_rr"] = req.target_rr
+            try:
+                from app.core.strategy_config_store import read_strategy_config, update_strategy_section
+                from app.engines.strategy_engine import STRATEGY_FILE
+                strat = read_strategy_config(STRATEGY_FILE)
+                tcp = dict(strat.get("tri_core_policy", {}))
+                tcp["minimum_rr"] = float(req.target_rr)
+                update_strategy_section(STRATEGY_FILE, "tri_core_policy", tcp)
+            except Exception as strat_err:
+                logger.warning(f"Could not synchronize tri_core_policy.minimum_rr: {strat_err}")
         if req.default_sl_pct is not None:
             updates["default_sl_pct"] = req.default_sl_pct
         if req.auto_trade_enabled is not None:
