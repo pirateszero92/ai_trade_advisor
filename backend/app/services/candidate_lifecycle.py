@@ -10,6 +10,7 @@ from enum import StrEnum
 from typing import Any
 
 from app.services.observability import observability
+from loguru import logger
 
 
 class CandidateState(StrEnum):
@@ -98,6 +99,7 @@ ALLOWED_TRANSITIONS: dict[CandidateState, set[CandidateState]] = {
         CandidateState.AI_COHERENT,
         CandidateState.AI_CAUTION,
         CandidateState.AI_CONFLICT,
+        CandidateState.EXECUTION_VALIDATING,
         CandidateState.INVALIDATED,
         CandidateState.EXPIRED,
     },
@@ -289,17 +291,22 @@ class CandidateLifecycleService:
         async with self._lock:
             record = self._records.get(cid)
             if record is None:
+                logger.debug(f"[CandidateLifecycle] Record not found for {cid}")
                 return False
             if record.snapshot_id != snapshot_id or record.event_id != event_id:
+                logger.debug(f"[CandidateLifecycle] Snapshot/event mismatch for {cid}")
                 return False
             if require_current and self._current_by_symbol.get(symbol_key) != cid:
+                logger.debug(f"[CandidateLifecycle] Candidate not current for {cid}: current={self._current_by_symbol.get(symbol_key)}")
                 return False
             if record.state == state:
                 return True
             if record.state in TERMINAL_STATES:
+                logger.info(f"[CandidateLifecycle] Rejected transition {record.state} -> {state} for {cid}: already terminal")
                 return False
             allowed = ALLOWED_TRANSITIONS.get(record.state, set())
             if state not in allowed:
+                logger.info(f"[CandidateLifecycle] Disallowed transition {record.state} -> {state} for {cid} (allowed: {allowed})")
                 return False
             self._apply_transition(
                 record,

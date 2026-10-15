@@ -353,27 +353,33 @@ class ExecutionAnalysisService:
                 "CONFLICT": CandidateState.AI_CONFLICT,
                 "UNAVAILABLE": CandidateState.AI_UNAVAILABLE,
             }.get(verdict, CandidateState.AI_UNAVAILABLE)
+            runtime = load_runtime_config()
+            ai_policy = str(runtime.get("auto_trade_ai_policy", "strict")).lower()
+            require_ai = bool(runtime.get("auto_trade_require_ai_approval", True))
+            is_advisory = (ai_policy == "advisory") or (not require_ai)
+
             if event_id:
-                failure_type = str(review_payload.get("failure_type") or "").upper()
-                reason_code = (
-                    f"AI_{failure_type}"
-                    if verdict == "UNAVAILABLE" and failure_type
-                    else f"AI_{verdict}"
-                )
-                changed = await candidate_lifecycle.transition(
-                    symbol=analysis.symbol,
-                    snapshot_id=analysis.snapshot_id,
-                    event_id=event_id,
-                    new_state=lifecycle_state,
-                    reason_code=reason_code,
-                    reason=str(
-                        review_payload.get("reason")
-                        or review_payload.get("error")
-                        or ""
-                    )[:300],
-                )
-                if not changed:
-                    return  # Stale/replaced candidate cannot be mutated by async AI.
+                if not is_advisory:
+                    failure_type = str(review_payload.get("failure_type") or "").upper()
+                    reason_code = (
+                        f"AI_{failure_type}"
+                        if verdict == "UNAVAILABLE" and failure_type
+                        else f"AI_{verdict}"
+                    )
+                    changed = await candidate_lifecycle.transition(
+                        symbol=analysis.symbol,
+                        snapshot_id=analysis.snapshot_id,
+                        event_id=event_id,
+                        new_state=lifecycle_state,
+                        reason_code=reason_code,
+                        reason=str(
+                            review_payload.get("reason")
+                            or review_payload.get("error")
+                            or ""
+                        )[:300],
+                    )
+                    if not changed:
+                        return  # Stale/replaced candidate cannot be mutated by async AI.
                 review_payload = reviewed.signal.ai_review or {}
                 await decision_trace.record(
                     snapshot_id=analysis.snapshot_id,
@@ -423,14 +429,18 @@ class ExecutionAnalysisService:
                 setup = getattr(analysis.signal, "tri_core_setup", {}) or {}
                 event_id = str(setup.get("event_id", ""))
                 if event_id:
-                    await candidate_lifecycle.transition(
-                        symbol=analysis.symbol,
-                        snapshot_id=analysis.snapshot_id,
-                        event_id=event_id,
-                        new_state=CandidateState.AI_UNAVAILABLE,
-                        reason_code="AI_REVIEW_ERROR",
-                        reason="AI review unavailable",
-                    )
+                    runtime = load_runtime_config()
+                    ai_policy = str(runtime.get("auto_trade_ai_policy", "strict")).lower()
+                    require_ai = bool(runtime.get("auto_trade_require_ai_approval", True))
+                    if ai_policy != "advisory" and require_ai:
+                        await candidate_lifecycle.transition(
+                            symbol=analysis.symbol,
+                            snapshot_id=analysis.snapshot_id,
+                            event_id=event_id,
+                            new_state=CandidateState.AI_UNAVAILABLE,
+                            reason_code="AI_REVIEW_ERROR",
+                            reason="AI review unavailable",
+                        )
                     await decision_trace.record(
                         snapshot_id=analysis.snapshot_id,
                         event_id=event_id,
