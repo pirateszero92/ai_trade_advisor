@@ -311,9 +311,12 @@ async def build_authority_status(
             "policy": ai_policy,
             "fast_tracked": bool(ai.get("fast_tracked", False)),
             "soft_caution": ai_verdict.upper() == "CAUTION",
-            "risk_rating": ai.get("risk_rating", "MODERATE" if ai_verdict.upper() == "CAUTION" else "LOW" if ai_verdict.upper() == "COHERENT" else "HIGH"),
-            "risk_score": ai.get("risk_score", 50 if ai_verdict.upper() == "CAUTION" else 20 if ai_verdict.upper() == "COHERENT" else 85),
-            "suggested_risk_multiplier": ai.get("suggested_risk_multiplier", 0.5 if ai_verdict.upper() == "CAUTION" else 1.0 if ai_verdict.upper() == "COHERENT" else 0.0),
+            "risk_rating": ai.get("risk_rating", "MODERATE" if ai_verdict.upper() == "CAUTION" else "LOW" if ai_verdict.upper() == "COHERENT" else ("ADVISORY" if (ai_policy == "advisory" or not ai_required) else "HIGH")),
+            "risk_score": ai.get("risk_score", 50 if ai_verdict.upper() == "CAUTION" else 20 if ai_verdict.upper() == "COHERENT" else (None if ai_status.lower() in {"not_requested", "none"} else 85)),
+            "suggested_risk_multiplier": (
+                1.0 if (ai_policy == "advisory" or not ai_required)
+                else ai.get("suggested_risk_multiplier", 0.5 if ai_verdict.upper() == "CAUTION" else 1.0 if ai_verdict.upper() == "COHERENT" else 0.0)
+            ),
             "setup_evaluation": ai.get("setup_evaluation", {}),
             "market_context": ai.get("market_context", {}),
             "execution_advice": ai.get("execution_advice", {}),
