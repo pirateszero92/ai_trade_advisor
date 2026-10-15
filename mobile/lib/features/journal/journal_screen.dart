@@ -605,6 +605,9 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
     final closed = _trades.where((t) => t['status'] == 'closed').toList();
     final openList = _trades.where((t) => t['status'] == 'open').toList();
     final pendingList = _trades.where((t) => t['status'] == 'pending').toList();
+    final historyList = _trades
+        .where((t) => t['status'] == 'closed' || t['status'] == 'cancelled')
+        .toList();
 
     final wins = closed
         .where((t) => ((t['pnl'] as num?)?.toDouble() ?? 0.0) > 0)
@@ -745,7 +748,7 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
 
                       // Three Distinct Tabs: Open Positions vs Pending Orders vs Trade History
                       _buildTabsHeader(
-                          openList.length, pendingList.length, closed.length),
+                          openList.length, pendingList.length, historyList.length),
 
                       const SizedBox(height: 8),
 
@@ -942,14 +945,14 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                         else
                           ...pendingList.map((t) => _buildTradeItem(t)),
                       ] else ...[
-                        // Tab 2: Trade History (Closed Trades)
+                        // Tab 2: Trade History (Closed & Cancelled Trades)
                         _buildDisciplineScorecard(),
                         const SizedBox(height: 8),
-                        if (closed.isNotEmpty)
-                          _buildHistoryFilterBar(closed.length, wins.length,
+                        if (historyList.isNotEmpty)
+                          _buildHistoryFilterBar(historyList.length, wins.length,
                               closed.length - wins.length),
 
-                        if (_getFilteredClosedTrades(closed).isEmpty)
+                        if (_getFilteredClosedTrades(historyList).isEmpty)
                           Container(
                             padding: const EdgeInsets.symmetric(
                                 vertical: 36, horizontal: 20),
@@ -980,7 +983,7 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                                   Text(
                                     _activeProfileMode == 'live'
                                         ? 'รายการซื้อขายที่ส่งผ่าน InnovestX จริงจะถูกบันทึกและซิงค์สถิติที่นี่แบบ Real-time'
-                                        : 'ประวัติการเทรด Paper Trading ที่ปิดแล้วจะแสดงที่นี่',
+                                        : 'ประวัติการเทรด Paper Trading ที่ปิดหรือยกเลิกแล้วจะแสดงที่นี่',
                                     textAlign: TextAlign.center,
                                     style: const TextStyle(
                                         color: AppColors.textMuted,
@@ -991,7 +994,7 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                             ),
                           )
                         else
-                          ..._getFilteredClosedTrades(closed)
+                          ..._getFilteredClosedTrades(historyList)
                               .map((t) => _buildTradeItem(t)),
                       ],
                     ],
@@ -1229,13 +1232,18 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
   }
 
   List<Map<String, dynamic>> _getFilteredClosedTrades(
-      List<Map<String, dynamic>> closed) {
+      List<Map<String, dynamic>> trades) {
     if (_historyFilter == 'win') {
-      return closed.where((t) => ((t['pnl'] ?? 0) as num) > 0).toList();
+      return trades
+          .where((t) => t['status'] == 'closed' && ((t['pnl'] ?? 0) as num) > 0)
+          .toList();
     } else if (_historyFilter == 'loss') {
-      return closed.where((t) => ((t['pnl'] ?? 0) as num) <= 0).toList();
+      return trades
+          .where((t) =>
+              t['status'] == 'closed' && ((t['pnl'] ?? 0) as num) <= 0)
+          .toList();
     }
-    return closed;
+    return trades;
   }
 
   Widget _buildTradeItem(Map<String, dynamic> t) {
@@ -2701,13 +2709,16 @@ class _TradeCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isPending = status == 'pending';
+    final isCancelled = status == 'cancelled';
     final isOpen = status == 'open';
     final isWin = pnlUsd >= 0;
     final isLong = direction == 'LONG';
     final sideColor = isLong ? AppColors.bullish : AppColors.bearish;
     final pnlColor = isPending
         ? const Color(0xFFFFD700)
-        : (isWin ? AppColors.bullish : AppColors.bearish);
+        : (isCancelled
+            ? const Color(0xFF9E9E9E)
+            : (isWin ? AppColors.bullish : AppColors.bearish));
 
     // Determine status badge text and color
     String statusLabel = '● OPEN';
@@ -2715,6 +2726,9 @@ class _TradeCard extends StatelessWidget {
     if (isPending) {
       statusLabel = '⏳ PENDING';
       statusColor = const Color(0xFFFFD700);
+    } else if (isCancelled) {
+      statusLabel = '🚫 CANCELLED';
+      statusColor = const Color(0xFF9E9E9E);
     } else if (!isOpen) {
       if (closeReason.contains('TP')) {
         statusLabel = '🎯 TP HIT';
@@ -2823,7 +2837,9 @@ class _TradeCard extends StatelessWidget {
                     child: Text(
                       isPending
                           ? 'รอ Match (ห่าง ${distPct.toStringAsFixed(2)}%)'
-                          : '${isWin ? '+' : ''}$currSym${pnlUsd.toStringAsFixed(2)} (${isWin ? '+' : ''}${pnl.toStringAsFixed(2)}%)',
+                          : isCancelled
+                              ? 'ยกเลิกคำสั่ง'
+                              : '${isWin ? '+' : ''}$currSym${pnlUsd.toStringAsFixed(2)} (${isWin ? '+' : ''}${pnl.toStringAsFixed(2)}%)',
                       style: TextStyle(
                           color: pnlColor,
                           fontWeight: FontWeight.bold,
@@ -2968,9 +2984,11 @@ class _TradeCard extends StatelessWidget {
                     child: Text(
                       isPending
                           ? 'เป้าเข้า (Entry): \$${_formatPrice(entry, symbol)}  ➜  ตลาดสด: \$${_formatPrice(livePrice, symbol)}'
-                          : (isOpen
-                              ? 'Entry: \$${_formatPrice(entry, symbol)}  ➜  Live: \$${_formatPrice(livePrice, symbol)}'
-                              : 'Entry: \$${_formatPrice(entry, symbol)}  ➜  Exit: \$${_formatPrice(exitP, symbol)}${closeReason.isNotEmpty ? ' ($closeReason)' : ''}'),
+                          : isCancelled
+                              ? 'Entry: \$${_formatPrice(entry, symbol)}${closeReason.isNotEmpty ? '  •  $closeReason' : ''}'
+                              : (isOpen
+                                  ? 'Entry: \$${_formatPrice(entry, symbol)}  ➜  Live: \$${_formatPrice(livePrice, symbol)}'
+                                  : 'Entry: \$${_formatPrice(entry, symbol)}  ➜  Exit: \$${_formatPrice(exitP, symbol)}${closeReason.isNotEmpty ? ' ($closeReason)' : ''}'),
                       style: const TextStyle(
                           fontSize: 11,
                           color: Colors.white70,

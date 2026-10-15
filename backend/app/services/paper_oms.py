@@ -1665,6 +1665,7 @@ class PaperOMS:
             stop_distance = abs(entry - stop)
             reward_distance = max(abs(target - entry) - execution_cost, ZERO)
             executable_rr = reward_distance / max(stop_distance + execution_cost, EPSILON)
+            cost_to_stop = execution_cost / max(stop_distance, EPSILON)
             payload_min_rr = payload.get("minimum_executable_rr")
             min_rr = _decimal(payload_min_rr) if payload_min_rr else Decimal("1.5")
             if executable_rr < min_rr:
@@ -1681,10 +1682,14 @@ class PaperOMS:
         order.completed_at = now
         order.updated_at = now
         order.close_reason = reason[:200]
+        order.remaining_quantity = ZERO
         order.version += 1
-        position.status = "cancelled"
-        position.close_reason = reason[:200]
-        position.closed_at = now
+        if _decimal(position.opened_quantity) <= ZERO:
+            position.status = "cancelled"
+            position.close_reason = reason[:200]
+            position.closed_at = now
+        else:
+            position.status = "open"
         position.updated_at = now
         position.version += 1
         self._add_event(

@@ -523,6 +523,75 @@ async def test_limit_partial_fill_cancel_remainder_and_partial_tp(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_limit_partial_fill_expired_keeps_position_open(tmp_path):
+    oms, factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"P6EXP{uuid.uuid4().hex[:6]}/USDT"
+    now_dt = datetime.now(timezone.utc)
+    # Set valid_until in the future so placement and first fill pass
+    valid_until = (now_dt + timedelta(seconds=60)).isoformat()
+    payload = _approved_auto_pilot_payload(
+        direction="long",
+        symbol=symbol,
+    )
+    payload["order_type"] = "limit"
+    payload["entry"] = 99.0
+    payload["valid_until"] = valid_until
+    placed = await oms.place_order(payload)
+    # First tick: fills 0.5 units
+    changed = await oms.process_market_tick({
+        "symbol": symbol,
+        "price": 99.0,
+        "bid": 98.99,
+        "ask": 99.0,
+        "aggressor_side": "sell",
+        "last_trade_quantity": 0.5,
+        "sequence": 101,
+        "source": "test_ws",
+        "transport": "websocket",
+        "received_timestamp": datetime.now(timezone.utc).timestamp(),
+    })
+    assert len(changed) == 1
+    assert changed[0]["close_reason"] in (None, ""), f"Rejected with: {changed[0].get('close_reason')}"
+    assert changed[0]["status"] == "open"
+    assert changed[0]["filled_quantity"] == pytest.approx(0.005)
+
+    # Now simulate expiration of valid_until
+    async with factory() as session:
+        pos = await session.get(PaperOMSPosition, placed["id"])
+        payload = dict(pos.source_payload or {})
+        payload["valid_until"] = (now_dt - timedelta(minutes=5)).isoformat()
+        pos.source_payload = payload
+        await session.commit()
+
+    # Next tick: order is expired, _pending_limit_still_valid should cancel entry order
+    # but KEEP position.status == 'open'
+    changed2 = await oms.process_market_tick({
+        "symbol": symbol,
+        "price": 99.0,
+        "bid": 98.99,
+        "ask": 99.0,
+        "aggressor_side": "sell",
+        "last_trade_quantity": 1.0,
+        "sequence": 102,
+        "source": "test_ws",
+        "transport": "websocket",
+        "received_timestamp": datetime.now(timezone.utc).timestamp(),
+    })
+    assert len(changed2) == 1
+    assert changed2[0]["status"] == "open"  # Must remain open!
+    assert changed2[0]["entry_order_status"] == "cancelled"
+    assert changed2[0]["remaining_quantity"] == pytest.approx(0.005)
+
+    # Verify the position can still be closed at market
+    closed = await oms.close_position(placed["id"], close_price=102.0, reason="TP")
+    assert closed["status"] == "closed"
+    assert closed["pnl"] > 0
+    await oms.stop()
+    await engine.dispose()
+
+
+
+@pytest.mark.anyio
 async def test_cancelled_limit_cannot_fill_and_market_event_is_idempotent(tmp_path):
     oms, factory, engine, _projection, _config = await _make_oms(tmp_path)
     symbol = f"P6RACE{uuid.uuid4().hex[:6]}/USDT"
