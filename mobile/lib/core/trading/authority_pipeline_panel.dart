@@ -35,9 +35,12 @@ class AuthorityPipelinePanel extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(children: [
-            const Expanded(
-              child: Text('DECISION PIPELINE',
-                  style: TextStyle(
+            Expanded(
+              child: Text(
+                  view.isAdvisory
+                      ? '3-TIER EXECUTION PIPELINE'
+                      : 'DECISION PIPELINE',
+                  style: const TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.bold,
                       color: Colors.white70,
@@ -77,7 +80,7 @@ class AuthorityPipelinePanel extends StatelessWidget {
                             color: _color(stage), shape: BoxShape.circle)),
                     const SizedBox(width: 7),
                     SizedBox(
-                        width: 70,
+                        width: 100,
                         child: Text(stage.name,
                             style: const TextStyle(
                                 fontSize: 10,
@@ -110,6 +113,36 @@ class AuthorityPipelinePanel extends StatelessWidget {
                   ],
                 ),
               )),
+          if (view.isAdvisory) ...[
+            const Divider(color: Colors.white12, height: 12),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                const Icon(Icons.psychology_outlined,
+                    size: 13, color: Colors.cyanAccent),
+                const SizedBox(width: 5),
+                const Text('AI ADVISOR (OUT-OF-LOOP):',
+                    style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.cyanAccent)),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    view.ai.status.replaceAll('_', ' ').toUpperCase() +
+                        (view.ai.secondaryMetric.isNotEmpty
+                            ? ' • ${view.ai.secondaryMetric}'
+                            : ''),
+                    style: const TextStyle(
+                        fontSize: 9,
+                        color: Colors.white70,
+                        fontWeight: FontWeight.w600),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );

@@ -265,4 +265,54 @@ void main() {
     expect(view.risk.status, 'approved');
     expect(view.orderReady, isTrue);
   });
+
+  testWidgets('renders 3-tier execution pipeline and out-of-loop AI in advisory mode',
+      (tester) async {
+    final advisoryPayload = <String, dynamic>{
+      'authority_status': {
+        'lifecycle_state': 'WAITING_RETEST',
+        'lifecycle_reason': 'Armed limit at structural entry',
+        'tri_core': {
+          'status': 'ready',
+          'direction': 'short',
+          'grade': 'A',
+          'setup_type': 'ping_pong',
+          'structural_rr': 2.5,
+        },
+        'ai_review': {
+          'status': 'reviewed',
+          'verdict': 'PASS',
+          'policy': 'advisory',
+          'required': false,
+          'reason': 'Market structure is aligned',
+        },
+        'execution': {
+          'status': 'waiting_retest',
+          'reason_code': 'EXECUTABLE_RR_TOO_LOW',
+          'structural_rr': 2.5,
+          'executable_rr': 1.5,
+        },
+        'risk': {
+          'status': 'approved',
+          'risk_pct': 2.0,
+        },
+        'order': {'status': 'ready'},
+        'oms': {
+          'status': 'not_submitted',
+        },
+      },
+    };
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(body: AuthorityPipelinePanel(payload: advisoryPayload)),
+    ));
+
+    expect(find.text('3-TIER EXECUTION PIPELINE'), findsOneWidget);
+    expect(find.text('1. Decision Engine'), findsOneWidget);
+    expect(find.text('2. Risk & Guard'), findsOneWidget);
+    expect(find.text('3. OMS'), findsOneWidget);
+    expect(find.text('AI ADVISOR (OUT-OF-LOOP):'), findsOneWidget);
+    expect(find.textContaining('PASS (ADVISORY)'), findsOneWidget);
+    expect(find.textContaining('Non-blocking'), findsOneWidget);
+  });
 }
