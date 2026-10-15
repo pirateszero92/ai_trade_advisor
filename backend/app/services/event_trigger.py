@@ -925,7 +925,7 @@ class MarketMonitor:
                     signal_payload["ai_review"] = getattr(ltf_sig, "ai_review", signal_payload.get("ai_review"))
                     await broadcast({"type": "signal", "data": signal_payload})
                 except Exception as auto_exc:
-                    logger.error(f"[Auto-Pilot] Error evaluating auto-trade for {symbol}: {auto_exc}")
+                    logger.exception(f"[Auto-Pilot] Error evaluating auto-trade for {symbol}: {auto_exc}")
             else:
                 signal_payload["ai_review"] = getattr(ltf_sig, "ai_review", signal_payload.get("ai_review"))
 
