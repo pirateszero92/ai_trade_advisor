@@ -172,6 +172,11 @@ class ExecutionAnalysisService:
         config["scanner_ai"] = {"mode": cfg.scanner_ai_mode,
                                 "model": cfg.local_llm_model, "endpoint": cfg.local_llm_endpoint,
                                 "provider": load_runtime_config().get("provider", "local")}
+        runtime = load_runtime_config()
+        config["execution_policy"] = {
+            "entry_policy": str(runtime.get("auto_trade_entry_policy", "fixed")),
+            "limit_timeout_bars": int(runtime.get("auto_trade_limit_timeout_bars", 3)),
+        }
         return config
 
     def clear(self) -> None:

@@ -105,6 +105,7 @@ async def build_authority_status(
     execution = _latest(events, "EXECUTION_REVALIDATION")
     risk = _latest(events, "RISK")
     oms = _latest(events, "OMS_STATE") or _latest(events, "OMS_RESULT")
+    shadow_comparison = _latest(events, "SHADOW_COMPARISON")
 
     if not oms:
         try:
@@ -130,8 +131,11 @@ async def build_authority_status(
 
     runtime = load_runtime_config()
     risk_cfg = runtime.get("risk_management", {}) if isinstance(runtime, dict) else {}
-    ai_required = bool(risk_cfg.get("auto_trade_require_ai_approval", True))
-    accept_caution = bool(risk_cfg.get("auto_trade_accept_caution", False))
+    ai_required = bool(runtime.get("auto_trade_require_ai_approval", risk_cfg.get("auto_trade_require_ai_approval", True)))
+    accept_caution = bool(runtime.get("auto_trade_accept_caution", risk_cfg.get("auto_trade_accept_caution", False)))
+    ai_policy = str(runtime.get("auto_trade_ai_policy", "strict")).lower()
+    if ai_policy not in {"strict", "guarded", "advisory"}:
+        ai_policy = "strict"
 
     actionable = setup.get("actionable") is True
 
@@ -162,7 +166,7 @@ async def build_authority_status(
     ai_decision = str(ai.get("decision") or "").upper()
 
     ai_passed = bool(
-        (ai_coherent or (ai_caution and accept_caution) or not ai_required)
+        (ai_coherent or (ai_caution and (accept_caution or ai_policy == "guarded")) or ai_policy == "advisory" or not ai_required)
         and (ai_verdict.upper() not in {"CONFLICT", "UNAVAILABLE"})
         and (ai_decision != "PASS" if ai_status.lower() == "reviewed" else True)
         and (ai_timing != "STAND_ASIDE")
@@ -203,7 +207,51 @@ async def build_authority_status(
         and risk_approved
         and not order_already_submitted
     )
+
     rejection_reasons = list(setup.get("rejection_reasons") or [])
+
+    # Keep one canonical explanation for the UI and operators.  The stage
+    # payloads below remain available for detail, but callers should not have
+    # to infer the first blocking gate themselves.
+    if order_already_submitted:
+        final_decision = "SUBMITTED"
+        final_block_stage = "OMS"
+        final_block_reason_code = f"OMS_{oms_status.upper()}"
+        final_block_reason = oms.get("close_reason") or f"OMS status is {oms_status}"
+    elif not actionable:
+        final_decision = "WAIT"
+        final_block_stage = "TRI_CORE"
+        final_block_reason_code = (
+            str(rejection_reasons[0]) if rejection_reasons else "NO_SETUP"
+        )
+        final_block_reason = "; ".join(str(r) for r in rejection_reasons) or "No actionable setup"
+    elif not systemic_allowed:
+        final_decision = "BLOCKED"
+        final_block_stage = "SYSTEMIC_RISK"
+        final_block_reason_code = str(systemic_risk.get("reason_code") or "SYSTEMIC_RISK_BLOCKED")
+        final_block_reason = str(systemic_risk.get("reason") or "Systemic market risk paused execution")
+    elif not ai_passed:
+        final_decision = "BLOCKED"
+        final_block_stage = "AI_REVIEW"
+        final_block_reason_code = (
+            f"AI_{ai_verdict.upper()}" if ai_verdict else "AI_REVIEW_REQUIRED"
+        )
+        final_block_reason = str(ai.get("reason") or f"AI verdict is {ai_verdict}")
+    elif not execution_validated:
+        final_decision = "BLOCKED"
+        final_block_stage = "EXECUTION_REVALIDATION"
+        final_block_reason_code = str(execution.get("reason_code") or "EXECUTION_REJECTED")
+        final_block_reason = "; ".join(str(r) for r in execution.get("reasons", [])) or f"Execution intent: {exec_status}"
+    elif not risk_approved:
+        final_decision = "BLOCKED"
+        final_block_stage = "RISK"
+        final_block_reason_code = str(effective_risk_reason or "RISK_REJECTED")
+        final_block_reason = str(effective_risk_reason or "Risk limits exceeded")
+    else:
+        final_decision = "READY"
+        final_block_stage = None
+        final_block_reason_code = "READY_FOR_OMS"
+        final_block_reason = "All pre-trade gates passed"
     if order_ready and lifecycle_state in {"UNKNOWN", "REGISTERED", "AI_COHERENT", "AI_REVIEW_PENDING"}:
         lifecycle_state = "RISK_APPROVED"
         lifecycle_reason_code = "PIPELINE_VALIDATED"
@@ -256,6 +304,7 @@ async def build_authority_status(
             "input_snapshot_id": ai.get("input_snapshot_id"),
             "snapshot_matches": ai_snapshot_matches,
             "required": ai_required,
+            "policy": ai_policy,
             "fast_tracked": bool(ai.get("fast_tracked", False)),
             "soft_caution": ai_verdict.upper() == "CAUTION",
             "risk_rating": ai.get("risk_rating", "MODERATE" if ai_verdict.upper() == "CAUTION" else "LOW" if ai_verdict.upper() == "COHERENT" else "HIGH"),
@@ -296,6 +345,7 @@ async def build_authority_status(
             "entry_policy": execution.get("entry_policy"),
             "auto_armed_limit": bool(execution.get("auto_armed_limit", False)),
             "limit_zone_id": execution.get("limit_zone_id"),
+            "shadow_comparison": shadow_comparison,
             "original_entry": execution.get("original_entry"),
             "executable_entry": execution.get("executable_entry"),
         },
@@ -346,6 +396,12 @@ async def build_authority_status(
             ),
         },
         "decision_id": f"{snapshot_id}:{event_id}",
+        "decision_summary": {
+            "final_decision": final_decision,
+            "blocking_stage": final_block_stage,
+            "reason_code": final_block_reason_code,
+            "reason": final_block_reason,
+        },
         "stages": {
             "tri_core": {
                 "stage": "TRI_CORE",
@@ -365,6 +421,7 @@ async def build_authority_status(
                 "stage": "AI_REVIEW",
                 "passed": ai_passed,
                 "required": ai_required,
+                "policy": ai_policy,
                 "reason_code": (
                     f"AI_{ai_verdict}"
                     if ai_status.lower() == "reviewed"
@@ -408,12 +465,10 @@ async def build_authority_status(
                 "reason": oms.get("close_reason") or f"OMS status is {oms_status}",
             },
         },
-        "final_decision": (
-            "SUBMITTED" if order_already_submitted
-            else "READY" if order_ready
-            else "BLOCKED" if actionable
-            else "WAIT"
-        ),
+        "final_decision": final_decision,
+        "final_block_stage": final_block_stage,
+        "final_block_reason_code": final_block_reason_code,
+        "final_block_reason": final_block_reason,
     }
 
 

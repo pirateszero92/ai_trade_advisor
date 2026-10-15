@@ -114,6 +114,15 @@ def test_phase24_current_runtime_config_has_no_unclassified_fields():
     assert runtime_sections(current)["unclassified"] == {}
 
 
+def test_phase3_adaptive_entry_policy_is_validated():
+    validated = validate_runtime_config({
+        "auto_trade_entry_policy": "adaptive",
+        "auto_trade_limit_timeout_bars": 3,
+    })
+    assert validated["auto_trade_entry_policy"] == "adaptive"
+    assert validated["auto_trade_limit_timeout_bars"] == 3
+
+
 def test_phase24_rr_thresholds_have_distinct_authority_names():
     manifest = config_manifest(
         strategy={"tri_core_policy": {"minimum_rr": 2.0}},

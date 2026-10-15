@@ -205,7 +205,9 @@ class ExecutionRevalidator:
         # If entry_mode is "limit", do not execute as immediate market chase;
         # require a limit entry at structural entry or wait for limit retest.
         configured_entry_mode = getattr(analysis, "entry_mode", "")
-        if configured_entry_mode == "limit" and order_type == "market":
+        execution_policy = analysis.config_snapshot.get("execution_policy", {}) if isinstance(analysis.config_snapshot, dict) else {}
+        adaptive_entry = str(execution_policy.get("entry_policy", "fixed")).lower() == "adaptive"
+        if configured_entry_mode == "limit" and order_type == "market" and not adaptive_entry:
             zone_id = result.limit_zone_id
             if self._active_limit_zone(signal, zone_id):
                 executable_entry = structural_entry

@@ -212,22 +212,27 @@ _load_runtime_settings()
 async def list_providers(_key: str = Depends(verify_api_key)):
     """List configured LLM providers and their current status."""
     cfg = get_settings()
+    health = _ai.health_snapshot()
+    runtime = load_runtime_config()
     return {
+        "active_provider": health.get("active_provider"),
+        "fallback_chain": health.get("fallback_chain"),
+        "providers_health": health.get("providers"),
         "providers": [
             {
                 "name": "local",
-                "model": cfg.local_llm_model,
-                "endpoint": cfg.local_llm_endpoint,
+                "model": runtime.get("local_model") or cfg.local_llm_model,
+                "endpoint": runtime.get("local_endpoint") or cfg.local_llm_endpoint,
                 "configured": True,
             },
             {
                 "name": "gemini",
-                "model": cfg.gemini_model,
+                "model": runtime.get("gemini_model") or cfg.gemini_model,
                 "configured": bool(cfg.gemini_api_key),
             },
             {
                 "name": "openrouter",
-                "model": cfg.openrouter_model,
+                "model": runtime.get("openrouter_model") or cfg.openrouter_model,
                 "configured": bool(cfg.openrouter_api_key),
             },
         ]

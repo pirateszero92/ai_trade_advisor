@@ -109,6 +109,38 @@ class AIEngine:
         self._active_prompt_file: Optional[str] = None
         self._http_client: Optional[httpx.AsyncClient] = None
         self._http_lock: Optional[asyncio.Lock] = None
+        self._provider_health: dict[str, dict[str, Any]] = {
+            name: {"status": "unknown", "last_error": None, "last_latency_ms": None}
+            for name in FALLBACK_CHAIN
+        }
+
+    def record_provider_result(
+        self,
+        provider: str,
+        *,
+        ok: bool,
+        latency_ms: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        if provider not in self._provider_health:
+            self._provider_health[provider] = {}
+        self._provider_health[provider].update({
+            "status": "healthy" if ok else "offline",
+            "last_error": None if ok else str(error or "provider unavailable")[:300],
+            "last_latency_ms": latency_ms,
+        })
+
+    def health_snapshot(self) -> dict[str, Any]:
+        return {
+            "active_provider": self.active_provider,
+            "providers": {
+                name: dict(details) for name, details in self._provider_health.items()
+            },
+            "configured_models": {
+                name: self.provider_model(name) for name in FALLBACK_CHAIN
+            },
+            "fallback_chain": list(FALLBACK_CHAIN),
+        }
 
     def _get_http_lock(self) -> asyncio.Lock:
         if self._http_lock is None:

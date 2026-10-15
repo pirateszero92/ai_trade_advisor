@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from loguru import logger
 
@@ -1254,13 +1254,12 @@ class MarketMonitor:
                 reason=str(ai_rev.get("reason") or ai_rev.get("error") or "")[:300],
             )
 
-        # Enforce AI gate based on mode:
-        #   hard (default, auto_trade_ai_gate_hard=True):
-        #     - COHERENT with BUY/SELL passes with full risk (1.0x).
-        #     - CAUTION blocks by default (unless explicitly opted-in via auto_trade_accept_caution=True).
-        #     - CONFLICT, UNAVAILABLE, or decision=PASS strictly block.
-        #   soft (auto_trade_ai_gate_hard=False): CONFLICT/UNAVAILABLE logs a warning
-        #     but does NOT block — TriCore + Strategy approval is sufficient.
+        # AI is a reviewer, not a price/direction authority.  The explicit
+        # policy keeps the old strict behavior available while allowing the
+        # guarded Phase 2 mode to treat CAUTION as reduced risk.
+        ai_policy = str(r_cfg.get("auto_trade_ai_policy", "strict")).lower()
+        if ai_policy not in {"strict", "guarded", "advisory"}:
+            ai_policy = "strict"
         ai_gate_hard = bool(r_cfg.get("auto_trade_ai_gate_hard", True))
         accept_caution = bool(r_cfg.get("auto_trade_accept_caution", False))
         ai_is_coherent = ai_status == "reviewed" and ai_verdict == "COHERENT"
@@ -1282,7 +1281,7 @@ class MarketMonitor:
         # Reviewer P1 Resolution: Explicit separation of ai_approved, ai_risk_multiplier, and ai_execution_blocked.
         # When require_ai_approval is True:
         # CONFLICT, UNAVAILABLE, and PASS strictly enforce multiplier = 0.0 and block execution even under soft gate.
-        if not require_ai_approval:
+        if ai_policy == "advisory" or not require_ai_approval:
             # Deterministic-only / Advisory mode: AI gating is disabled, Tri-Core has full authority
             ai_risk_multiplier = 1.0
             ai_execution_blocked = False
@@ -1300,14 +1299,18 @@ class MarketMonitor:
                 float(r_cfg.get("auto_trade_soft_caution_sizing_pct", 0.5)),
                 min(0.5, max(0.1, ai_suggested_mult)),
             )
-            if ai_gate_hard and not accept_caution:
+            caution_allowed = ai_policy == "guarded" or accept_caution or not ai_gate_hard
+            if not caution_allowed:
                 ai_execution_blocked = True
                 ai_approved = False
             else:
                 ai_execution_blocked = False
                 ai_approved = True
         elif ai_is_coherent and (ai_decision in {"BUY", "SELL"}):
-            ai_risk_multiplier = min(1.0, max(0.1, ai_suggested_mult))
+            # AI cannot size the position.  Full size is the deterministic
+            # risk engine's approved size; only CAUTION applies a fixed
+            # configured reduction in guarded mode.
+            ai_risk_multiplier = 1.0
             ai_execution_blocked = False
             ai_approved = True
         else:
@@ -1718,6 +1721,31 @@ class MarketMonitor:
         exec_tp = revalidation.take_profit
         order_type = revalidation.order_type
 
+        # Phase 6: record the adaptive-vs-legacy decision without changing the
+        # selected order.  This gives paper evaluation a counterfactual view
+        # before promoting the new execution policy.
+        if bool(r_cfg.get("execution_shadow_compare_enabled", True)):
+            legacy_order_type = (
+                "limit" if str(entry_mode).lower() == "limit" else order_type
+            )
+            await decision_trace.record(
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                symbol=symbol,
+                stage="SHADOW_COMPARISON",
+                facts={
+                    "enabled": True,
+                    "policy": str(r_cfg.get("auto_trade_entry_policy", "fixed")),
+                    "selected_order_type": order_type,
+                    "selected_entry": getattr(revalidation, "executable_entry", None),
+                    "legacy_entry": getattr(
+                        revalidation, "original_entry", getattr(revalidation, "executable_entry", None)
+                    ),
+                    "changed": order_type != legacy_order_type,
+                    "timeout_bars": int(r_cfg.get("auto_trade_limit_timeout_bars", 3)),
+                },
+            )
+
         # Phase 3 Guardrail 4: AI timing LIMIT_RETEST_ONLY enforces limit/retest path
         if ai_timing == "LIMIT_RETEST_ONLY" and order_type != "limit":
             if getattr(revalidation, "auto_armed_limit", False):
@@ -2020,6 +2048,22 @@ class MarketMonitor:
             if cand_tp1 is not None and math.isfinite(cand_tp1):
                 take_profit_1 = round(cand_tp1, 4)
                 management_policy = "local_obstacle_tp1_50_be_macro_tp2"
+        limit_valid_until = (
+            canonical_analysis.valid_until.isoformat()
+            if getattr(canonical_analysis, "valid_until", None) is not None
+            else ""
+        )
+        if order_type == "limit":
+            timeout_bars = max(1, int(r_cfg.get("auto_trade_limit_timeout_bars", 3)))
+            timeframe_minutes = {
+                "1m": 1, "5m": 5, "15m": 15, "30m": 30,
+                "1h": 60, "4h": 240, "1d": 1440,
+            }.get(str(setup_timeframe).lower(), 15)
+            limit_valid_until = (
+                datetime.now(timezone.utc)
+                + timedelta(minutes=timeframe_minutes * timeout_bars)
+            ).isoformat()
+
         order_payload = {
             "symbol": symbol,
             "direction": direction,
@@ -2089,11 +2133,8 @@ class MarketMonitor:
             "entry_policy": entry_policy,
             "policy_version": str(setup.get("policy_version", "")),
             "calibration_status": str(setup.get("calibration_status", "")),
-            "valid_until": (
-                canonical_analysis.valid_until.isoformat()
-                if getattr(canonical_analysis, "valid_until", None) is not None
-                else ""
-            ),
+            "valid_until": limit_valid_until,
+            "limit_timeout_bars": int(r_cfg.get("auto_trade_limit_timeout_bars", 3)),
             "limit_zone_id": str(getattr(revalidation, "limit_zone_id", "")),
             "decision_snapshot_id": decision_snapshot_id,
             "decision_trace_id": f"{decision_snapshot_id}:{event_id}",

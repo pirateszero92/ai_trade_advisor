@@ -52,3 +52,17 @@ def test_strategy_validator_rejects_invalid_geometry():
 
     assert result.approved is False
     assert any("Invalid LONG geometry" in reason for reason in result.rejection_reasons)
+
+
+def test_strategy_validator_keeps_systemic_risk_in_downstream_authority():
+    signal = _candidate("long")
+    signal.systemic_risk = {
+        "execution_allowed": False,
+        "reason": "BTC is in active dump",
+    }
+
+    result = StrategyEngine().evaluate(signal)
+
+    assert result.approved is True
+    assert result.rejection_reasons == []
+    assert any("downstream veto" in warning for warning in result.warnings)

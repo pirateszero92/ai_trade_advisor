@@ -163,11 +163,14 @@ class StrategyEngine:
         elif direction == "short" and not signal.take_profit < signal.entry < signal.stop_loss:
             result.rejection_reasons.append("Invalid SHORT geometry")
 
-        # BTC Market Anchor systemic risk veto
+        # BTC Market Anchor is a downstream systemic-risk authority.  Keep the
+        # observation visible here, but do not duplicate its veto in the
+        # strategy layer; the execution pipeline records the block under the
+        # SYSTEMIC_RISK stage and Risk Guard remains authoritative.
         systemic = getattr(signal, "systemic_risk", {}) or {}
         if systemic and systemic.get("execution_allowed", True) is False:
             reason = systemic.get("reason") or systemic.get("reason_code") or "BTC_REGIME_CONFLICT"
-            result.rejection_reasons.append(f"BTC Market Anchor: {reason}")
+            result.warnings.append(f"Systemic risk pending downstream veto: {reason}")
 
         regime = getattr(signal, "market_regime", {}) or {}
         policy = regime.get("policy", {}) if isinstance(regime, dict) else {}

@@ -1544,6 +1544,13 @@ class ScannerAI:
             review["error"] = message
         review["latency_ms"] = round((time.monotonic()-started)*1000)
         review["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+        engine.record_provider_result(
+            provider,
+            ok=review.get("status") == "reviewed",
+            latency_ms=review["latency_ms"],
+            error=review.get("error") or review.get("failure_type"),
+        )
+        review["provider_health"] = engine.health_snapshot().get("providers", {}).get(provider, {})
         # Audit includes the exact input and legacy result for later paper comparison.
         audit_seed = context if context else {
             "snapshot_id": analysis.snapshot_id,

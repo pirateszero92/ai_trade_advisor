@@ -24,8 +24,12 @@ RUNTIME_OWNERSHIP: dict[str, str] = {
     "cluster_loss_cooldown_minutes": "risk",
     "auto_trade_enabled": "execution",
     "auto_trade_require_ai_approval": "ai",
+    "auto_trade_ai_policy": "ai",
     "auto_trade_min_grade": "deterministic",
     "auto_trade_entry_type": "execution",
+    "auto_trade_entry_policy": "execution",
+    "auto_trade_limit_timeout_bars": "execution",
+    "execution_shadow_compare_enabled": "execution",
     "auto_trade_cooldown_seconds": "execution",
     "disabled_brokers": "execution",
     "provider": "ai",
@@ -95,6 +99,7 @@ def validate_runtime_config(data: dict[str, Any]) -> dict[str, Any]:
     number("max_daily_loss", 0.01, 20.0)
     number("max_open_positions", 1, 100)
     number("auto_trade_cooldown_seconds", 30, 3600)
+    number("auto_trade_limit_timeout_bars", 1, 20)
     number("btc_anchor_dump_threshold_pct", 0.2, 5.0)
     number("cluster_loss_cooldown_minutes", 5, 240)
 
@@ -106,10 +111,19 @@ def validate_runtime_config(data: dict[str, Any]) -> dict[str, Any]:
         "momentum_market", "limit_pullback"
     }:
         raise ValueError("auto_trade_entry_type is invalid")
+    if "auto_trade_entry_policy" in clean and clean["auto_trade_entry_policy"] not in {
+        "fixed", "adaptive"
+    }:
+        raise ValueError("auto_trade_entry_policy must be fixed or adaptive")
+    if "auto_trade_ai_policy" in clean and clean["auto_trade_ai_policy"] not in {
+        "strict", "guarded", "advisory"
+    }:
+        raise ValueError("auto_trade_ai_policy must be strict, guarded, or advisory")
 
     for key in (
         "auto_sl_tp", "auto_invalidation", "auto_trade_enabled",
         "auto_trade_require_ai_approval", "mtf_hierarchy_required",
+        "execution_shadow_compare_enabled",
         "btc_anchor_filter_enabled",
         "cluster_loss_cooldown_enabled",
     ):

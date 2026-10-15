@@ -633,6 +633,42 @@ async def test_authority_projection_handles_waiting_setup():
 
 
 @pytest.mark.anyio
+async def test_phase1_exposes_single_final_block_reason_for_ai_failure():
+    await decision_trace.record(
+        snapshot_id="snap-ai-fail",
+        event_id="event-ai-fail",
+        symbol="BTC/USDT",
+        stage="AI_REVIEW",
+        facts={
+            "status": "error",
+            "verdict": "UNAVAILABLE",
+            "failure_type": "PROVIDER_UNAVAILABLE",
+            "reason": "AI provider or network is unavailable",
+            "input_snapshot_id": "snap-ai-fail",
+        },
+    )
+
+    view = await build_authority_status(
+        symbol="BTC/USDT",
+        snapshot_id="snap-ai-fail",
+        event_id="event-ai-fail",
+        tri_core_setup={"actionable": True, "direction": "long", "grade": "A"},
+        structural_rr=2.5,
+    )
+
+    assert view["final_decision"] == "BLOCKED"
+    assert view["final_block_stage"] == "AI_REVIEW"
+    assert view["final_block_reason_code"] == "AI_UNAVAILABLE"
+    assert "provider" in view["final_block_reason"].lower()
+    assert view["decision_summary"] == {
+        "final_decision": "BLOCKED",
+        "blocking_stage": "AI_REVIEW",
+        "reason_code": "AI_UNAVAILABLE",
+        "reason": "AI provider or network is unavailable",
+    }
+
+
+@pytest.mark.anyio
 async def test_authority_projection_reconciles_active_paper_oms_position(monkeypatch):
     from app.services.paper_oms import paper_oms
 
