@@ -311,8 +311,6 @@ void main() {
     expect(find.text('1. Decision Engine'), findsOneWidget);
     expect(find.text('2. Risk & Guard'), findsOneWidget);
     expect(find.text('3. OMS'), findsOneWidget);
-    expect(find.text('AI ADVISOR (OUT-OF-LOOP):'), findsOneWidget);
-    expect(find.textContaining('PASS (ADVISORY)'), findsOneWidget);
-    expect(find.textContaining('Non-blocking'), findsOneWidget);
+    expect(find.text('AI ADVISOR (OUT-OF-LOOP):'), findsNothing);
   });
 }

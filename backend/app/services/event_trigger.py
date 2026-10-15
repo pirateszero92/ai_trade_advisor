@@ -1083,7 +1083,7 @@ class MarketMonitor:
 
         # 2.1 AI review gate. When approval is required this is fail-closed:
         # only a completed, explicitly approved COHERENT review can pass.
-        require_ai_approval = bool(r_cfg.get("auto_trade_require_ai_approval", True))
+        require_ai_approval = bool(r_cfg.get("auto_trade_require_ai_approval", False))
         ai_rev = getattr(ltf_sig, "ai_review", {}) or {}
 
         def review_matches_candidate(review: dict[str, Any]) -> bool:
@@ -1136,24 +1136,25 @@ class MarketMonitor:
             logger.info(
                 f"[Auto-Pilot] Fast-tracking Grade S setup for {symbol} past AI review latency"
             )
-            try:
-                from app.services.scanner_ai import scanner_ai
+            if r_cfg.get("scanner_ai_mode", "off") != "off":
+                try:
+                    from app.services.scanner_ai import scanner_ai
 
-                async def _bg_review():
-                    try:
-                        an = await execution_analyses.get(
-                            symbol=symbol,
-                            market_type=m_type,
-                            exchange=ex,
-                            entry_mode=entry_mode,
-                        )
-                        await scanner_ai.review(an, "shadow")
-                    except Exception as err:
-                        logger.debug(f"[Auto-Pilot] Fast-track bg review note: {err}")
+                    async def _bg_review():
+                        try:
+                            an = await execution_analyses.get(
+                                symbol=symbol,
+                                market_type=m_type,
+                                exchange=ex,
+                                entry_mode=entry_mode,
+                            )
+                            await scanner_ai.review(an, "shadow")
+                        except Exception as err:
+                            logger.debug(f"[Auto-Pilot] Fast-track bg review note: {err}")
 
-                asyncio.create_task(_bg_review())
-            except Exception as bg_err:
-                logger.debug(f"[Auto-Pilot] Fast-track background AI launch note: {bg_err}")
+                    asyncio.create_task(_bg_review())
+                except Exception as bg_err:
+                    logger.debug(f"[Auto-Pilot] Fast-track background AI launch note: {bg_err}")
 
         elif require_ai_approval and (
             not ai_rev or str(ai_rev.get("status", "")).lower() != "reviewed"

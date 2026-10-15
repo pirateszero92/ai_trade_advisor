@@ -10,7 +10,6 @@ import '../../core/api/api_client.dart';
 import '../../core/api/ws_client.dart';
 import '../../core/trading/strategy_gate_view.dart';
 import '../../core/trading/authority_pipeline_panel.dart';
-import '../../core/trading/ai_review_panel.dart';
 import '../settings/settings_screen.dart';
 import 'smc_interactive_chart.dart';
 
@@ -5124,21 +5123,6 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
               ],
             ),
             AuthorityPipelinePanel(payload: _smcOverlayData),
-            () {
-              final authStatus = _smcOverlayData?['authority_status'] as Map?;
-              final aiReview = (_smcOverlayData?['ai_review'] as Map?) ??
-                  (authStatus?['ai_review'] as Map?) ??
-                  {};
-              if (aiReview.isNotEmpty &&
-                  (aiReview['status'] ?? '') != 'not_requested') {
-                return AiReviewPanel(
-                  review: Map<String, dynamic>.from(aiReview),
-                  coreScore: confluence,
-                  squeezeBonus: 0,
-                );
-              }
-              return const SizedBox.shrink();
-            }(),
             const SizedBox(height: 10),
 
             // Deterministic evidence context only; not a merged authority score.

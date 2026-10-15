@@ -10,7 +10,6 @@ import '../../core/api/ws_client.dart';
 import '../../core/trading/strategy_gate_view.dart';
 import '../../core/trading/authority_pipeline_panel.dart';
 import '../../core/trading/authority_pipeline_view.dart';
-import '../../core/trading/ai_review_panel.dart';
 import '../settings/settings_screen.dart';
 import 'signal_sort.dart';
 
@@ -1902,18 +1901,6 @@ class _SignalCard extends StatelessWidget {
                 payload: signalPayload.isNotEmpty
                     ? signalPayload
                     : {'authority_status': authorityStatus}),
-            if ((signalPayload['ai_review'] is Map &&
-                    (signalPayload['ai_review']['status'] ?? '') != 'not_requested') ||
-                ((authorityStatus['ai_review'] is Map &&
-                    (authorityStatus['ai_review']['status'] ?? '') != 'not_requested')))
-              AiReviewPanel(
-                review: Map<String, dynamic>.from(
-                    (signalPayload['ai_review'] as Map?) ??
-                    (authorityStatus['ai_review'] as Map?) ??
-                    {}),
-                coreScore: confluence,
-                squeezeBonus: 0,
-              ),
             const SizedBox(height: 8),
             Container(
               width: double.infinity,

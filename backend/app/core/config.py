@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     local_llm_endpoint: str = "http://localhost:1234/v1"
     local_llm_model: str = "llama-3.2-8b"
     local_llm_api_key: str = ""
-    scanner_ai_mode: Literal["shadow", "paper", "off"] = "shadow"
+    scanner_ai_mode: Literal["shadow", "paper", "off"] = "off"
     scanner_ai_timeout_seconds: float = Field(default=60.0, ge=5.0, le=120.0)
     scanner_ai_min_score: int = Field(default=60, ge=40, le=90)
 

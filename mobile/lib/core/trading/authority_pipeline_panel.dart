@@ -107,42 +107,12 @@ class AuthorityPipelinePanel extends StatelessWidget {
                             if (!compact && stage.reason.isNotEmpty)
                               Text(stage.reason,
                                   style: const TextStyle(
-                                      fontSize: 9, color: Colors.white54)),
+                                       fontSize: 9, color: Colors.white54)),
                           ]),
                     ),
                   ],
                 ),
               )),
-          if (view.isAdvisory) ...[
-            const Divider(color: Colors.white12, height: 12),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                const Icon(Icons.psychology_outlined,
-                    size: 13, color: Colors.cyanAccent),
-                const SizedBox(width: 5),
-                const Text('AI ADVISOR (OUT-OF-LOOP):',
-                    style: TextStyle(
-                        fontSize: 9,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.cyanAccent)),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    view.ai.status.replaceAll('_', ' ').toUpperCase() +
-                        (view.ai.secondaryMetric.isNotEmpty
-                            ? ' • ${view.ai.secondaryMetric}'
-                            : ''),
-                    style: const TextStyle(
-                        fontSize: 9,
-                        color: Colors.white70,
-                        fontWeight: FontWeight.w600),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-          ],
         ],
       ),
     );
