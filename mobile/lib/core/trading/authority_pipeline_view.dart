@@ -208,36 +208,51 @@ class AuthorityPipelineView {
     final riskGuardStage = AuthorityStageView(
       name: '2. Risk & Guard',
       status: () {
+        final riskSt = (risk['status'] ?? '').toString().toLowerCase();
         final execSt = (execution['status'] ?? '').toString().toLowerCase();
         final rCode = (execution['reason_code'] ?? '').toString();
-        if (execSt == 'limit_armed') return 'LIMIT_ARMED';
-        if (execSt == 'waiting_retest' || rCode == 'EXECUTABLE_RR_TOO_LOW') {
-          return 'WAITING_RETEST';
-        }
-        if ((risk['status'] ?? '').toString().toLowerCase() == 'rejected' ||
+        final lifecycle =
+            (status['lifecycle_state'] ?? '').toString().toUpperCase();
+
+        if (riskSt == 'rejected' ||
+            lifecycle == 'RISK_REJECTED' ||
             status['final_block_stage'] == 'RISK') {
-          return 'RISK_BLOCKED';
+          return 'RISK_REJECTED';
         }
         if (execSt == 'rejected' ||
+            lifecycle == 'EXECUTION_REJECTED' ||
             status['final_block_stage'] == 'EXECUTION_REVALIDATION') {
           return 'EXEC_REJECTED';
         }
-        if (execSt == 'validated' &&
-            (risk['status'] ?? '').toString().toLowerCase() == 'approved') {
+        if (execSt == 'waiting_retest' || rCode == 'EXECUTABLE_RR_TOO_LOW') {
+          return 'WAITING_RETEST';
+        }
+        if (execSt == 'limit_armed') return 'LIMIT_ARMED';
+        if (execSt == 'validated' && riskSt == 'approved') {
           return 'APPROVED';
         }
         if (execSt == 'validated') return 'VALIDATED';
-        if ((risk['status'] ?? '').toString().toLowerCase() == 'approved') {
-          return 'APPROVED';
-        }
+        if (riskSt == 'approved') return 'APPROVED';
         return (execution['status'] ?? risk['status'] ?? 'not_run').toString();
       }(),
-      reason: (execution['reason_code'] ??
-              ((execution['reasons'] is List &&
-                      (execution['reasons'] as List).isNotEmpty)
-                  ? (execution['reasons'] as List).join(' • ')
-                  : (risk['reason'] ?? '')))
-          .toString(),
+      reason: () {
+        final riskSt = (risk['status'] ?? '').toString().toLowerCase();
+        final lifecycle =
+            (status['lifecycle_state'] ?? '').toString().toUpperCase();
+        if (riskSt == 'rejected' || lifecycle == 'RISK_REJECTED') {
+          return (risk['reason'] ?? status['lifecycle_reason'] ?? '').toString();
+        }
+        if (execution['reason_code'] != null &&
+            execution['reason_code'].toString().isNotEmpty &&
+            execution['reason_code'] != 'PASSED') {
+          return execution['reason_code'].toString();
+        }
+        if (execution['reasons'] is List &&
+            (execution['reasons'] as List).isNotEmpty) {
+          return (execution['reasons'] as List).join(' • ');
+        }
+        return (risk['reason'] ?? '').toString();
+      }(),
       primaryMetric: [
         if (execution['executable_rr'] != null)
           fmtRr(execution['executable_rr'])
