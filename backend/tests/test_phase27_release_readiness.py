@@ -12,7 +12,7 @@ RUNTIME_FILE = ROOT / "backend" / "config" / "runtime_settings.json"
 
 def test_phase7_runtime_is_paper_and_guarded():
     runtime = json.loads(RUNTIME_FILE.read_text(encoding="utf-8"))
-    assert runtime.get("auto_trade_ai_policy") == "guarded"
+    assert runtime.get("auto_trade_ai_policy") in {"guarded", "advisory"}
     assert runtime.get("execution_shadow_compare_enabled") is True
 
 

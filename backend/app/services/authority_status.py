@@ -165,13 +165,16 @@ async def build_authority_status(
     ai_mult = float(ai.get("suggested_risk_multiplier", 1.0) if ai.get("suggested_risk_multiplier") is not None else 1.0)
     ai_decision = str(ai.get("decision") or "").upper()
 
-    ai_passed = bool(
-        (ai_coherent or (ai_caution and (accept_caution or ai_policy == "guarded")) or ai_policy == "advisory" or not ai_required)
-        and (ai_verdict.upper() not in {"CONFLICT", "UNAVAILABLE"})
-        and (ai_decision != "PASS" if ai_status.lower() == "reviewed" else True)
-        and (ai_timing != "STAND_ASIDE")
-        and (ai_mult > 0.0 or not ai_required)
-    )
+    if ai_policy == "advisory" or not ai_required:
+        ai_passed = True
+    else:
+        ai_passed = bool(
+            (ai_coherent or (ai_caution and (accept_caution or ai_policy == "guarded")))
+            and (ai_verdict.upper() not in {"CONFLICT", "UNAVAILABLE"})
+            and (ai_decision != "PASS" if ai_status.lower() == "reviewed" else True)
+            and (ai_timing != "STAND_ASIDE")
+            and (ai_mult > 0.0)
+        )
     exec_status = _execution_status(execution, actionable=actionable)
     execution_validated = exec_status in {"validated", "limit_armed"}
     risk_approved = _risk_status(risk, actionable=actionable) == "approved"
@@ -258,9 +261,10 @@ async def build_authority_status(
         lifecycle_reason = "Pre-trade execution and risk checks approved"
     elif ai_status.lower() == "reviewed" and ai_verdict.upper() in {"CONFLICT", "CAUTION"}:
         if lifecycle_state in {"UNKNOWN", "REGISTERED", "WAIT", "WAITING_SETUP", "DETECTED", "INVALIDATED"}:
-            lifecycle_state = f"AI_{ai_verdict.upper()}"
-            lifecycle_reason_code = f"AI_{ai_verdict.upper()}"
-            lifecycle_reason = f"AI marked setup as {ai_verdict.upper()}"
+            if ai_policy != "advisory" and ai_required:
+                lifecycle_state = f"AI_{ai_verdict.upper()}"
+                lifecycle_reason_code = f"AI_{ai_verdict.upper()}"
+                lifecycle_reason = f"AI marked setup as {ai_verdict.upper()}"
     elif not lifecycle and not actionable:
         if any("session is closed" in str(r).lower() for r in rejection_reasons):
             lifecycle_state = "SESSION_CLOSED"

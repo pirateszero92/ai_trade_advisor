@@ -1279,13 +1279,13 @@ class MarketMonitor:
         ai_timing = str((ai_rev.get("execution_advice") or {}).get("suggested_timing") or "").upper()
 
         # Reviewer P1 Resolution: Explicit separation of ai_approved, ai_risk_multiplier, and ai_execution_blocked.
-        # When require_ai_approval is True:
+        # When require_ai_approval is True and ai_policy != "advisory":
         # CONFLICT, UNAVAILABLE, and PASS strictly enforce multiplier = 0.0 and block execution even under soft gate.
         if ai_policy == "advisory" or not require_ai_approval:
             # Deterministic-only / Advisory mode: AI gating is disabled, Tri-Core has full authority
             ai_risk_multiplier = 1.0
             ai_execution_blocked = False
-            ai_approved = False
+            ai_approved = True
         elif ai_verdict in {"CONFLICT", "UNAVAILABLE"} or ai_decision == "PASS":
             ai_risk_multiplier = 0.0
             ai_execution_blocked = True
@@ -1320,7 +1320,7 @@ class MarketMonitor:
             ai_approved = False
 
         # Phase 3 Guardrail 1: Suggested timing STAND_ASIDE blocks execution
-        if require_ai_approval and ai_timing == "STAND_ASIDE":
+        if require_ai_approval and ai_policy != "advisory" and ai_timing == "STAND_ASIDE":
             logger.warning(
                 f"[Auto-Pilot] AI execution advice STAND_ASIDE for {symbol} {direction} — blocking execution"
             )
@@ -1354,7 +1354,7 @@ class MarketMonitor:
             return None
 
         # Phase 3 Guardrail 2: Suggested timing WAIT_CONFIRMATION defers execution to WAITING_ENTRY
-        if ai_timing == "WAIT_CONFIRMATION":
+        if require_ai_approval and ai_policy != "advisory" and ai_timing == "WAIT_CONFIRMATION":
             logger.info(
                 f"[Auto-Pilot] AI execution advice WAIT_CONFIRMATION for {symbol} {direction} — transitioning to WAITING_ENTRY"
             )
@@ -1388,7 +1388,7 @@ class MarketMonitor:
             return None
 
         # Phase 3 Guardrail 3: Block execution if multiplier is 0.0 or ai_execution_blocked
-        if ai_execution_blocked or ai_risk_multiplier <= 0.0:
+        if require_ai_approval and ai_policy != "advisory" and (ai_execution_blocked or ai_risk_multiplier <= 0.0):
             reasons = ai_rev.get("conflicts", []) or [
                 ai_rev.get("reason")
                 or ai_rev.get("error")
@@ -1747,7 +1747,7 @@ class MarketMonitor:
             )
 
         # Phase 3 Guardrail 4: AI timing LIMIT_RETEST_ONLY enforces limit/retest path
-        if ai_timing == "LIMIT_RETEST_ONLY" and order_type != "limit":
+        if require_ai_approval and ai_policy != "advisory" and ai_timing == "LIMIT_RETEST_ONLY" and order_type != "limit":
             if getattr(revalidation, "auto_armed_limit", False):
                 order_type = "limit"
                 entry_policy = "limit_retest_only"

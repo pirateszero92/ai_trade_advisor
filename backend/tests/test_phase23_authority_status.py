@@ -633,7 +633,15 @@ async def test_authority_projection_handles_waiting_setup():
 
 
 @pytest.mark.anyio
-async def test_phase1_exposes_single_final_block_reason_for_ai_failure():
+async def test_phase1_exposes_single_final_block_reason_for_ai_failure(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.authority_status.load_runtime_config",
+        lambda: {
+            "auto_trade_require_ai_approval": True,
+            "auto_trade_ai_policy": "strict",
+            "auto_trade_accept_caution": False,
+        },
+    )
     await decision_trace.record(
         snapshot_id="snap-ai-fail",
         event_id="event-ai-fail",
