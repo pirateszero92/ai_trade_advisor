@@ -1,13 +1,13 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:dio/dio.dart';
 import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/ws_client.dart';
 import '../../core/constants/app_constants.dart';
+import '../../core/storage/safe_storage.dart';
 
 // ---------------------------------------------------------------------------
 // Settings state
@@ -164,7 +164,6 @@ final settingsProvider =
 });
 
 class SettingsNotifier extends StateNotifier<SettingsState> {
-  static const _storage = FlutterSecureStorage();
   Timer? _liveSessionExpiryTimer;
   Timer? _liveSessionHeartbeatTimer;
 
@@ -175,13 +174,13 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
 
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
-    final telegramToken = await _storage.read(key: 'telegram_token') ??
+    final telegramToken = await SafeStorage.read(key: 'telegram_token') ??
         prefs.getString('telegram_token') ??
         '';
-    final telegramChatId = await _storage.read(key: 'telegram_chat_id') ??
+    final telegramChatId = await SafeStorage.read(key: 'telegram_chat_id') ??
         prefs.getString('telegram_chat_id') ??
         '';
-    final lineToken = await _storage.read(key: 'line_token') ??
+    final lineToken = await SafeStorage.read(key: 'line_token') ??
         prefs.getString('line_token') ??
         '';
     // Previous versions persisted switches that are no longer authoritative.
@@ -231,9 +230,9 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
           prefs.getInt('cluster_loss_cooldown_minutes') ??
               state.clusterLossCooldownMinutes,
       mtfHierarchyRequired: false,
-      lmStudioApiKey: await _storage.read(key: 'lm_studio_api_key') ?? '',
-      geminiKey: await _storage.read(key: 'gemini_key') ?? '',
-      openRouterKey: await _storage.read(key: 'openrouter_key') ?? '',
+      lmStudioApiKey: await SafeStorage.read(key: 'lm_studio_api_key') ?? '',
+      geminiKey: await SafeStorage.read(key: 'gemini_key') ?? '',
+      openRouterKey: await SafeStorage.read(key: 'openrouter_key') ?? '',
     );
   }
 
@@ -258,10 +257,10 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     await prefs.setDouble('default_sl_pct', safeState.defaultSlPct);
     await prefs.remove('is_paper_mode');
     await prefs.setBool('fcm_enabled', safeState.fcmEnabled);
-    await _storage.write(key: 'telegram_token', value: safeState.telegramToken);
-    await _storage.write(
+    await SafeStorage.write(key: 'telegram_token', value: safeState.telegramToken);
+    await SafeStorage.write(
         key: 'telegram_chat_id', value: safeState.telegramChatId);
-    await _storage.write(key: 'line_token', value: safeState.lineToken);
+    await SafeStorage.write(key: 'line_token', value: safeState.lineToken);
     await prefs.remove('telegram_token');
     await prefs.remove('telegram_chat_id');
     await prefs.remove('line_token');
@@ -283,10 +282,10 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     await prefs.setInt(
         'cluster_loss_cooldown_minutes', safeState.clusterLossCooldownMinutes);
     await prefs.remove('mtf_hierarchy_required');
-    await _storage.write(
+    await SafeStorage.write(
         key: 'lm_studio_api_key', value: safeState.lmStudioApiKey);
-    await _storage.write(key: 'gemini_key', value: safeState.geminiKey);
-    await _storage.write(key: 'openrouter_key', value: safeState.openRouterKey);
+    await SafeStorage.write(key: 'gemini_key', value: safeState.geminiKey);
+    await SafeStorage.write(key: 'openrouter_key', value: safeState.openRouterKey);
   }
 
   Future<DateTime> activateLiveMode({
@@ -393,8 +392,6 @@ class SettingsScreen extends ConsumerStatefulWidget {
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen>
     with TickerProviderStateMixin {
-  static const _secureStorage = FlutterSecureStorage();
-
   late TabController _aiTabController;
   late TabController _brokerTabController;
 
@@ -487,25 +484,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     _lmModelCtrl.text =
         prefs.getString('lm_studio_model') ?? 'gpt-oss:120b-cloud';
     _lmApiKeyCtrl.text =
-        await _secureStorage.read(key: 'lm_studio_api_key') ?? '';
+        await SafeStorage.read(key: 'lm_studio_api_key') ?? '';
     _geminiModelCtrl.text =
         prefs.getString('gemini_model') ?? 'gemini-2.0-flash';
     _openRouterModelCtrl.text =
         prefs.getString('openrouter_model') ?? 'anthropic/claude-3.5-sonnet';
     _telegramTokenCtrl.text =
-        await _secureStorage.read(key: 'telegram_token') ??
+        await SafeStorage.read(key: 'telegram_token') ??
             prefs.getString('telegram_token') ??
             '';
     _telegramChatIdCtrl.text =
-        await _secureStorage.read(key: 'telegram_chat_id') ??
+        await SafeStorage.read(key: 'telegram_chat_id') ??
             prefs.getString('telegram_chat_id') ??
             '';
-    _lineTokenCtrl.text = await _secureStorage.read(key: 'line_token') ??
+    _lineTokenCtrl.text = await SafeStorage.read(key: 'line_token') ??
         prefs.getString('line_token') ??
         '';
-    _geminiKeyCtrl.text = await _secureStorage.read(key: 'gemini_key') ?? '';
+    _geminiKeyCtrl.text = await SafeStorage.read(key: 'gemini_key') ?? '';
     _openRouterKeyCtrl.text =
-        await _secureStorage.read(key: 'openrouter_key') ?? '';
+        await SafeStorage.read(key: 'openrouter_key') ?? '';
     await _loadBrokerCredentials();
 
     final savedProvider = prefs.getString('ai_provider') ?? 'local';
@@ -675,19 +672,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
   Future<void> _loadBrokerCredentials() async {
     final values = await Future.wait([
-      _secureStorage.read(key: 'broker_innovestx_key'),
-      _secureStorage.read(key: 'broker_innovestx_secret'),
-      _secureStorage.read(key: 'broker_mt5_login'),
-      _secureStorage.read(key: 'broker_mt5_password'),
-      _secureStorage.read(key: 'broker_mt5_server'),
-      _secureStorage.read(key: 'broker_mt5_path'),
-      _secureStorage.read(key: 'broker_binance_key'),
-      _secureStorage.read(key: 'broker_binance_secret'),
-      _secureStorage.read(key: 'broker_bybit_key'),
-      _secureStorage.read(key: 'broker_bybit_secret'),
-      _secureStorage.read(key: 'broker_alpaca_key'),
-      _secureStorage.read(key: 'broker_alpaca_secret'),
-      _secureStorage.read(key: 'broker_alpaca_base_url'),
+      SafeStorage.read(key: 'broker_innovestx_key'),
+      SafeStorage.read(key: 'broker_innovestx_secret'),
+      SafeStorage.read(key: 'broker_mt5_login'),
+      SafeStorage.read(key: 'broker_mt5_password'),
+      SafeStorage.read(key: 'broker_mt5_server'),
+      SafeStorage.read(key: 'broker_mt5_path'),
+      SafeStorage.read(key: 'broker_binance_key'),
+      SafeStorage.read(key: 'broker_binance_secret'),
+      SafeStorage.read(key: 'broker_bybit_key'),
+      SafeStorage.read(key: 'broker_bybit_secret'),
+      SafeStorage.read(key: 'broker_alpaca_key'),
+      SafeStorage.read(key: 'broker_alpaca_secret'),
+      SafeStorage.read(key: 'broker_alpaca_base_url'),
     ]);
     if (!mounted) return;
     _innovestxKeyCtrl.text = values[0] ?? '';
@@ -709,32 +706,32 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
   Future<void> _saveBrokerCredentials() async {
     await Future.wait([
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_innovestx_key', value: _innovestxKeyCtrl.text.trim()),
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_innovestx_secret',
           value: _innovestxSecretCtrl.text.trim()),
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_mt5_login', value: _mt5LoginCtrl.text.trim()),
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_mt5_password', value: _mt5PasswordCtrl.text.trim()),
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_mt5_server', value: _mt5ServerCtrl.text.trim()),
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_mt5_path', value: _mt5PathCtrl.text.trim()),
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_binance_key', value: _binanceKeyCtrl.text.trim()),
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_binance_secret', value: _binanceSecretCtrl.text.trim()),
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_bybit_key', value: _bybitKeyCtrl.text.trim()),
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_bybit_secret', value: _bybitSecretCtrl.text.trim()),
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_alpaca_key', value: _alpacaKeyCtrl.text.trim()),
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_alpaca_secret', value: _alpacaSecretCtrl.text.trim()),
-      _secureStorage.write(
+      SafeStorage.write(
           key: 'broker_alpaca_base_url', value: _alpacaBaseUrlCtrl.text.trim()),
     ]);
   }
@@ -751,7 +748,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           ? 'ไม่สามารถติดต่อ backend ได้'
           : 'backend ตอบกลับ HTTP $status';
     }
-    return 'เกิดข้อผิดพลาดระหว่างบันทึกข้อมูล';
+    return 'เกิดข้อผิดพลาด: $error';
   }
 
   Future<void> _fetchWatchlist() async {
@@ -2031,33 +2028,33 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       final dio = AppApi.dio;
       await dio.delete(AppApi.url('/api/v1/settings/brokers/config/$broker'));
       if (broker == 'innovestx') {
-        await _secureStorage.delete(key: 'broker_innovestx_key');
-        await _secureStorage.delete(key: 'broker_innovestx_secret');
+        await SafeStorage.delete(key: 'broker_innovestx_key');
+        await SafeStorage.delete(key: 'broker_innovestx_secret');
         _innovestxKeyCtrl.clear();
         _innovestxSecretCtrl.clear();
       } else if (broker == 'binance') {
-        await _secureStorage.delete(key: 'broker_binance_key');
-        await _secureStorage.delete(key: 'broker_binance_secret');
+        await SafeStorage.delete(key: 'broker_binance_key');
+        await SafeStorage.delete(key: 'broker_binance_secret');
         _binanceKeyCtrl.clear();
         _binanceSecretCtrl.clear();
       } else if (broker == 'bybit') {
-        await _secureStorage.delete(key: 'broker_bybit_key');
-        await _secureStorage.delete(key: 'broker_bybit_secret');
+        await SafeStorage.delete(key: 'broker_bybit_key');
+        await SafeStorage.delete(key: 'broker_bybit_secret');
         _bybitKeyCtrl.clear();
         _bybitSecretCtrl.clear();
       } else if (broker == 'mt5') {
-        await _secureStorage.delete(key: 'broker_mt5_login');
-        await _secureStorage.delete(key: 'broker_mt5_password');
-        await _secureStorage.delete(key: 'broker_mt5_server');
-        await _secureStorage.delete(key: 'broker_mt5_path');
+        await SafeStorage.delete(key: 'broker_mt5_login');
+        await SafeStorage.delete(key: 'broker_mt5_password');
+        await SafeStorage.delete(key: 'broker_mt5_server');
+        await SafeStorage.delete(key: 'broker_mt5_path');
         _mt5LoginCtrl.clear();
         _mt5PasswordCtrl.clear();
         _mt5ServerCtrl.clear();
         _mt5PathCtrl.clear();
       } else if (broker == 'alpaca') {
-        await _secureStorage.delete(key: 'broker_alpaca_key');
-        await _secureStorage.delete(key: 'broker_alpaca_secret');
-        await _secureStorage.delete(key: 'broker_alpaca_base_url');
+        await SafeStorage.delete(key: 'broker_alpaca_key');
+        await SafeStorage.delete(key: 'broker_alpaca_secret');
+        await SafeStorage.delete(key: 'broker_alpaca_base_url');
         _alpacaKeyCtrl.clear();
         _alpacaSecretCtrl.clear();
         _alpacaBaseUrlCtrl.text = 'https://paper-api.alpaca.markets';

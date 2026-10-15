@@ -1,10 +1,9 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../storage/safe_storage.dart';
 
 class ApiConfig {
-  static const _storage = FlutterSecureStorage();
   static const _defaultBaseUrl = kIsWeb
       ? ''
       : 'http://10.0.2.2:8000'; // Default to Android emulator / local host on mobile
@@ -65,7 +64,7 @@ class ApiConfig {
 
   static Future<String?> getApiKey() async {
     try {
-      final key = await _storage.read(key: 'api_key');
+      final key = await SafeStorage.read(key: 'api_key');
       if (key != null && key.trim().isNotEmpty) return key.trim();
     } catch (_) {}
     return _defaultApiKey.isNotEmpty ? _defaultApiKey : null;
@@ -74,27 +73,27 @@ class ApiConfig {
   static Future<void> setApiKey(String key) async {
     final trimmed = key.trim();
     if (trimmed.isEmpty) {
-      await _storage.delete(key: 'api_key');
+      await SafeStorage.delete(key: 'api_key');
     } else {
-      await _storage.write(key: 'api_key', value: trimmed);
+      await SafeStorage.write(key: 'api_key', value: trimmed);
     }
     AppApi.clearApiKeyCache();
   }
 
   static Future<String?> getInnovestxKey() async {
-    return _storage.read(key: 'innovestx_key');
+    return SafeStorage.read(key: 'innovestx_key');
   }
 
   static Future<void> setInnovestxKey(String key) async {
-    await _storage.write(key: 'innovestx_key', value: key);
+    await SafeStorage.write(key: 'innovestx_key', value: key);
   }
 
   static Future<String?> getInnovestxSecret() async {
-    return _storage.read(key: 'innovestx_secret');
+    return SafeStorage.read(key: 'innovestx_secret');
   }
 
   static Future<void> setInnovestxSecret(String secret) async {
-    await _storage.write(key: 'innovestx_secret', value: secret);
+    await SafeStorage.write(key: 'innovestx_secret', value: secret);
   }
 }
 
