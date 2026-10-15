@@ -75,6 +75,7 @@ ALLOWED_TRANSITIONS: dict[CandidateState, set[CandidateState]] = {
         CandidateState.AI_CAUTION,
         CandidateState.AI_CONFLICT,
         CandidateState.AI_UNAVAILABLE,
+        CandidateState.EXECUTION_VALIDATING,
         CandidateState.INVALIDATED,
         CandidateState.EXPIRED,
     },
