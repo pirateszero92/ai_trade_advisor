@@ -1654,8 +1654,11 @@ class _SignalCard extends StatelessWidget {
                 authority.execution.isNegative
             ? AppColors.bearish
             : lifecycleColor;
-    final actionSide =
-        isLong ? 'BUY / LONG' : (isShort ? 'SELL / SHORT' : 'BUY / SELL');
+    final actionSide = gate.isSpot
+        ? (isLong ? 'BUY (SPOT)' : (isShort ? 'SELL (SPOT)' : 'BUY / SELL'))
+        : (isLong
+            ? 'LONG (FUTURES)'
+            : (isShort ? 'SHORT (FUTURES)' : 'LONG / SHORT'));
     final blockedActionReason = lifecycleState == 'NO_CHASE'
         ? 'NO CHASE'
         : authority.isClosed
@@ -1716,7 +1719,7 @@ class _SignalCard extends StatelessWidget {
                           label: Text(
                             isActionable
                                 ? (isLimitArmed
-                                    ? 'ARM ${isLong ? 'BUY' : 'SELL'} LIMIT'
+                                    ? 'ARM ${gate.isSpot ? (isLong ? 'BUY' : 'SELL') : (isLong ? 'LONG' : 'SHORT')} LIMIT'
                                     : actionSide)
                                 : 'LOCKED • $blockedActionReason',
                             maxLines: 2,
@@ -2072,6 +2075,11 @@ class _SignalCard extends StatelessWidget {
                 final pEntry = (pos['entry'] as num?)?.toDouble() ?? 0.0;
                 final pDir =
                     (pos['direction'] ?? 'long').toString().toUpperCase();
+                final pDisplaySide = gate.isSpot
+                    ? (pDir == 'LONG'
+                        ? 'BUY'
+                        : (pDir == 'SHORT' ? 'SELL' : pDir))
+                    : pDir;
                 final size = (pos['position_size'] as num?)?.toDouble() ??
                     (pos['size'] as num?)?.toDouble() ??
                     0.0;
@@ -2117,7 +2125,7 @@ class _SignalCard extends StatelessWidget {
                           const SizedBox(width: 4),
                           Expanded(
                             child: Text(
-                              '$pTag ($pDir) • Size: ${size.toStringAsFixed(size.truncateToDouble() == size ? 0 : 2)}',
+                              '$pTag ($pDisplaySide) • Size: ${size.toStringAsFixed(size.truncateToDouble() == size ? 0 : 2)}',
                               style: const TextStyle(
                                   fontSize: 11,
                                   fontWeight: FontWeight.bold,

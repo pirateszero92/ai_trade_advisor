@@ -59,12 +59,12 @@ class Settings(BaseSettings):
 
     # Phase 6 Paper-only execution model. These values never configure or
     # route a Live broker order.
-    paper_oms_fee_bps: float = Field(default=10.0, ge=0.0, le=500.0)
-    paper_oms_spread_bps: float = Field(default=5.0, ge=0.0, le=500.0)
-    paper_oms_slippage_bps: float = Field(default=3.0, ge=0.0, le=500.0)
+    paper_oms_fee_bps: float = Field(default=4.0, ge=0.0, le=500.0)
+    paper_oms_spread_bps: float = Field(default=2.0, ge=0.0, le=500.0)
+    paper_oms_slippage_bps: float = Field(default=2.0, ge=0.0, le=500.0)
     paper_oms_max_volume_participation: float = Field(default=0.01, gt=0.0, le=1.0)
     paper_oms_fallback_partial_fill_ratio: float = Field(default=0.35, gt=0.0, le=1.0)
-    paper_oms_auto_be_trigger_r: float = Field(default=1.0, ge=0.5, le=5.0)
+    paper_oms_auto_be_trigger_r: float = Field(default=1.5, ge=0.5, le=5.0)
     paper_oms_auto_be_buffer_r: float = Field(default=0.05, ge=0.0, le=0.5)
     paper_oms_trailing_min_step_r: float = Field(default=0.05, ge=0.01, le=1.0)
     paper_oms_tp1_enabled: bool = Field(default=True)
@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     btc_anchor_dump_threshold_pct: float = Field(default=1.0, ge=0.2, le=5.0)
     cluster_loss_cooldown_enabled: bool = True
     cluster_loss_cooldown_minutes: int = Field(default=30, ge=5, le=240)
+    loss_streak_halt_enabled: bool = True
+    loss_streak_halt_hours: int = Field(default=2, ge=1, le=24)
+    binance_trading_mode: str = "futures"
 
 
 _SETTINGS_LOCK = threading.RLock()

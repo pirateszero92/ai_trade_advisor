@@ -68,7 +68,7 @@ DEFAULT_REGIME_POLICY: dict[str, Any] = {
             "require_liquidity_sweep": True,
             "require_volume_confirmation": False,
             "require_squeeze_fire": False,
-            "ping_pong_enabled": True,
+            "ping_pong_enabled": False,
         },
         "volatile": {
             "entry_allowed": True,

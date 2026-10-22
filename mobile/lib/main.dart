@@ -6,6 +6,7 @@ import 'app/router.dart';
 import 'app/theme.dart';
 import 'core/api/api_client.dart';
 import 'core/api/ws_client.dart';
+import 'core/notifications/local_notification_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -28,6 +29,7 @@ void main() async {
   }
   runApp(const ProviderScope(child: AITradeAdvisorApp()));
   WidgetsBinding.instance.addPostFrameCallback((_) {
+    LocalNotificationService.instance.init();
     AppWebSocketClient.instance.init();
   });
 }
@@ -40,6 +42,7 @@ class AITradeAdvisorApp extends ConsumerWidget {
     final router = ref.watch(routerProvider);
     return MaterialApp.router(
       title: 'AI Trade Advisor',
+      scaffoldMessengerKey: rootScaffoldMessengerKey,
       theme: AppTheme.dark(),
       darkTheme: AppTheme.dark(),
       themeMode: ThemeMode.dark,

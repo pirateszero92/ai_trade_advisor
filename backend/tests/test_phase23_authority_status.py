@@ -688,6 +688,9 @@ async def test_authority_projection_reconciles_active_paper_oms_position(monkeyp
                     "symbol": "DOT/USDT",
                     "status": "open",
                     "order_type": "limit",
+                    "direction": "long",
+                    "decision_snapshot_id": "snap-manual-1",
+                    "tri_core_event_id": "event-manual-1",
                     "entry": 1.1189,
                     "fill_price": 1.1189,
                     "requested_quantity": 1000.0,
@@ -716,4 +719,82 @@ async def test_authority_projection_reconciles_active_paper_oms_position(monkeyp
     assert view["oms"]["fill_price"] == 1.1189
     assert view["order"]["status"] == "open"
     assert view["lifecycle_state"] == "OPEN"
+
+
+@pytest.mark.anyio
+async def test_authority_projection_rejects_opposite_direction_or_mismatched_candidate_oms(monkeypatch):
+    from app.services.paper_oms import paper_oms
+
+    async def mock_list_positions(*args, **kwargs):
+        return {
+            "total": 2,
+            "trades": [
+                {
+                    "symbol": "DOT/USDT",
+                    "status": "open",
+                    "order_type": "limit",
+                    "direction": "short",  # Opposite direction!
+                    "decision_snapshot_id": "snap-manual-1",
+                    "tri_core_event_id": "event-manual-1",
+                    "entry": 1.1189,
+                },
+                {
+                    "symbol": "DOT/USDT",
+                    "status": "open",
+                    "order_type": "limit",
+                    "direction": "long",
+                    "decision_snapshot_id": "snap-other-2",  # Mismatched snapshot ID!
+                    "tri_core_event_id": "event-other-2",
+                    "entry": 1.1189,
+                },
+            ],
+        }
+
+    monkeypatch.setattr(paper_oms, "list_positions", mock_list_positions)
+
+    view = await build_authority_status(
+        symbol="DOT/USDT",
+        snapshot_id="snap-manual-1",
+        event_id="event-manual-1",
+        tri_core_setup={
+            "actionable": True,
+            "direction": "long",
+            "grade": "B",
+            "setup_type": "range_boundary_ping_pong",
+        },
+        structural_rr=2.5,
+    )
+
+    # Neither position should attach to this candidate card
+    assert view["oms"]["status"] == "not_submitted"
+    assert view["lifecycle_state"] == "UNKNOWN"
+
+
+@pytest.mark.anyio
+async def test_authority_status_uniform_not_run_representation():
+    view = await build_authority_status(
+        symbol="ETH/USDT",
+        snapshot_id="snap-notrun-1",
+        event_id="event-notrun-1",
+        tri_core_setup={
+            "actionable": True,
+            "direction": "long",
+            "grade": "B",
+            "setup_type": "range_boundary_ping_pong",
+        },
+        structural_rr=2.0,
+    )
+
+    # When execution revalidation and risk have not run, both sub-payloads and stages report NOT_RUN
+    assert view["execution"]["status"] == "not_run"
+    assert view["execution"]["reason_code"] == "NOT_RUN"
+    assert view["stages"]["execution"]["reason_code"] == "NOT_RUN"
+    assert "not run" in view["stages"]["execution"]["reason"].lower()
+
+    assert view["risk"]["status"] == "not_run"
+    assert view["risk"]["reason_code"] == "NOT_RUN"
+    assert view["stages"]["risk"]["reason_code"] == "NOT_RUN"
+    assert "not run" in view["stages"]["risk"]["reason"].lower()
+    assert view["decision_summary"]["reason_code"] == "NOT_RUN"
+
 

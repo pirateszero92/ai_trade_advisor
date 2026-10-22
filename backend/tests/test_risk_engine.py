@@ -346,6 +346,7 @@ def test_sqz_risk_scaling_is_disabled_by_default(monkeypatch):
     from app.engines.risk_engine import squeeze_adjusted_risk_pct
 
     engine = RiskEngine()
+    monkeypatch.setattr("app.core.runtime_config.load_runtime_config", lambda: {})
     monkeypatch.setattr(engine.cfg, "sqz_risk_scaling_enabled", False)
     signal = SMCSignal(
         symbol="BTC/USDT",
@@ -369,6 +370,7 @@ def test_sqz_risk_scaling_requires_explicit_enable(monkeypatch):
     from app.engines.risk_engine import squeeze_adjusted_risk_pct
 
     engine = RiskEngine()
+    monkeypatch.setattr("app.core.runtime_config.load_runtime_config", lambda: {})
     monkeypatch.setattr(engine.cfg, "sqz_risk_scaling_enabled", True)
     signal = SMCSignal(
         symbol="BTC/USDT",

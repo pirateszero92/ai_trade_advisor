@@ -11,6 +11,7 @@ CONFIG_CONTRACT_VERSION = "phase24-v1"
 
 RUNTIME_OWNERSHIP: dict[str, str] = {
     "entry_mode": "execution",
+    "binance_trading_mode": "execution",
     "auto_sl_tp": "execution",
     "auto_invalidation": "execution",
     "target_rr": "execution",
@@ -22,6 +23,10 @@ RUNTIME_OWNERSHIP: dict[str, str] = {
     "btc_anchor_dump_threshold_pct": "risk",
     "cluster_loss_cooldown_enabled": "risk",
     "cluster_loss_cooldown_minutes": "risk",
+    "loss_streak_halt_enabled": "risk",
+    "loss_streak_halt_hours": "risk",
+    "counter_trend_filter_enabled": "risk",
+    "ping_pong_enabled": "strategy",
     "auto_trade_enabled": "execution",
     "auto_trade_require_ai_approval": "ai",
     "auto_trade_ai_policy": "ai",
@@ -39,7 +44,11 @@ RUNTIME_OWNERSHIP: dict[str, str] = {
     "local_api_key": "ai",
     "gemini_model": "ai",
     "openrouter_model": "ai",
+    "scanner_ai_mode": "ai",
     "watchlist": "research",
+    "telegram_token": "execution",
+    "telegram_chat_id": "execution",
+    "line_token": "execution",
     # Compatibility-only persisted field. MTF never becomes an execution gate.
     "mtf_hierarchy_required": "research",
 }
@@ -102,9 +111,12 @@ def validate_runtime_config(data: dict[str, Any]) -> dict[str, Any]:
     number("auto_trade_limit_timeout_bars", 1, 20)
     number("btc_anchor_dump_threshold_pct", 0.2, 5.0)
     number("cluster_loss_cooldown_minutes", 5, 240)
+    number("loss_streak_halt_hours", 1, 24)
 
     if "entry_mode" in clean and clean["entry_mode"] not in {"limit", "market"}:
         raise ValueError("entry_mode must be limit or market")
+    if "binance_trading_mode" in clean and clean["binance_trading_mode"] not in {"futures", "spot"}:
+        raise ValueError("binance_trading_mode must be futures or spot")
     if "auto_trade_min_grade" in clean and clean["auto_trade_min_grade"] not in {"S", "A"}:
         raise ValueError("auto_trade_min_grade must be S or A")
     if "auto_trade_entry_type" in clean and clean["auto_trade_entry_type"] not in {
@@ -126,6 +138,9 @@ def validate_runtime_config(data: dict[str, Any]) -> dict[str, Any]:
         "execution_shadow_compare_enabled",
         "btc_anchor_filter_enabled",
         "cluster_loss_cooldown_enabled",
+        "loss_streak_halt_enabled",
+        "counter_trend_filter_enabled",
+        "ping_pong_enabled",
     ):
         if key in clean and not isinstance(clean[key], bool):
             raise ValueError(f"{key} must be boolean")

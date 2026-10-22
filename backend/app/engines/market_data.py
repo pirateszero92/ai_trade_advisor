@@ -447,7 +447,19 @@ class MarketDataEngine:
         frame["sell_volume"] = (frame["volume"] - frame["buy_volume"]).clip(lower=0)
         frame["volume_delta"] = frame["buy_volume"] - frame["sell_volume"]
         frame["cvd"] = frame["volume_delta"].cumsum()
-        frame["flow_source"] = "binance_taker_volume"
+        
+        # Check candle continuity for intraday candles
+        tf_minutes = {
+            "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240
+        }.get(tf)
+        has_gap = False
+        if tf_minutes and len(frame) >= 5:
+            diff_sec = frame.index.to_series().diff().dt.total_seconds().dropna()
+            max_gap = tf_minutes * 60 * 2.0
+            if (diff_sec.tail(20) > max_gap).any():
+                has_gap = True
+
+        frame["flow_source"] = "binance_gap_detected" if has_gap else "binance_taker_volume"
         frame = frame[[
             "open", "high", "low", "close", "volume", "buy_volume",
             "sell_volume", "volume_delta", "cvd", "flow_source",
@@ -850,7 +862,19 @@ class MarketDataEngine:
                         df["sell_volume"] = (df["volume"] - df["buy_volume"]).clip(lower=0)
                         df["volume_delta"] = df["buy_volume"] - df["sell_volume"]
                         df["cvd"] = df["volume_delta"].cumsum()
-                        df["flow_source"] = "binance_taker_volume"
+
+                        # Check candle continuity for intraday crypto
+                        tf_minutes = {
+                            "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240
+                        }.get(tf)
+                        has_gap = False
+                        if tf_minutes and len(df) >= 5:
+                            diff_sec = df.index.to_series().diff().dt.total_seconds().dropna()
+                            max_gap = tf_minutes * 60 * 2.0
+                            if (diff_sec.tail(20) > max_gap).any():
+                                has_gap = True
+
+                        df["flow_source"] = "binance_gap_detected" if has_gap else "binance_taker_volume"
                         df = df[[
                             "open", "high", "low", "close", "volume",
                             "buy_volume", "sell_volume", "volume_delta", "cvd",
@@ -887,7 +911,8 @@ class MarketDataEngine:
                         for col in ["open", "high", "low", "close", "volume"]:
                             df[col] = pd.to_numeric(df[col], errors="coerce")
                         df.sort_index(inplace=True)
-                        df = df[["open", "high", "low", "close", "volume"]].dropna()
+                        df["flow_source"] = "bybit_rest_ohlcv"
+                        df = df[["open", "high", "low", "close", "volume", "flow_source"]].dropna()
             except Exception as e:
                 logger.warning(f"[MarketData] Bybit fetch failed: {e}")
 
@@ -969,6 +994,9 @@ class MarketDataEngine:
             res_df = df_4h.tail(limit).copy()
         else:
             res_df = df[["open", "high", "low", "close", "volume"]].tail(limit).copy()
+
+        if not res_df.empty:
+            res_df["flow_source"] = "yahoo_ohlcv_volume"
 
         if is_thb and not res_df.empty:
             rate = _get_usd_thb_rate_cached()

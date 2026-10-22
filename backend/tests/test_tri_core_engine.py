@@ -201,6 +201,7 @@ def test_armed_sweep_invalidates_beyond_sweep_extreme():
 
 
 def test_legacy_scenario_and_sqz_cannot_change_strategy_authority(monkeypatch):
+    monkeypatch.setattr("app.core.runtime_config.load_runtime_config", lambda: {})
     from app.core.config import get_settings
     monkeypatch.setattr(get_settings(), "sqz_risk_scaling_enabled", True)
     signal = _signal()
@@ -851,3 +852,53 @@ def test_counter_trend_filter_disabled_allows_short():
 
 
 
+
+
+def test_intraday_mtf_scenario_a_pullback_rejected():
+    # 4H Down, 1H Down, 15m bounces up -> Reject Long (Pullback into supply, wait to short)
+    signal = _signal()
+    signal.market_regime = {"regime": "unknown", "direction": "neutral"}
+    signal.intraday_bias = "bearish"
+    signal.macro_bias = "bearish"
+    setup = TriCoreSetupEngine.evaluate(signal, _frame())
+    assert not setup.actionable
+    assert any("Counter-trend LONG rejected: 1H intraday trend is bearish" in r for r in setup.rejection_reasons)
+
+
+def test_intraday_mtf_scenario_b_counter_4h_allowed_with_room():
+    # 4H Down, but 1H shifts UP -> 15m Long setup allowed if room to 4H resistance allows RR >= minimum_rr
+    signal = _signal()
+    signal.market_regime = {"regime": "unknown", "direction": "neutral"}
+    signal.intraday_bias = "bullish"
+    signal.macro_bias = "bearish"
+    # Entry ~100.5, Stop ~98.0 (Risk = 2.5). 4H resistance at 115.0 gives distance 14.5 (RR ~ 5.8 > 1.5)
+    signal.macro_obstacles = [{"type": "order_block", "mid": 115.0, "low": 114.0}]
+    setup = TriCoreSetupEngine.evaluate(signal, _frame(), {"minimum_rr": 1.5})
+    assert setup.actionable
+    assert setup.direction == "long"
+
+
+def test_intraday_mtf_scenario_b_insufficient_room_rejected():
+    # 4H Down, 1H UP, but 4H resistance is too close (RR < minimum_rr) -> Reject No Chase
+    signal = _signal()
+    signal.market_regime = {"regime": "unknown", "direction": "neutral"}
+    signal.intraday_bias = "bullish"
+    signal.macro_bias = "bearish"
+    # Entry ~100.5, Stop ~98.0. 4H resistance at 101.5 gives distance only 1.0 (RR < 1.0 < 1.5)
+    signal.macro_obstacles = [{"type": "order_block", "mid": 101.5, "low": 101.2}]
+    setup = TriCoreSetupEngine.evaluate(signal, _frame(), {"minimum_rr": 1.5})
+    assert not setup.actionable
+    assert any("Insufficient room to 4H obstacle" in r for r in setup.rejection_reasons)
+
+
+def test_intraday_mtf_scenario_c_at_4h_obstacle_rejected():
+    # At 4H obstacle within 0.25 ATR -> Reject Adverse location
+    signal = _signal()
+    signal.market_regime = {"regime": "unknown", "direction": "neutral"}
+    signal.intraday_bias = "bullish"
+    signal.macro_bias = "bearish"
+    # Entry ~100.5. 4H obstacle at 100.6 (within 0.25 ATR)
+    signal.macro_obstacles = [{"type": "order_block", "mid": 100.6, "low": 100.55}]
+    setup = TriCoreSetupEngine.evaluate(signal, _frame(), {"minimum_rr": 1.5})
+    assert not setup.actionable
+    assert any("Adverse location: At major 4H obstacle" in r for r in setup.rejection_reasons)

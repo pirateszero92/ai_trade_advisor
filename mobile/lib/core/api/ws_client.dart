@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import '../notifications/local_notification_service.dart';
 import 'api_client.dart';
 
 enum WsConnectionState { disconnected, connecting, connected, error }
@@ -111,8 +112,13 @@ class AppWebSocketClient {
             : <String, dynamic>{};
         _latestPrices.addAll(payload);
         _priceStreamController.add(payload);
-      } else if (type == 'trade_updated' || type == 'trade_closed') {
+      } else if (type == 'trade_updated' ||
+          type == 'trade_closed' ||
+          type == 'auto_trade_executed') {
         _tradeStreamController.add(data);
+        unawaited(LocalNotificationService.instance.handleWebSocketEvent(data));
+      } else if (type == 'app_notification') {
+        unawaited(LocalNotificationService.instance.handleWebSocketEvent(data));
       } else if (type == 'signal') {
         _signalStreamController.add(data);
       }

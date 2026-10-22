@@ -13,7 +13,7 @@ from app.services.evidence import fingerprint
 
 
 TRACE_SCHEMA_VERSION = 1
-DEFAULT_HOT_RECORD_LIMIT = 5_000
+DEFAULT_HOT_RECORD_LIMIT = 200
 DEFAULT_ARCHIVE_RETENTION_DAYS = 365
 
 
@@ -44,10 +44,33 @@ class DecisionTraceService:
         self._records: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         self._loaded = False
+        self._dirty = False
+        self._flush_task: asyncio.Task | None = None
+        self._archived_ids: set[str] | None = None
 
     @staticmethod
     def candidate_id(snapshot_id: str, event_id: str) -> str:
         return f"{snapshot_id}:{event_id}"
+
+    def _schedule_debounced_save(self) -> None:
+        if self._flush_task is not None and not self._flush_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            self._flush_task = loop.create_task(self._delayed_save())
+        except RuntimeError:
+            pass
+
+    async def _delayed_save(self) -> None:
+        await asyncio.sleep(2.0)
+        await self.flush()
+
+    async def flush(self) -> None:
+        async with self._lock:
+            if not self._dirty:
+                return
+            self._dirty = False
+            await asyncio.to_thread(self._write_sync)
 
     async def record(
         self,
@@ -76,7 +99,7 @@ class DecisionTraceService:
 
         async with self._lock:
             record = self._records.get(cid)
-            if record is None:
+            if record is None and self._archived_ids is not None and cid in self._archived_ids:
                 record = await asyncio.to_thread(self._read_archived_sync, cid)
                 if record is not None:
                     self._records[cid] = record
@@ -100,8 +123,10 @@ class DecisionTraceService:
                 "candidate_id": cid,
                 "events": record["events"],
             })
-            await self._trim_hot_store_locked()
-            await asyncio.to_thread(self._write_sync)
+            if len(self._records) > self.hot_record_limit + 50:
+                await self._trim_hot_store_locked()
+            self._dirty = True
+            self._schedule_debounced_save()
             return deepcopy(record)
 
     async def get(self, *, snapshot_id: str, event_id: str) -> dict[str, Any] | None:
@@ -111,12 +136,15 @@ class DecisionTraceService:
             record = self._records.get(cid)
             if record is not None:
                 return deepcopy(record)
+            if self._archived_ids is not None and cid not in self._archived_ids:
+                return None
             archived = await asyncio.to_thread(self._read_archived_sync, cid)
             return deepcopy(archived) if archived else None
 
     async def list_records(self) -> list[dict[str, Any]]:
         """Return all known records; archive expansion is transient, not cached."""
         await self._ensure_loaded()
+        await self.flush()
         async with self._lock:
             archived = await asyncio.to_thread(self._read_all_archived_sync)
             archived.update(self._records)
@@ -128,7 +156,9 @@ class DecisionTraceService:
     async def reset(self) -> None:
         async with self._lock:
             self._records.clear()
+            self._dirty = True
             self._loaded = True
+            await asyncio.to_thread(self._write_sync)
 
     async def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -138,10 +168,31 @@ class DecisionTraceService:
                 return
             self._records = await asyncio.to_thread(self._read_sync)
             await asyncio.to_thread(self._purge_expired_archives_sync)
+            self._archived_ids = await asyncio.to_thread(self._load_archived_ids_sync)
             if len(self._records) > self.hot_record_limit:
                 await self._trim_hot_store_locked()
                 await asyncio.to_thread(self._write_sync)
             self._loaded = True
+
+    def _load_archived_ids_sync(self) -> set[str]:
+        ids: set[str] = set()
+        if not self.archive_dir.exists():
+            return ids
+        for archive_path in self.archive_dir.glob("decision-traces-*.ndjson"):
+            try:
+                for line in archive_path.read_text(encoding="utf-8").splitlines():
+                    if not line:
+                        continue
+                    try:
+                        env = json.loads(line)
+                        cid = str(env.get("candidate_id") or "")
+                        if cid:
+                            ids.add(cid)
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        return ids
 
     async def _trim_hot_store_locked(self) -> None:
         overflow = len(self._records) - self.hot_record_limit
@@ -156,6 +207,8 @@ class DecisionTraceService:
         )
         for cid, record in ordered[:overflow]:
             await asyncio.to_thread(self._archive_record_sync, record)
+            if self._archived_ids is not None:
+                self._archived_ids.add(cid)
             self._records.pop(cid, None)
 
     @classmethod
@@ -211,19 +264,23 @@ class DecisionTraceService:
             return {}
 
     def _write_sync(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(
-                self._records,
-                ensure_ascii=False,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-            encoding="utf-8",
-        )
-        temporary.replace(self.path)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(
+                    self._records,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            temporary.replace(self.path)
+        except OSError as exc:
+            from loguru import logger
+            logger.warning(f"[DecisionTrace] Unable to write hot trace store {self.path}: {exc}")
 
     @staticmethod
     def _archive_date(record: dict[str, Any]) -> str:
@@ -237,30 +294,34 @@ class DecisionTraceService:
             return datetime.now(timezone.utc).date().isoformat()
 
     def _archive_record_sync(self, record: dict[str, Any]) -> None:
-        self.archive_dir.mkdir(parents=True, exist_ok=True)
-        record_copy = deepcopy(record)
-        envelope = {
-            "archived_at": datetime.now(timezone.utc).isoformat(),
-            "candidate_id": str(record_copy.get("candidate_id") or ""),
-            "record_hash": fingerprint(record_copy),
-            "record": record_copy,
-        }
-        envelope["envelope_hash"] = fingerprint({
-            "archived_at": envelope["archived_at"],
-            "candidate_id": envelope["candidate_id"],
-            "record_hash": envelope["record_hash"],
-        })
-        archive_path = self.archive_dir / f"decision-traces-{self._archive_date(record_copy)}.ndjson"
-        with archive_path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(
-                envelope,
-                ensure_ascii=False,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ))
-            handle.write("\n")
-        self._purge_expired_archives_sync()
+        try:
+            self.archive_dir.mkdir(parents=True, exist_ok=True)
+            record_copy = deepcopy(record)
+            envelope = {
+                "archived_at": datetime.now(timezone.utc).isoformat(),
+                "candidate_id": str(record_copy.get("candidate_id") or ""),
+                "record_hash": fingerprint(record_copy),
+                "record": record_copy,
+            }
+            envelope["envelope_hash"] = fingerprint({
+                "archived_at": envelope["archived_at"],
+                "candidate_id": envelope["candidate_id"],
+                "record_hash": envelope["record_hash"],
+            })
+            archive_path = self.archive_dir / f"decision-traces-{self._archive_date(record_copy)}.ndjson"
+            with archive_path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps(
+                    envelope,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ))
+                handle.write("\n")
+            self._purge_expired_archives_sync()
+        except OSError as exc:
+            from loguru import logger
+            logger.warning(f"[DecisionTrace] Unable to archive trace record: {exc}")
 
     def _purge_expired_archives_sync(self) -> None:
         if self.archive_retention_days is None or not self.archive_dir.exists():

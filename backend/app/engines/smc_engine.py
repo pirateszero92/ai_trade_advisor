@@ -159,6 +159,9 @@ class SMCSignal:
         "fresh_structure_break", "confirmed_swing_trend", "neutral"
     ] = "neutral"
     htf_bias: Literal["bullish", "bearish", "neutral"] = "neutral"
+    intraday_bias: Literal["bullish", "bearish", "neutral"] = "neutral"
+    macro_bias: Literal["bullish", "bearish", "neutral"] = "neutral"
+    macro_obstacles: list[dict[str, Any]] = field(default_factory=list)
     bos: bool = False
     choch: bool = False
     structure_event_age: Optional[int] = None
@@ -407,6 +410,9 @@ class SMCEngine:
         indicator_config: dict[str, Any] | None = None,
         regime_config: dict[str, Any] | None = None,
         tri_core_policy: dict[str, Any] | None = None,
+        intraday_bias: Literal["bullish", "bearish", "neutral"] = "neutral",
+        macro_bias: Literal["bullish", "bearish", "neutral"] = "neutral",
+        macro_obstacles: list[dict[str, Any]] | None = None,
     ) -> SMCSignal:
         """
         Run full LuxAlgo SMC analysis pipeline on the given OHLCV DataFrame.
@@ -434,7 +440,7 @@ class SMCEngine:
             logger.error(f"[SMC] Non-finite OHLC data for {symbol}")
             return SMCSignal(symbol=symbol, timeframe=timeframe, htf_bias=htf_bias)
 
-        signal = SMCSignal(symbol=symbol, timeframe=timeframe, htf_bias=htf_bias)
+        signal = SMCSignal(symbol=symbol, timeframe=timeframe, htf_bias=htf_bias, intraday_bias=intraday_bias, macro_bias=macro_bias, macro_obstacles=macro_obstacles or [])
         policy_ttl = TriCorePolicy.from_mapping(tri_core_policy).ttl_bars
         signal.execution_ttl_bars = min(
             max(0, policy_ttl), max(0, self.structure_event_ttl_bars)

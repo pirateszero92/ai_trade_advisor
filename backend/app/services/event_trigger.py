@@ -131,6 +131,9 @@ def _confirmed_invalidation_direction(signal) -> str:
     compression or unknown regimes may block exposure, but must never block a
     confirmed reduction of an existing Paper position.
     """
+    tri_core_setup = getattr(signal, "tri_core_setup", {}) or {}
+    if isinstance(tri_core_setup, dict) and tri_core_setup.get("spot_exit_signal") is True:
+        return "short"
     indicator_decision = getattr(signal, "indicator_decision", {})
     if not isinstance(indicator_decision, dict) or not indicator_decision.get("ready", False):
         return "wait"
@@ -221,7 +224,18 @@ class MarketMonitor:
                 break
             except Exception as e:
                 logger.error(f"Error in proactive scan loop: {e}")
-            await asyncio.sleep(self.interval)
+
+            # Smart candle-close alignment:
+            # Regularly poll every interval (45s), but if the next 15m candle close
+            # (+2s buffer for exchange data finalization: :00:02, :15:02, :30:02, :45:02)
+            # is approaching sooner, sleep directly until that mark so signals trigger
+            # instantly with near-zero latency after candle close.
+            now = datetime.now(timezone.utc)
+            seconds_past_hour = now.minute * 60 + now.second + now.microsecond / 1_000_000.0
+            next_15m_mark = ((int(seconds_past_hour) // 900) + 1) * 900 + 2.0
+            seconds_until_close = next_15m_mark - seconds_past_hour
+            sleep_time = min(float(self.interval), max(1.0, seconds_until_close))
+            await asyncio.sleep(sleep_time)
 
     async def _run_position_monitor_loop(self):
         """Fast high-frequency loop checking open positions TP/SL, Breakeven Shield, and live PnL every 1.5s."""
@@ -804,6 +818,8 @@ class MarketMonitor:
                     "hmm_probabilities": getattr(ltf_sig, "market_regime", {}).get("metrics", {}).get("hmm_probabilities", {}),
                 },
                 "analysis_snapshot": execution.metadata(),
+                "contract_mode": tri_core_setup.get("contract_mode", "futures"),
+                "action_label": tri_core_setup.get("action_label", "WAIT"),
                 "ai_review": ltf_sig.ai_review,
                 "message": structure_summary,
                 "advice": advice_text,
@@ -840,7 +856,9 @@ class MarketMonitor:
             # Broadcast to WebSocket
             await broadcast({"type": "signal", "data": signal_payload})
 
-            await self._cancel_invalidated_limit_entry(symbol, tri_core_setup)
+            await self._cancel_invalidated_limit_entry(
+                symbol, tri_core_setup, signal=ltf_sig, exit_direction=exit_direction
+            )
 
             # Pre-alerts are state transitions on one stable causal event, not
             # repeated score alerts.  They provide preparation time without
@@ -939,6 +957,8 @@ class MarketMonitor:
         self,
         symbol: str,
         setup: dict[str, Any],
+        signal: Any | None = None,
+        exit_direction: str | None = None,
     ) -> None:
         """Cancel causal pending limit orders when their exact event expires/fails or transitions."""
         state = str(setup.get("trigger_state", "wait"))
@@ -960,12 +980,50 @@ class MarketMonitor:
                     pos_dir = str(position.get("direction", "")).lower()
                     new_dir = str(setup.get("direction", "")).lower()
                     cancel_reason = None
-                    if pos_event_id and pos_event_id == event_id and state in {"no_chase", "expired", "invalidated"}:
-                        cancel_reason = f"Tri-Core {state}: {str(setup.get('state_reason', ''))}"[:200]
-                    elif pos_event_id and event_id and pos_event_id != event_id:
-                        cancel_reason = f"Tri-Core pending limit replaced by new event {event_id}"[:200]
-                    elif state in {"expired", "invalidated"}:
-                        cancel_reason = f"Tri-Core setup {state}; order invalidated"[:200]
+
+                    # 1. Option 3a: Check TTL valid_until expiration
+                    payload = dict(position.get("source_payload") or {})
+                    valid_until_raw = str(payload.get("valid_until") or "")
+                    if valid_until_raw:
+                        try:
+                            vu = datetime.fromisoformat(valid_until_raw.replace("Z", "+00:00"))
+                            if datetime.now(timezone.utc) >= vu:
+                                cancel_reason = "Order timeout expired (valid_until passed)"
+                        except Exception:
+                            pass
+
+                    # 2. Option 3b: Dynamic Invalidation from Opposing Momentum / Structure Breakdown
+                    if not cancel_reason and signal is not None:
+                        micro = getattr(signal, "micro_momentum", {}) or {}
+                        micro_dir = str(micro.get("direction", "")).lower()
+                        if pos_dir == "long" and micro_dir == "bearish":
+                            chg = float(micro.get("change_pct_3bar", 0.0) or 0.0)
+                            cancel_reason = f"Cancelled: Opposing 5m micro-momentum dump ({chg:.2f}%)"
+                        elif pos_dir == "short" and micro_dir == "bullish":
+                            chg = float(micro.get("change_pct_3bar", 0.0) or 0.0)
+                            cancel_reason = f"Cancelled: Opposing 5m micro-momentum pump (+{chg:.2f}%)"
+
+                        if not cancel_reason:
+                            regime = getattr(signal, "market_regime", {}) or {}
+                            reg_dir = str(regime.get("direction", "")).lower()
+                            reg_type = str(regime.get("regime", "")).lower()
+                            if reg_type == "trending":
+                                if pos_dir == "long" and reg_dir == "bearish":
+                                    cancel_reason = "Cancelled: Market regime flipped to trending bearish"
+                                elif pos_dir == "short" and reg_dir == "bullish":
+                                    cancel_reason = "Cancelled: Market regime flipped to trending bullish"
+
+                        if not cancel_reason and exit_direction and exit_direction == pos_dir:
+                            cancel_reason = f"Cancelled: Market structure breakdown invalidated {pos_dir.upper()} setup"
+
+                    # 3. Check Tri-Core state transitions
+                    if not cancel_reason:
+                        if pos_event_id and pos_event_id == event_id and state in {"no_chase", "expired", "invalidated"}:
+                            cancel_reason = f"Tri-Core {state}: {str(setup.get('state_reason', ''))}"[:200]
+                        elif pos_event_id and event_id and pos_event_id != event_id and bool(setup.get("actionable")):
+                            cancel_reason = f"Tri-Core pending limit replaced by new actionable event {event_id}"[:200]
+                        elif state in {"expired", "invalidated"} and (not pos_event_id or pos_event_id == event_id):
+                            cancel_reason = f"Tri-Core setup {state}; order invalidated"[:200]
 
                     if cancel_reason:
                         await paper_oms.cancel_entry_order(
@@ -1159,6 +1217,30 @@ class MarketMonitor:
         elif require_ai_approval and (
             not ai_rev or str(ai_rev.get("status", "")).lower() != "reviewed"
         ):
+            # Pre-check grade and cooldown before invoking expensive LLM review
+            _min_g = str(r_cfg.get("auto_trade_min_grade", "A")).upper()
+            if (_min_g == "S" and setup_grade != "S") or (_min_g == "A" and setup_grade not in {"A", "S"}):
+                await decision_trace.record(
+                    snapshot_id=decision_snapshot_id,
+                    event_id=event_id,
+                    symbol=symbol,
+                    stage="GRADE_FILTER",
+                    facts={"passed": False, "reason_code": "MIN_GRADE_NOT_MET", "grade": setup_grade, "min_grade": _min_g},
+                )
+                return None
+            _cd_sec = float(r_cfg.get("auto_trade_cooldown_seconds", 300))
+            _now_ts = asyncio.get_event_loop().time()
+            _last_ex = _AUTO_TRADE_HISTORY.get(_compact_symbol(symbol), 0.0)
+            if auto_trade_enabled and (_now_ts - _last_ex < _cd_sec):
+                await decision_trace.record(
+                    snapshot_id=decision_snapshot_id,
+                    event_id=event_id,
+                    symbol=symbol,
+                    stage="COOLDOWN",
+                    facts={"passed": False, "reason_code": "COOLDOWN_ACTIVE", "remaining_seconds": _cd_sec - (_now_ts - _last_ex)},
+                )
+                return None
+
             await candidate_lifecycle.transition(
                 symbol=symbol,
                 snapshot_id=decision_snapshot_id,
@@ -1428,16 +1510,6 @@ class MarketMonitor:
                 reason=f"AI blocked execution: {'; '.join(str(r) for r in reasons)}"[:300],
             )
             return None
-        elif ai_is_caution and accept_caution:
-            logger.info(
-                f"[Auto-Pilot] AI Soft Caution accepted for {symbol} {direction} with {ai_risk_multiplier:.1f}x sizing: "
-                f"{ai_rev.get('reason', '')}"
-            )
-        elif ai_approved:
-            logger.info(
-                f"[Auto-Pilot] AI Decision {ai_decision} APPROVED for {symbol} {direction} with {ai_risk_multiplier:.1f}x sizing: "
-                f"{ai_rev.get('reason', '')}"
-            )
 
         calib_status = str(setup.get("calibration_status", "walk_forward_validated")).lower()
         if calib_status != "walk_forward_validated" and not ai_approved:
@@ -1543,14 +1615,15 @@ class MarketMonitor:
             return None
 
         cfg = get_settings()
-        if auto_trade_enabled and len(active_positions) >= cfg.max_open_positions:
-            logger.warning(f"[Auto-Pilot] Position capacity limit reached ({len(active_positions)}/{cfg.max_open_positions})")
+        max_positions = int(r_cfg.get("max_open_positions", cfg.max_open_positions))
+        if auto_trade_enabled and len(active_positions) >= max_positions:
+            logger.warning(f"[Auto-Pilot] Position capacity limit reached ({len(active_positions)}/{max_positions})")
             await decision_trace.record(
                 snapshot_id=decision_snapshot_id,
                 event_id=event_id,
                 symbol=symbol,
                 stage="OMS_CAPACITY",
-                facts={"passed": False, "reason_code": "CAPACITY_LIMIT_REACHED", "open_positions": len(active_positions), "max": cfg.max_open_positions},
+                facts={"passed": False, "reason_code": "CAPACITY_LIMIT_REACHED", "open_positions": len(active_positions), "max": max_positions},
             )
             return None
 
@@ -1600,14 +1673,17 @@ class MarketMonitor:
             return None
 
         # Single source of truth: Tri-Core policy defines canonical minimum R:R.
-        # target_rr is treated strictly as a fallback compatibility alias.
+        # In settings_rr mode, align minimum_executable_rr with target_rr.
         policy = (
             canonical_analysis.config_snapshot.get("tri_core_policy", {})
             if isinstance(getattr(canonical_analysis, "config_snapshot", None), dict)
             else {}
         )
         canonical_min_rr = policy.get("minimum_rr")
-        if canonical_min_rr is None:
+        if str(policy.get("target_anchor_mode", "")).lower() == "settings_rr":
+            configured_target_rr = float(r_cfg.get("target_rr", canonical_min_rr or 2.0))
+            canonical_min_rr = min(float(canonical_min_rr or configured_target_rr), configured_target_rr)
+        elif canonical_min_rr is None:
             canonical_min_rr = r_cfg.get("target_rr", 2.0)
         exec_min_rr = float(canonical_min_rr)
 
@@ -1698,6 +1774,17 @@ class MarketMonitor:
                     f"{revalidation.reason_code} - {'; '.join(revalidation.reasons)}"
                 )
             return None
+
+        if ai_is_caution and accept_caution:
+            logger.info(
+                f"[Auto-Pilot] AI Soft Caution accepted for {symbol} {direction} with {ai_risk_multiplier:.1f}x sizing: "
+                f"{ai_rev.get('reason', '')}"
+            )
+        elif ai_approved:
+            logger.info(
+                f"[Auto-Pilot] AI Decision {ai_decision} APPROVED for {symbol} {direction} with {ai_risk_multiplier:.1f}x sizing: "
+                f"{ai_rev.get('reason', '')}"
+            )
 
         exec_validated_state = (
             CandidateState.LIMIT_ARMED
@@ -1821,7 +1908,7 @@ class MarketMonitor:
         cluster_cooldown = await persistent_risk_guard.cluster_loss_cooldown(
             symbol=symbol,
             direction=direction,
-            cooldown_minutes=int(cfg.cluster_loss_cooldown_minutes),
+            cooldown_minutes=int(r_cfg.get("cluster_loss_cooldown_minutes", cfg.cluster_loss_cooldown_minutes)),
         )
         if cluster_cooldown:
             reason = (
@@ -2319,11 +2406,12 @@ class MarketMonitor:
 
         logger.info(f"🔍 Proactive Scanner scanning {len(self.watchlist)} Settings watchlist symbols...")
         
-        sem = asyncio.Semaphore(4)
+        sem = asyncio.Semaphore(6)
 
         async def _bounded_scan(item):
             async with sem:
                 try:
+                    await asyncio.sleep(0.05)
                     return await self._scan_single_symbol(item)
                 except Exception as exc:
                     logger.warning(f"[Scanner] Exception scanning {item.get('symbol')}: {exc}")
@@ -2331,6 +2419,14 @@ class MarketMonitor:
 
         results = await asyncio.gather(*[_bounded_scan(item) for item in self.watchlist], return_exceptions=False)
         new_signals = [s for s in results if s is not None]
+
+        # Option 3: Clean up any expired pending limit orders across all watchlist symbols
+        try:
+            from app.services.paper_oms import paper_oms
+            if paper_oms.ready:
+                await paper_oms.sweep_expired_pending_orders()
+        except Exception as e:
+            logger.debug(f"[Scanner] Sweeper error: {e}")
 
         # Keep at most one signal per Settings-watchlist symbol
         active_norm_symbols = {

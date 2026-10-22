@@ -64,3 +64,7 @@ backend/tests_tmp/
 *.aab
 /*.png
 mobile/web_dist/
+
+data/
+scripts/emulator_proxy.py
+scripts/reverse_proxy.py

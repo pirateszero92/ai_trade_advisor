@@ -7,6 +7,7 @@ import '../../app/theme.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/ws_client.dart';
 import '../../core/constants/app_constants.dart';
+import '../../core/notifications/local_notification_service.dart';
 import '../../core/storage/safe_storage.dart';
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,7 @@ class SettingsState {
   final String telegramToken;
   final String telegramChatId;
   final String lineToken;
+  final String binanceTradingMode;
   final String entryMode;
   final bool autoSlTp;
   final bool autoInvalidation;
@@ -44,6 +46,10 @@ class SettingsState {
   final double btcAnchorDumpThresholdPct;
   final bool clusterLossCooldownEnabled;
   final int clusterLossCooldownMinutes;
+  final bool lossStreakHaltEnabled;
+  final int lossStreakHaltHours;
+  final bool counterTrendFilterEnabled;
+  final bool pingPongEnabled;
   final bool mtfHierarchyRequired;
 
   const SettingsState({
@@ -66,6 +72,7 @@ class SettingsState {
     this.telegramToken = '',
     this.telegramChatId = '',
     this.lineToken = '',
+    this.binanceTradingMode = 'futures',
     this.entryMode = 'limit',
     this.autoSlTp = true,
     this.autoInvalidation = true,
@@ -77,6 +84,10 @@ class SettingsState {
     this.btcAnchorDumpThresholdPct = 1.0,
     this.clusterLossCooldownEnabled = true,
     this.clusterLossCooldownMinutes = 30,
+    this.lossStreakHaltEnabled = true,
+    this.lossStreakHaltHours = 2,
+    this.counterTrendFilterEnabled = true,
+    this.pingPongEnabled = false,
     this.mtfHierarchyRequired = false,
   });
 
@@ -100,6 +111,7 @@ class SettingsState {
     String? telegramToken,
     String? telegramChatId,
     String? lineToken,
+    String? binanceTradingMode,
     String? entryMode,
     bool? autoSlTp,
     bool? autoInvalidation,
@@ -111,6 +123,10 @@ class SettingsState {
     double? btcAnchorDumpThresholdPct,
     bool? clusterLossCooldownEnabled,
     int? clusterLossCooldownMinutes,
+    bool? lossStreakHaltEnabled,
+    int? lossStreakHaltHours,
+    bool? counterTrendFilterEnabled,
+    bool? pingPongEnabled,
     bool? mtfHierarchyRequired,
   }) {
     return SettingsState(
@@ -133,6 +149,7 @@ class SettingsState {
       telegramToken: telegramToken ?? this.telegramToken,
       telegramChatId: telegramChatId ?? this.telegramChatId,
       lineToken: lineToken ?? this.lineToken,
+      binanceTradingMode: binanceTradingMode ?? this.binanceTradingMode,
       entryMode: entryMode ?? this.entryMode,
       autoSlTp: autoSlTp ?? this.autoSlTp,
       autoInvalidation: autoInvalidation ?? this.autoInvalidation,
@@ -149,6 +166,13 @@ class SettingsState {
           clusterLossCooldownEnabled ?? this.clusterLossCooldownEnabled,
       clusterLossCooldownMinutes:
           clusterLossCooldownMinutes ?? this.clusterLossCooldownMinutes,
+      lossStreakHaltEnabled:
+          lossStreakHaltEnabled ?? this.lossStreakHaltEnabled,
+      lossStreakHaltHours:
+          lossStreakHaltHours ?? this.lossStreakHaltHours,
+      counterTrendFilterEnabled:
+          counterTrendFilterEnabled ?? this.counterTrendFilterEnabled,
+      pingPongEnabled: pingPongEnabled ?? this.pingPongEnabled,
       mtfHierarchyRequired: mtfHierarchyRequired ?? this.mtfHierarchyRequired,
     );
   }
@@ -206,6 +230,7 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
       telegramToken: telegramToken,
       telegramChatId: telegramChatId,
       lineToken: lineToken,
+      binanceTradingMode: prefs.getString('binance_trading_mode') ?? state.binanceTradingMode,
       entryMode: prefs.getString('entry_mode') ?? state.entryMode,
       autoSlTp: prefs.getBool('auto_sl_tp') ?? state.autoSlTp,
       autoInvalidation:
@@ -229,6 +254,18 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
       clusterLossCooldownMinutes:
           prefs.getInt('cluster_loss_cooldown_minutes') ??
               state.clusterLossCooldownMinutes,
+      lossStreakHaltEnabled:
+          prefs.getBool('loss_streak_halt_enabled') ??
+              state.lossStreakHaltEnabled,
+      lossStreakHaltHours:
+          prefs.getInt('loss_streak_halt_hours') ??
+              state.lossStreakHaltHours,
+      counterTrendFilterEnabled:
+          prefs.getBool('counter_trend_filter_enabled') ??
+              state.counterTrendFilterEnabled,
+      pingPongEnabled:
+          prefs.getBool('ping_pong_enabled') ??
+              state.pingPongEnabled,
       mtfHierarchyRequired: false,
       lmStudioApiKey: await SafeStorage.read(key: 'lm_studio_api_key') ?? '',
       geminiKey: await SafeStorage.read(key: 'gemini_key') ?? '',
@@ -264,6 +301,7 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     await prefs.remove('telegram_token');
     await prefs.remove('telegram_chat_id');
     await prefs.remove('line_token');
+    await prefs.setString('binance_trading_mode', safeState.binanceTradingMode);
     await prefs.setString('entry_mode', safeState.entryMode);
     await prefs.setBool('auto_sl_tp', safeState.autoSlTp);
     await prefs.setBool('auto_invalidation', safeState.autoInvalidation);
@@ -281,6 +319,14 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
         'cluster_loss_cooldown_enabled', safeState.clusterLossCooldownEnabled);
     await prefs.setInt(
         'cluster_loss_cooldown_minutes', safeState.clusterLossCooldownMinutes);
+    await prefs.setBool(
+        'loss_streak_halt_enabled', safeState.lossStreakHaltEnabled);
+    await prefs.setInt(
+        'loss_streak_halt_hours', safeState.lossStreakHaltHours);
+    await prefs.setBool(
+        'counter_trend_filter_enabled', safeState.counterTrendFilterEnabled);
+    await prefs.setBool(
+        'ping_pong_enabled', safeState.pingPongEnabled);
     await prefs.remove('mtf_hierarchy_required');
     await SafeStorage.write(
         key: 'lm_studio_api_key', value: safeState.lmStudioApiKey);
@@ -516,158 +562,318 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         0;
     _aiTabController.animateTo(tabIndex);
 
-    // 2. Fetch live backend configuration to sync (only populate if controller is currently empty)
+    // 2. Fetch live backend configuration to sync
+    if (_apiUrlCtrl.text.trim().isNotEmpty) {
+      await _syncAllFromServer(showToast: false);
+    }
+  }
+
+  Future<void> _syncAllFromServer({bool showToast = true}) async {
+    final targetUrl = _apiUrlCtrl.text.trim();
+    if (targetUrl.isNotEmpty) {
+      try {
+        AppApi.setBaseUrl(targetUrl);
+      } catch (e) {
+        if (showToast && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              backgroundColor: AppColors.bearish,
+              content: Text('URL ไม่ถูกต้อง: $e'),
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    final backendApiKey = _backendApiKeyCtrl.text.trim();
+    if (backendApiKey.isNotEmpty) {
+      await ApiConfig.setApiKey(backendApiKey);
+      AppApi.clearApiKeyCache();
+    }
+
     try {
       final dio = AppApi.dio;
-      final resp = await dio.get(AppApi.url('/api/v1/settings/llm/config'));
-      final data = resp.data as Map<String, dynamic>;
-      if (mounted) {
-        setState(() {
-          final backendProvider =
-              (data['provider'] as String? ?? 'local').toLowerCase();
-          final providerIndex = {
-                'local': 0,
-                'lmstudio': 0,
-                'openai': 0,
-                'gemini': 1,
-                'openrouter': 2,
-              }[backendProvider] ??
-              0;
-          if (_aiTabController.index != providerIndex) {
-            _aiTabController.animateTo(providerIndex);
-          }
+      final prefs = await SharedPreferences.getInstance();
 
-          final ep = data['local_endpoint'] as String?;
-          final m = data['local_model'] as String?;
-          final lk = data['local_key'] as String?;
-          final gk = data['gemini_key'] as String?;
-          final gm = data['gemini_model'] as String?;
-          final ok = data['openrouter_key'] as String?;
-          final om = data['openrouter_model'] as String?;
-
-          if (_lmEndpointCtrl.text.isEmpty && ep != null && ep.isNotEmpty) {
-            _lmEndpointCtrl.text = ep;
-          }
-          if (_lmModelCtrl.text.isEmpty && m != null && m.isNotEmpty) {
-            _lmModelCtrl.text = m;
-          }
-          if (_lmApiKeyCtrl.text.isEmpty &&
-              lk != null &&
-              lk.isNotEmpty &&
-              !lk.contains('*')) {
-            _lmApiKeyCtrl.text = lk;
-          }
-          if (_geminiKeyCtrl.text.isEmpty &&
-              gk != null &&
-              gk.isNotEmpty &&
-              !gk.contains('*')) {
-            _geminiKeyCtrl.text = gk;
-          }
-          if (_geminiModelCtrl.text.isEmpty && gm != null && gm.isNotEmpty) {
-            _geminiModelCtrl.text = gm;
-          }
-          if (_openRouterKeyCtrl.text.isEmpty &&
-              ok != null &&
-              ok.isNotEmpty &&
-              !ok.contains('*')) {
-            _openRouterKeyCtrl.text = ok;
-          }
-          if (_openRouterModelCtrl.text.isEmpty &&
-              om != null &&
-              om.isNotEmpty) {
-            _openRouterModelCtrl.text = om;
-          }
-        });
-      }
-
-      // Fetch Broker configuration
-      final bResp =
-          await dio.get(AppApi.url('/api/v1/settings/brokers/config'));
-      final bData = bResp.data as Map<String, dynamic>;
-      if (mounted) {
-        setState(() {
-          _brokerConfig = Map<String, dynamic>.from(bData);
-          if (_innovestxKeyCtrl.text.isEmpty &&
-              bData['innovestx_api_key'] != null &&
-              !bData['innovestx_api_key'].toString().contains('*')) {
-            _innovestxKeyCtrl.text = bData['innovestx_api_key'].toString();
-          }
-          if (_innovestxSecretCtrl.text.isEmpty &&
-              bData['innovestx_api_secret'] != null &&
-              !bData['innovestx_api_secret'].toString().contains('*')) {
-            _innovestxSecretCtrl.text =
-                bData['innovestx_api_secret'].toString();
-          }
-          if (_mt5LoginCtrl.text.isEmpty &&
-              bData['mt5_login'] != null &&
-              bData['mt5_login'] != 0) {
-            _mt5LoginCtrl.text = bData['mt5_login'].toString();
-          }
-          if (_mt5PasswordCtrl.text.isEmpty &&
-              bData['mt5_password'] != null &&
-              !bData['mt5_password'].toString().contains('*')) {
-            _mt5PasswordCtrl.text = bData['mt5_password'].toString();
-          }
-          if (_mt5ServerCtrl.text.isEmpty && bData['mt5_server'] != null) {
-            _mt5ServerCtrl.text = bData['mt5_server'].toString();
-          }
-          if (_mt5PathCtrl.text.isEmpty && bData['mt5_path'] != null) {
-            _mt5PathCtrl.text = bData['mt5_path'].toString();
-          }
-          if (_binanceKeyCtrl.text.isEmpty &&
-              bData['binance_api_key'] != null &&
-              !bData['binance_api_key'].toString().contains('*')) {
-            _binanceKeyCtrl.text = bData['binance_api_key'].toString();
-          }
-          if (_binanceSecretCtrl.text.isEmpty &&
-              bData['binance_api_secret'] != null &&
-              !bData['binance_api_secret'].toString().contains('*')) {
-            _binanceSecretCtrl.text = bData['binance_api_secret'].toString();
-          }
-          if (_bybitKeyCtrl.text.isEmpty &&
-              bData['bybit_api_key'] != null &&
-              !bData['bybit_api_key'].toString().contains('*')) {
-            _bybitKeyCtrl.text = bData['bybit_api_key'].toString();
-          }
-          if (_bybitSecretCtrl.text.isEmpty &&
-              bData['bybit_api_secret'] != null &&
-              !bData['bybit_api_secret'].toString().contains('*')) {
-            _bybitSecretCtrl.text = bData['bybit_api_secret'].toString();
-          }
-          if (_alpacaKeyCtrl.text.isEmpty &&
-              bData['alpaca_api_key'] != null &&
-              !bData['alpaca_api_key'].toString().contains('*')) {
-            _alpacaKeyCtrl.text = bData['alpaca_api_key'].toString();
-          }
-          if (_alpacaSecretCtrl.text.isEmpty &&
-              bData['alpaca_api_secret'] != null &&
-              !bData['alpaca_api_secret'].toString().contains('*')) {
-            _alpacaSecretCtrl.text = bData['alpaca_api_secret'].toString();
-          }
-          if (_alpacaBaseUrlCtrl.text.isEmpty &&
-              bData['alpaca_base_url'] != null) {
-            _alpacaBaseUrlCtrl.text = bData['alpaca_base_url'].toString();
-          }
-        });
-      }
-
-      // Fetch live runtime & Auto-Pilot settings
+      // 1. Fetch live runtime & strategy settings
       final rResp = await dio.get(AppApi.url('/api/v1/settings/runtime'));
-      final rData = rResp.data is Map ? (rResp.data['config'] as Map<String, dynamic>? ?? {}) : <String, dynamic>{};
+      final rData = rResp.data is Map
+          ? (rResp.data['config'] as Map<String, dynamic>? ?? {})
+          : <String, dynamic>{};
+
       if (rData.isNotEmpty) {
         final current = ref.read(settingsProvider);
-        ref.read(settingsProvider.notifier).save(
-              current.copyWith(
-                autoTradeEnabled: rData['auto_trade_enabled'] as bool? ?? current.autoTradeEnabled,
-                autoTradeMinGrade: rData['auto_trade_min_grade']?.toString() ?? current.autoTradeMinGrade,
-                autoTradeEntryType: rData['auto_trade_entry_type']?.toString() ?? current.autoTradeEntryType,
-                autoTradeCooldownSeconds: (rData['auto_trade_cooldown_seconds'] as num?)?.toInt() ?? current.autoTradeCooldownSeconds,
-                autoSlTp: rData['auto_sl_tp'] as bool? ?? current.autoSlTp,
-                autoInvalidation: rData['auto_invalidation'] as bool? ?? current.autoInvalidation,
-              ),
-            );
+        final newRiskPerTrade =
+            (rData['risk_per_trade'] as num?)?.toDouble() ?? current.riskPerTrade;
+        final newTargetRr =
+            (rData['target_rr'] as num?)?.toDouble() ?? current.targetRr;
+        final newDefaultSlPct =
+            (rData['default_sl_pct'] as num?)?.toDouble() ?? current.defaultSlPct;
+        final newMaxDailyLoss =
+            (rData['max_daily_loss'] as num?)?.toDouble() ?? current.maxDailyLoss;
+        final newMaxPositions =
+            (rData['max_open_positions'] as num?)?.toInt() ?? current.maxPositions;
+        final newBinanceTradingMode =
+            rData['binance_trading_mode']?.toString() ?? current.binanceTradingMode;
+        final newEntryMode =
+            rData['entry_mode']?.toString() ?? current.entryMode;
+        final newAutoSlTp =
+            rData['auto_sl_tp'] as bool? ?? current.autoSlTp;
+        final newAutoInvalidation =
+            rData['auto_invalidation'] as bool? ?? current.autoInvalidation;
+        final newAutoTradeEnabled =
+            rData['auto_trade_enabled'] as bool? ?? current.autoTradeEnabled;
+        final newAutoTradeMinGrade =
+            rData['auto_trade_min_grade']?.toString() ?? current.autoTradeMinGrade;
+        final newAutoTradeEntryType =
+            rData['auto_trade_entry_type']?.toString() ?? current.autoTradeEntryType;
+        final newAutoTradeCooldownSeconds =
+            (rData['auto_trade_cooldown_seconds'] as num?)?.toInt() ??
+                current.autoTradeCooldownSeconds;
+        final newBtcAnchorFilterEnabled =
+            rData['btc_anchor_filter_enabled'] as bool? ??
+                current.btcAnchorFilterEnabled;
+        final newBtcAnchorDumpThresholdPct =
+            (rData['btc_anchor_dump_threshold_pct'] as num?)?.toDouble() ??
+                current.btcAnchorDumpThresholdPct;
+        final newClusterLossCooldownEnabled =
+            rData['cluster_loss_cooldown_enabled'] as bool? ??
+                current.clusterLossCooldownEnabled;
+        final newClusterLossCooldownMinutes =
+            (rData['cluster_loss_cooldown_minutes'] as num?)?.toInt() ??
+                current.clusterLossCooldownMinutes;
+        final newLossStreakHaltEnabled =
+            rData['loss_streak_halt_enabled'] as bool? ??
+                current.lossStreakHaltEnabled;
+        final newLossStreakHaltHours =
+            (rData['loss_streak_halt_hours'] as num?)?.toInt() ??
+                current.lossStreakHaltHours;
+        final newCounterTrendFilterEnabled =
+            rData['counter_trend_filter_enabled'] as bool? ??
+                current.counterTrendFilterEnabled;
+        final newPingPongEnabled =
+            rData['ping_pong_enabled'] as bool? ??
+                current.pingPongEnabled;
+
+        final updated = current.copyWith(
+          apiBaseUrl: targetUrl.isNotEmpty ? targetUrl : current.apiBaseUrl,
+          riskPerTrade: newRiskPerTrade,
+          targetRr: newTargetRr,
+          defaultSlPct: newDefaultSlPct,
+          maxDailyLoss: newMaxDailyLoss,
+          maxPositions: newMaxPositions,
+          binanceTradingMode: newBinanceTradingMode,
+          entryMode: newEntryMode,
+          autoSlTp: newAutoSlTp,
+          autoInvalidation: newAutoInvalidation,
+          autoTradeEnabled: newAutoTradeEnabled,
+          autoTradeMinGrade: newAutoTradeMinGrade,
+          autoTradeEntryType: newAutoTradeEntryType,
+          autoTradeCooldownSeconds: newAutoTradeCooldownSeconds,
+          btcAnchorFilterEnabled: newBtcAnchorFilterEnabled,
+          btcAnchorDumpThresholdPct: newBtcAnchorDumpThresholdPct,
+          clusterLossCooldownEnabled: newClusterLossCooldownEnabled,
+          clusterLossCooldownMinutes: newClusterLossCooldownMinutes,
+          lossStreakHaltEnabled: newLossStreakHaltEnabled,
+          lossStreakHaltHours: newLossStreakHaltHours,
+          counterTrendFilterEnabled: newCounterTrendFilterEnabled,
+          pingPongEnabled: newPingPongEnabled,
+        );
+
+        await ref.read(settingsProvider.notifier).save(updated);
+        await prefs.setDouble('risk_per_trade', newRiskPerTrade);
+        await prefs.setDouble('target_rr', newTargetRr);
+        await prefs.setDouble('default_sl_pct', newDefaultSlPct);
+        await prefs.setDouble('max_daily_loss', newMaxDailyLoss);
+        await prefs.setInt('max_positions', newMaxPositions);
+        await prefs.setString('binance_trading_mode', newBinanceTradingMode);
+        await prefs.setString('entry_mode', newEntryMode);
+        await prefs.setBool('auto_sl_tp', newAutoSlTp);
+        await prefs.setBool('auto_invalidation', newAutoInvalidation);
+        await prefs.setBool('auto_trade_enabled', newAutoTradeEnabled);
+        await prefs.setString('auto_trade_min_grade', newAutoTradeMinGrade);
+        await prefs.setString('auto_trade_entry_type', newAutoTradeEntryType);
+        await prefs.setInt(
+            'auto_trade_cooldown_seconds', newAutoTradeCooldownSeconds);
+        await prefs.setBool(
+            'btc_anchor_filter_enabled', newBtcAnchorFilterEnabled);
+        await prefs.setDouble(
+            'btc_anchor_dump_threshold_pct', newBtcAnchorDumpThresholdPct);
+        await prefs.setBool(
+            'cluster_loss_cooldown_enabled', newClusterLossCooldownEnabled);
+        await prefs.setInt(
+            'cluster_loss_cooldown_minutes', newClusterLossCooldownMinutes);
+        await prefs.setBool(
+            'counter_trend_filter_enabled', newCounterTrendFilterEnabled);
+        await prefs.setBool(
+            'ping_pong_enabled', newPingPongEnabled);
       }
-    } catch (_) {}
+
+      // 2. Fetch live watchlist
+      final wlResp = await dio.get(AppApi.url('/api/v1/settings/watchlist'));
+      final List<dynamic> wlList = wlResp.data['watchlist'] ?? [];
+      if (mounted) {
+        setState(() {
+          _watchlist =
+              wlList.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+        });
+      }
+
+      // 3. Fetch LLM configuration
+      try {
+        final resp = await dio.get(AppApi.url('/api/v1/settings/llm/config'));
+        final data = resp.data as Map<String, dynamic>;
+        if (mounted) {
+          setState(() {
+            final backendProvider =
+                (data['provider'] as String? ?? 'local').toLowerCase();
+            final providerIndex = {
+                  'local': 0,
+                  'lmstudio': 0,
+                  'openai': 0,
+                  'gemini': 1,
+                  'openrouter': 2,
+                }[backendProvider] ??
+                0;
+            if (_aiTabController.index != providerIndex) {
+              _aiTabController.animateTo(providerIndex);
+            }
+
+            final ep = data['local_endpoint'] as String?;
+            final m = data['local_model'] as String?;
+            final lk = data['local_key'] as String?;
+            final gk = data['gemini_key'] as String?;
+            final gm = data['gemini_model'] as String?;
+            final ok = data['openrouter_key'] as String?;
+            final om = data['openrouter_model'] as String?;
+
+            if (ep != null && ep.isNotEmpty) _lmEndpointCtrl.text = ep;
+            if (m != null && m.isNotEmpty) _lmModelCtrl.text = m;
+            if (lk != null && lk.isNotEmpty && !lk.contains('*')) {
+              _lmApiKeyCtrl.text = lk;
+            }
+            if (gk != null && gk.isNotEmpty && !gk.contains('*')) {
+              _geminiKeyCtrl.text = gk;
+            }
+            if (gm != null && gm.isNotEmpty) _geminiModelCtrl.text = gm;
+            if (ok != null && ok.isNotEmpty && !ok.contains('*')) {
+              _openRouterKeyCtrl.text = ok;
+            }
+            if (om != null && om.isNotEmpty) _openRouterModelCtrl.text = om;
+          });
+        }
+      } catch (_) {}
+
+      // 4. Fetch Broker configuration
+      try {
+        final bResp =
+            await dio.get(AppApi.url('/api/v1/settings/brokers/config'));
+        final bData = bResp.data as Map<String, dynamic>;
+        if (mounted) {
+          setState(() {
+            _brokerConfig = Map<String, dynamic>.from(bData);
+            if (bData['innovestx_api_key'] != null &&
+                !bData['innovestx_api_key'].toString().contains('*')) {
+              _innovestxKeyCtrl.text = bData['innovestx_api_key'].toString();
+            }
+            if (bData['innovestx_api_secret'] != null &&
+                !bData['innovestx_api_secret'].toString().contains('*')) {
+              _innovestxSecretCtrl.text =
+                  bData['innovestx_api_secret'].toString();
+            }
+            if (bData['mt5_login'] != null && bData['mt5_login'] != 0) {
+              _mt5LoginCtrl.text = bData['mt5_login'].toString();
+            }
+            if (bData['mt5_password'] != null &&
+                !bData['mt5_password'].toString().contains('*')) {
+              _mt5PasswordCtrl.text = bData['mt5_password'].toString();
+            }
+            if (bData['mt5_server'] != null) {
+              _mt5ServerCtrl.text = bData['mt5_server'].toString();
+            }
+            if (bData['mt5_path'] != null) {
+              _mt5PathCtrl.text = bData['mt5_path'].toString();
+            }
+            if (bData['binance_api_key'] != null &&
+                !bData['binance_api_key'].toString().contains('*')) {
+              _binanceKeyCtrl.text = bData['binance_api_key'].toString();
+            }
+            if (bData['binance_api_secret'] != null &&
+                !bData['binance_api_secret'].toString().contains('*')) {
+              _binanceSecretCtrl.text =
+                  bData['binance_api_secret'].toString();
+            }
+            if (bData['bybit_api_key'] != null &&
+                !bData['bybit_api_key'].toString().contains('*')) {
+              _bybitKeyCtrl.text = bData['bybit_api_key'].toString();
+            }
+            if (bData['bybit_api_secret'] != null &&
+                !bData['bybit_api_secret'].toString().contains('*')) {
+              _bybitSecretCtrl.text = bData['bybit_api_secret'].toString();
+            }
+            if (bData['alpaca_api_key'] != null &&
+                !bData['alpaca_api_key'].toString().contains('*')) {
+              _alpacaKeyCtrl.text = bData['alpaca_api_key'].toString();
+            }
+            if (bData['alpaca_api_secret'] != null &&
+                !bData['alpaca_api_secret'].toString().contains('*')) {
+              _alpacaSecretCtrl.text =
+                  bData['alpaca_api_secret'].toString();
+            }
+            if (bData['alpaca_base_url'] != null) {
+              _alpacaBaseUrlCtrl.text = bData['alpaca_base_url'].toString();
+            }
+          });
+        }
+      } catch (_) {}
+
+      // 5. Fetch Notification configuration
+      try {
+        final nResp =
+            await dio.get(AppApi.url('/api/v1/settings/notifications/config'));
+        final nData = nResp.data as Map<String, dynamic>;
+        if (mounted) {
+          setState(() {
+            final tg = nData['telegram_token'] as String?;
+            final cid = nData['telegram_chat_id'] as String?;
+            final ln = nData['line_token'] as String?;
+            if (tg != null && tg.isNotEmpty && !tg.contains('*')) {
+              _telegramTokenCtrl.text = tg;
+            }
+            if (cid != null && cid.isNotEmpty && !cid.contains('*')) {
+              _telegramChatIdCtrl.text = cid;
+            }
+            if (ln != null && ln.isNotEmpty && !ln.contains('*')) {
+              _lineTokenCtrl.text = ln;
+            }
+          });
+        }
+      } catch (_) {}
+
+      if (showToast && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.bullish,
+            content: Text(
+              '✅ ดึงการตั้งค่าและ Watchlist (${_watchlist.length} สินทรัพย์) จาก Server สำเร็จ',
+              style: const TextStyle(
+                  color: Colors.black, fontWeight: FontWeight.bold),
+            ),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      if (showToast && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.bearish,
+            content: Text('เกิดข้อผิดพลาดในการดึงข้อมูลจาก Server: $e'),
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _loadBrokerCredentials() async {
@@ -1628,6 +1834,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       await dio.post(
         AppApi.url('/api/v1/settings/risk/config'),
         data: {
+          'binance_trading_mode': current.binanceTradingMode,
           'entry_mode': current.entryMode,
           'auto_sl_tp': current.autoSlTp,
           'auto_invalidation': current.autoInvalidation,
@@ -1644,9 +1851,29 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'btc_anchor_dump_threshold_pct': current.btcAnchorDumpThresholdPct,
           'cluster_loss_cooldown_enabled': current.clusterLossCooldownEnabled,
           'cluster_loss_cooldown_minutes': current.clusterLossCooldownMinutes,
+          'loss_streak_halt_enabled': current.lossStreakHaltEnabled,
+          'loss_streak_halt_hours': current.lossStreakHaltHours,
+          'counter_trend_filter_enabled': current.counterTrendFilterEnabled,
+          'ping_pong_enabled': current.pingPongEnabled,
           'mtf_hierarchy_required': current.mtfHierarchyRequired,
         },
       );
+
+      // Save Notification configuration
+      try {
+        await dio.post(
+          AppApi.url('/api/v1/settings/notifications/config'),
+          data: {
+            'telegram_token': _telegramTokenCtrl.text.trim(),
+            'telegram_chat_id': _telegramChatIdCtrl.text.trim(),
+            'line_token': _lineTokenCtrl.text.trim(),
+          },
+        );
+      } catch (_) {
+        // Notification tokens are already saved in local SafeStorage and SharedPreferences.
+        // Server endpoint is optional and may not be deployed on older backend versions.
+      }
+      await _fetchWatchlist();
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1705,18 +1932,22 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           options: Options(headers: {'X-API-Key': apiKey}),
         );
         final ok = resp.data['status'] == 'ok' && authResp.statusCode == 200;
+        if (ok) {
+          await _syncAllFromServer(showToast: false);
+        }
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               backgroundColor: ok ? AppColors.bullish : AppColors.bearish,
               content: Text(
                 ok
-                    ? '✅ Backend API Connected! (v${resp.data['version']})'
-                    : '⚠️ Connection failed',
+                    ? '✅ เชื่อมต่อสำเร็จและดึงข้อมูลจาก Server แล้ว! (Watchlist ${_watchlist.length} สินทรัพย์)'
+                    : '⚠️ การเชื่อมต่อล้มเหลว ตรวจสอบ URL หรือ Backend API Key',
                 style: TextStyle(
                     color: ok ? Colors.black : Colors.white,
                     fontWeight: FontWeight.bold),
               ),
+              duration: const Duration(seconds: 4),
             ),
           );
         }
@@ -2240,6 +2471,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     foregroundColor: AppColors.bullish),
               ),
             ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () => _syncAllFromServer(showToast: true),
+                icon: const Icon(Icons.cloud_download, size: 16),
+                label: const Text('🔄 ดึงการตั้งค่าและ Watchlist จาก Server'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.bullish.withValues(alpha: 0.15),
+                  foregroundColor: AppColors.bullish,
+                  side: const BorderSide(color: AppColors.bullish),
+                ),
+              ),
+            ),
           ]),
 
           const SizedBox(height: 16),
@@ -2378,6 +2623,63 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           _sectionHeader('🛡️ Position & Risk Management'),
           _card([
             const Text(
+              'โหมดสัญญา Binance (Binance Contract Mode):',
+              style: TextStyle(
+                  fontSize: 13,
+                  color: Colors.white70,
+                  fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: ChoiceChip(
+                    label: const Center(
+                      child: Text('Futures (LONG / SHORT)',
+                          style: TextStyle(fontSize: 12)),
+                    ),
+                    selected: settings.binanceTradingMode == 'futures',
+                    selectedColor: AppColors.bullish,
+                    backgroundColor: const Color(0xFF252540),
+                    onSelected: (selected) {
+                      if (selected) {
+                        ref
+                            .read(settingsProvider.notifier)
+                            .save(settings.copyWith(binanceTradingMode: 'futures'));
+                      }
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ChoiceChip(
+                    label: const Center(
+                      child: Text('Spot (BUY / SELL)',
+                          style: TextStyle(fontSize: 12)),
+                    ),
+                    selected: settings.binanceTradingMode == 'spot',
+                    selectedColor: const Color(0xFF00E5FF),
+                    backgroundColor: const Color(0xFF252540),
+                    onSelected: (selected) {
+                      if (selected) {
+                        ref
+                            .read(settingsProvider.notifier)
+                            .save(settings.copyWith(binanceTradingMode: 'spot'));
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              settings.binanceTradingMode == 'futures'
+                  ? '⚡ โหมด Futures: เปิดสถานะได้ทั้ง 2 ฝั่ง LONG (ซื้อขึ้น) และ SHORT (ขายลง)'
+                  : '🪙 โหมด Spot: เข้าซื้อ BUY อย่างเดียว (ไม่อนุญาต Naked Short; สัญญาณ Bearish จะเป็นป้าย SELL เพื่อเตือนปิดทำกำไร/คัทสถานะที่มีอยู่) *InnovestX และหุ้นสหรัฐเป็น Spot เสมอ',
+              style: const TextStyle(fontSize: 11, color: Colors.white38),
+            ),
+            const Divider(color: Colors.white12, height: 24),
+            const Text(
               'รูปแบบจุดเข้า (SMC Entry Style):',
               style: TextStyle(
                   fontSize: 13,
@@ -2482,6 +2784,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             const Divider(color: Colors.white12, height: 16),
             _riskSlider(
               label: 'Risk per Trade',
+              subtitle:
+                  'เปอร์เซ็นต์ความเสี่ยงของพอร์ตต่อ 1 ออเดอร์ (ใช้คำนวณขนาด Position Size ร่วมกับระยะ SL)',
               value: settings.riskPerTrade,
               min: 0.5,
               max: 5.0,
@@ -2493,6 +2797,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             ),
             _riskSlider(
               label: 'Minimum Executable R:R',
+              subtitle:
+                  'อัตราส่วน Risk/Reward ขั้นต่ำที่ระบบจะยอมออกออเดอร์ (หาก R:R ต่ำกว่านี้จะปฏิเสธการเข้าเทรด)',
               value: settings.targetRr,
               min: 1.0,
               max: 4.0,
@@ -2504,6 +2810,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             ),
             _riskSlider(
               label: 'Default SL Distance',
+              subtitle:
+                  'ระยะ Stop Loss ความปลอดภัยสูงสุดจากราคาเข้า (%) ในกรณีที่โครงสร้างกราฟอยู่ไกลเกินกำหนด',
               value: settings.defaultSlPct,
               min: 0.5,
               max: 3.0,
@@ -2515,6 +2823,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             ),
             _riskSlider(
               label: 'Max Daily Loss',
+              subtitle:
+                  'ลิมิตขาดทุนรวมสูงสุดต่อวัน (%) หากติดลบถึงเกณฑ์นี้ระบบจะระงับการเปิดไม้ใหม่ทันทีเพื่อรักษาพอร์ต',
               value: settings.maxDailyLoss,
               min: 1.0,
               max: 10.0,
@@ -2526,6 +2836,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             ),
             _riskSlider(
               label: 'Max Positions',
+              subtitle:
+                  'จำนวนไม้สูงสุดที่อนุญาตให้เปิดพร้อมกันในพอร์ต เพื่อคุม Total Exposure ไม่ให้แบกรับความเสี่ยงเกินไป',
               value: settings.maxPositions.toDouble(),
               min: 1,
               max: 10,
@@ -2535,6 +2847,40 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                   ),
               suffix: '',
               isInt: true,
+            ),
+            const Divider(color: Colors.white12, height: 20),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Counter-Trend Filter (กรองไม่เปิดไม้สวนเทรนด์ใหญ่)',
+                  style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600)),
+              subtitle: const Text(
+                  'บล็อกการเปิดออเดอร์ที่สวนทางกับแนวโน้มหลักของไทม์เฟรมใหญ่ (30m / 1H) เพื่อป้องกันการโดนลากสวนเทรนด์',
+                  style: TextStyle(fontSize: 11, color: Colors.white54)),
+              value: settings.counterTrendFilterEnabled,
+              activeThumbColor: AppColors.bullish,
+              onChanged: (v) => ref.read(settingsProvider.notifier).save(
+                    settings.copyWith(counterTrendFilterEnabled: v),
+                  ),
+            ),
+            const Divider(color: Colors.white12, height: 20),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Ping-Pong Strategy (เล่นกรอบ Sideway / Ranging)',
+                  style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600)),
+              subtitle: const Text(
+                  'เปิดการเทรดกลับตัวบริเวณขอบกรอบราคา (Demand/Supply) เฉพาะเมื่อสภาวะตลาดเป็น Ranging ชัดเจน (ควบคุมเพดานเกรดไม่เกิน B)',
+                  style: TextStyle(fontSize: 11, color: Colors.white54)),
+              value: settings.pingPongEnabled,
+              activeThumbColor: AppColors.bullish,
+              onChanged: (v) => ref.read(settingsProvider.notifier).save(
+                    settings.copyWith(pingPongEnabled: v),
+                  ),
             ),
             const Divider(color: Colors.white12, height: 20),
             SwitchListTile(
@@ -2595,6 +2941,84 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 suffix: ' นาที',
                 isInt: true,
               ),
+            const Divider(color: Colors.white12, height: 20),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Loss Streak Circuit Breaker (พักบอทเมื่อโดน SL ติดกัน)',
+                  style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600)),
+              subtitle: const Text(
+                  'ล็อกห้ามเปิดออเดอร์ใหม่ชั่วคราวอัตโนมัติเมื่อโดน Stop Loss ติดต่อกันครบเกณฑ์ เพื่อป้องกันพอร์ตไหลในสภาวะตลาดผันผวน',
+                  style: TextStyle(fontSize: 11, color: Colors.white54)),
+              value: settings.lossStreakHaltEnabled,
+              activeThumbColor: AppColors.bullish,
+              onChanged: (v) async {
+                ref.read(settingsProvider.notifier).save(
+                      settings.copyWith(lossStreakHaltEnabled: v),
+                    );
+                try {
+                  await AppApi.dio.post(
+                    AppApi.url('/api/v1/settings/runtime'),
+                    data: {'loss_streak_halt_enabled': v},
+                  );
+                } catch (_) {}
+              },
+            ),
+            if (settings.lossStreakHaltEnabled) ...[
+              const SizedBox(height: 6),
+              const Text(
+                'ระยะเวลาพักการเทรด (Lock Duration):',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.white70,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [1, 2, 3, 4].map((hrs) {
+                  final selected = settings.lossStreakHaltHours == hrs;
+                  return Expanded(
+                    child: Padding(
+                      padding: EdgeInsets.only(right: hrs < 4 ? 8.0 : 0.0),
+                      child: ChoiceChip(
+                        label: SizedBox(
+                          width: double.infinity,
+                          child: Text(
+                            '$hrs ชม.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight:
+                                  selected ? FontWeight.bold : FontWeight.normal,
+                              color: selected ? Colors.black : Colors.white70,
+                            ),
+                          ),
+                        ),
+                        selected: selected,
+                        selectedColor: AppColors.bullish,
+                        backgroundColor: const Color(0xFF252540),
+                        onSelected: (isSel) async {
+                          if (isSel) {
+                            ref.read(settingsProvider.notifier).save(
+                                  settings.copyWith(lossStreakHaltHours: hrs),
+                                );
+                            try {
+                              await AppApi.dio.post(
+                                AppApi.url('/api/v1/settings/runtime'),
+                                data: {'loss_streak_halt_hours': hrs},
+                              );
+                            } catch (_) {}
+                          }
+                        },
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ],
           ]),
 
           const SizedBox(height: 16),
@@ -3332,12 +3756,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                   child: ElevatedButton.icon(
                     onPressed: _showAddAssetDialog,
                     icon: const Icon(Icons.add_circle,
-                        size: 16, color: Colors.black),
-                    label: const Text('➕ เพิ่มสินทรัพย์เข้า Watchlist',
+                        size: 15, color: Colors.black),
+                    label: const Text('➕ เพิ่มสินทรัพย์',
                         style: TextStyle(
                             color: Colors.black,
                             fontWeight: FontWeight.bold,
-                            fontSize: 12)),
+                            fontSize: 11)),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.bullish,
                       padding: const EdgeInsets.symmetric(vertical: 10),
@@ -3346,18 +3770,38 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 6),
+                Expanded(
+                  flex: 3,
+                  child: OutlinedButton.icon(
+                    onPressed: () => _syncAllFromServer(showToast: true),
+                    icon: const Icon(Icons.cloud_download,
+                        size: 15, color: AppColors.bullish),
+                    label: const Text('☁️ ดึงจาก Server',
+                        style: TextStyle(
+                            color: AppColors.bullish,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 11)),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: AppColors.bullish),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
                 Expanded(
                   flex: 2,
                   child: OutlinedButton.icon(
                     onPressed: _resetDefaultWatchlist,
-                    icon: const Icon(Icons.refresh,
-                        size: 15, color: Colors.white70),
-                    label: const Text('🔄 ค่าเริ่มต้น',
+                    icon: const Icon(Icons.restore,
+                        size: 14, color: Colors.white70),
+                    label: const Text('ค่าเริ่มต้น',
                         style: TextStyle(
                             color: Colors.white70,
                             fontWeight: FontWeight.bold,
-                            fontSize: 11)),
+                            fontSize: 10)),
                     style: OutlinedButton.styleFrom(
                       side: const BorderSide(color: AppColors.border),
                       padding: const EdgeInsets.symmetric(vertical: 10),
@@ -3375,16 +3819,49 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           // ---- Notifications ----
           _sectionHeader('🔔 Notifications'),
           _card([
-            // FCM
+            // Local & Push Notifications
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Push Notifications (FCM)',
-                  style: TextStyle(fontSize: 14, color: Colors.white70)),
+              title: const Text('Local Push & Sound Alerts (แจ้งเตือนบนมือถือ)',
+                  style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600)),
+              subtitle: const Text(
+                  'แจ้งเตือนพร้อมเสียงและป๊อปอัปบนแถบแจ้งเตือน Android เมื่อเปิด/แมตช์/ปิดออเดอร์ หรือมีสัญญาณสำคัญ',
+                  style: TextStyle(fontSize: 11, color: Colors.white54)),
               value: settings.fcmEnabled,
               activeThumbColor: AppColors.bullish,
-              onChanged: (v) => ref
-                  .read(settingsProvider.notifier)
-                  .save(settings.copyWith(fcmEnabled: v)),
+              onChanged: (v) {
+                ref
+                    .read(settingsProvider.notifier)
+                    .save(settings.copyWith(fcmEnabled: v));
+                if (v) {
+                  LocalNotificationService.instance.init();
+                }
+              },
+            ),
+            const SizedBox(height: 6),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  LocalNotificationService.instance.showNotification(
+                    title: '🚀 ทดสอบแจ้งเตือน: LONG BTC/USDT',
+                    body:
+                        'Entry: \$84,250.00 | SL: \$83,400.00 | TP: \$85,550.00 (R:R 1.53)',
+                    accentColor: AppColors.bullish,
+                    icon: Icons.notifications_active,
+                    force: true,
+                  );
+                },
+                icon: const Icon(Icons.volume_up_outlined, size: 16),
+                label: const Text('🔔 ทดสอบเสียงและป๊อปอัปแจ้งเตือน (Android)'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.bullish,
+                  side: const BorderSide(color: AppColors.bullish),
+                ),
+              ),
             ),
             const Divider(color: Colors.white12),
 
@@ -3527,6 +4004,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     required int divisions,
     required ValueChanged<double> onChanged,
     required String suffix,
+    String? subtitle,
     bool isInt = false,
   }) {
     final display = isInt ? value.toInt().toString() : value.toStringAsFixed(1);
@@ -3536,8 +4014,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(label,
-                style: const TextStyle(fontSize: 13, color: Colors.white70)),
+            Expanded(
+              child: Text(label,
+                  style: const TextStyle(fontSize: 13, color: Colors.white70)),
+            ),
             Text('$display$suffix',
                 style: const TextStyle(
                     fontSize: 13,
@@ -3545,6 +4025,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     fontWeight: FontWeight.bold)),
           ],
         ),
+        if (subtitle != null) ...[
+          const SizedBox(height: 2),
+          Text(
+            subtitle,
+            style: const TextStyle(
+                fontSize: 11, color: Colors.white54, height: 1.25),
+          ),
+        ],
         Slider(
           value: value,
           min: min,

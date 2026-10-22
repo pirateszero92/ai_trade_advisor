@@ -22,15 +22,31 @@ class NotificationService:
         sl: Optional[float] = None,
         tp: Optional[float] = None,
         rr: Optional[float] = None,
+        contract_mode: Optional[str] = None,
+        action_label: Optional[str] = None,
     ) -> dict[str, bool]:
         """Broadcast signal alert to all configured channels (FCM, Telegram, LINE)."""
         results = {}
+
+        if not action_label:
+            mode = contract_mode or (
+                "spot"
+                if (
+                    symbol.upper().endswith("/THB")
+                    or (get_settings().binance_trading_mode == "spot" and symbol.upper().endswith("/USDT"))
+                )
+                else "futures"
+            )
+            if mode == "spot":
+                action_label = "BUY (SPOT)" if direction.upper() in ("LONG", "BUY") else "SELL (SPOT)"
+            else:
+                action_label = direction.upper()
 
         tg_success, line_success, fcm_success = await asyncio.gather(
             self._send_telegram(
                 symbol=symbol,
                 timeframe=timeframe,
-                direction=direction,
+                direction=action_label,
                 message=message,
                 confluence=confluence_score,
                 entry=entry,
@@ -41,19 +57,50 @@ class NotificationService:
             self._send_line(
                 symbol=symbol,
                 timeframe=timeframe,
-                direction=direction,
+                direction=action_label,
                 message=message,
                 confluence=confluence_score,
             ),
             self._send_fcm(
-                title=f"🚨 Apex Signal: {direction.upper()} {symbol} ({timeframe})",
+                title=f"🚨 Apex Signal: {action_label} {symbol} ({timeframe})",
                 body=message,
-                data={"symbol": symbol, "timeframe": timeframe, "direction": direction},
+                data={
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "direction": direction,
+                    "contract_mode": contract_mode or ("spot" if "SPOT" in action_label else "futures"),
+                    "action_label": action_label,
+                },
             ),
         )
         results["telegram"] = tg_success
         results["line"] = line_success
         results["fcm"] = fcm_success
+
+        try:
+            from app.api.ws import broadcast
+
+            await broadcast({
+                "type": "app_notification",
+                "data": {
+                    "title": f"🚨 Apex Signal: {action_label} {symbol} ({timeframe})",
+                    "body": message,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "direction": direction,
+                    "contract_mode": contract_mode or ("spot" if "SPOT" in action_label else "futures"),
+                    "action_label": action_label,
+                    "confluence": confluence_score,
+                    "entry": entry,
+                    "sl": sl,
+                    "tp": tp,
+                    "rr": rr,
+                },
+            })
+            results["ws"] = True
+        except Exception as e:
+            logger.debug(f"Failed to broadcast WS app_notification: {e}")
+            results["ws"] = False
 
         return results
 
@@ -69,7 +116,11 @@ class NotificationService:
         tp: Optional[float] = None,
         rr: Optional[float] = None,
     ) -> bool:
-        if not self.cfg.telegram_bot_token or not self.cfg.telegram_chat_id:
+        from app.core.runtime_config import load_runtime_config
+        rc = load_runtime_config()
+        tg_token = (rc.get("telegram_token") or self.cfg.telegram_bot_token or "").strip()
+        tg_chat = (rc.get("telegram_chat_id") or self.cfg.telegram_chat_id or "").strip()
+        if not tg_token or not tg_chat:
             return False
 
         icon = "🟢" if direction.lower() == "long" else "🔴" if direction.lower() == "short" else "⚠️"
@@ -99,13 +150,13 @@ class NotificationService:
         ])
 
         payload = {
-            "chat_id": self.cfg.telegram_chat_id,
+            "chat_id": tg_chat,
             "text": "\n".join(text_lines),
         }
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                url = f"https://api.telegram.org/bot{self.cfg.telegram_bot_token}/sendMessage"
+                url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
                 resp = await client.post(url, json=payload)
                 return resp.status_code == 200
         except Exception as e:
@@ -120,7 +171,9 @@ class NotificationService:
         message: str,
         confluence: int,
     ) -> bool:
-        token = (self.cfg.line_notify_token or "").strip()
+        from app.core.runtime_config import load_runtime_config
+        rc = load_runtime_config()
+        token = (rc.get("line_token") or self.cfg.line_notify_token or "").strip()
         if not token:
             return False
 

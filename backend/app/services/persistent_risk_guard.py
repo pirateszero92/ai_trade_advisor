@@ -33,8 +33,8 @@ def _iso(value: datetime | None) -> str | None:
 class PersistentRiskGuard:
     """Own durable portfolio halts without making OMS a risk authority."""
 
-    HALT_DURATION = timedelta(hours=24)
-    CONSECUTIVE_STOP_LIMIT = 3
+    HALT_DURATION = timedelta(hours=2)
+    CONSECUTIVE_STOP_LIMIT = 4
 
     def __init__(
         self,
@@ -62,7 +62,19 @@ class PersistentRiskGuard:
         return account
 
     async def active_halt(self, *, now: datetime | None = None) -> dict[str, Any] | None:
+        from app.core.runtime_config import load_runtime_config
+
         now = now or _utcnow()
+        cfg = get_settings()
+        r_cfg = load_runtime_config()
+        streak_enabled = bool(
+            r_cfg.get("loss_streak_halt_enabled", getattr(cfg, "loss_streak_halt_enabled", True))
+        )
+        streak_hours = int(
+            r_cfg.get("loss_streak_halt_hours", getattr(cfg, "loss_streak_halt_hours", 2)) or 2
+        )
+        streak_duration = timedelta(hours=max(1, min(24, streak_hours)))
+
         async with self._session_factory() as session:
             account = await self._active_account(session)
             halt = (
@@ -76,7 +88,15 @@ class PersistentRiskGuard:
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            return self._serialize(halt) if halt else None
+            if not halt:
+                return None
+            if halt.reason == "three_consecutive_stop_losses":
+                if not streak_enabled:
+                    return None
+                trig = _as_utc(halt.triggered_at)
+                if trig is not None and (trig + streak_duration) <= now:
+                    return None
+            return self._serialize(halt)
 
     async def evaluate_and_persist(
         self,
@@ -85,8 +105,19 @@ class PersistentRiskGuard:
         rolling_loss_limit_pct: float | None = None,
     ) -> dict[str, Any] | None:
         """Return active/new halt when rolling loss or stop streak requires one."""
+        from app.core.runtime_config import load_runtime_config
+
         now = now or _utcnow()
         cfg = get_settings()
+        r_cfg = load_runtime_config()
+        streak_enabled = bool(
+            r_cfg.get("loss_streak_halt_enabled", getattr(cfg, "loss_streak_halt_enabled", True))
+        )
+        streak_hours = int(
+            r_cfg.get("loss_streak_halt_hours", getattr(cfg, "loss_streak_halt_hours", 2)) or 2
+        )
+        streak_duration = timedelta(hours=max(1, min(24, streak_hours)))
+
         limit_pct = (
             float(rolling_loss_limit_pct)
             if rolling_loss_limit_pct is not None
@@ -107,8 +138,18 @@ class PersistentRiskGuard:
                     )
                 ).scalar_one_or_none()
 
-                if latest_halt and (_as_utc(latest_halt.halted_until) or now) > now:
-                    return self._serialize(latest_halt)
+                if latest_halt:
+                    effective_until = _as_utc(latest_halt.halted_until) or now
+                    if latest_halt.reason == "three_consecutive_stop_losses":
+                        if not streak_enabled:
+                            effective_until = now
+                        elif latest_halt.triggered_at is not None:
+                            effective_until = min(
+                                effective_until,
+                                (_as_utc(latest_halt.triggered_at) or now) + streak_duration,
+                            )
+                    if effective_until > now:
+                        return self._serialize(latest_halt)
 
                 cutoff = now - timedelta(hours=24)
                 closed = (
@@ -150,7 +191,8 @@ class PersistentRiskGuard:
 
                 recent_three = closed[: self.CONSECUTIVE_STOP_LIMIT]
                 stop_streak = (
-                    len(recent_three) == self.CONSECUTIVE_STOP_LIMIT
+                    streak_enabled
+                    and len(recent_three) == self.CONSECUTIVE_STOP_LIMIT
                     and all(
                         str(item.close_reason or "").lower().startswith("stop loss")
                         for item in recent_three
@@ -166,17 +208,23 @@ class PersistentRiskGuard:
                 if trigger is None:
                     return None
 
+                applied_duration = (
+                    streak_duration
+                    if trigger == "three_consecutive_stop_losses"
+                    else self.HALT_DURATION
+                )
                 halt = PaperOMSRiskHalt(
                     account_id=account.id,
                     reason=trigger,
                     triggered_at=now,
-                    halted_until=now + self.HALT_DURATION,
+                    halted_until=now + applied_duration,
                     source_payload={
                         "trigger": trigger,
                         "rolling_window_hours": 24,
                         "rolling_realized_pnl": round(rolling_pnl, 8),
                         "rolling_realized_pnl_pct": round(rolling_loss_pct, 6),
                         "rolling_loss_limit_pct": limit_pct,
+                        "halt_hours": int(applied_duration.total_seconds() // 3600),
                         "consecutive_stop_losses": (
                             self.CONSECUTIVE_STOP_LIMIT if stop_streak else 0
                         ),
@@ -205,11 +253,14 @@ class PersistentRiskGuard:
         be lost on restart.  Opposite-direction opportunities remain eligible.
         """
         from app.engines.risk_engine import get_asset_cluster
+        from app.core.runtime_config import load_runtime_config
 
         cfg = get_settings()
-        if not bool(cfg.cluster_loss_cooldown_enabled):
+        r_cfg = load_runtime_config()
+        enabled = bool(r_cfg.get("cluster_loss_cooldown_enabled", cfg.cluster_loss_cooldown_enabled))
+        if not enabled:
             return None
-        minutes = int(cooldown_minutes or cfg.cluster_loss_cooldown_minutes)
+        minutes = int(cooldown_minutes or r_cfg.get("cluster_loss_cooldown_minutes", cfg.cluster_loss_cooldown_minutes))
         if not 5 <= minutes <= 240:
             raise ValueError("cluster cooldown must be between 5 and 240 minutes")
         cluster = get_asset_cluster(symbol)

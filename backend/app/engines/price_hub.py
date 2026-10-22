@@ -339,7 +339,7 @@ class PriceHub:
             "buy_volume": event.buy_volume,
             "sell_volume": event.sell_volume,
             "volume_delta": event.volume_delta,
-            "flow_source": "binance_taker_volume",
+            "flow_source": "binance_taker_volume" if "binance" in str(event.source or "").lower() else f"{event.source or 'unknown'}_taker_volume",
             "is_closed": event.is_closed,
             "source": event.source,
         }

@@ -213,7 +213,7 @@ async def test_mtf_service_fetches_three_closed_windows_and_reuses_cache(monkeyp
         _symbol, timeframe, _market_type, _exchange, limit, *, closed_only=False
     ):
         calls.append((timeframe, limit, closed_only))
-        pandas_tf = "15min" if timeframe == "15m" else timeframe
+        pandas_tf = {"15m": "15min", "30m": "30min", "5m": "5min", "1m": "1min", "1h": "1h", "4h": "4h", "1d": "1D"}.get(timeframe, timeframe)
         return _frame(limit, pandas_tf)
 
     monkeypatch.setattr(service._market, "get_ohlcv", fake_get_ohlcv)
@@ -231,7 +231,15 @@ async def test_mtf_service_fetches_three_closed_windows_and_reuses_cache(monkeyp
     )
 
     assert first is second
-    assert calls == [("1d", 180, True), ("4h", 300, True), ("15m", 600, True)]
+    expected_calls = [
+        (
+            service._config_snapshot()["timeframe_profiles"]["roles"][role]["timeframe"],
+            int(service._config_snapshot()["timeframe_profiles"]["roles"][role]["lookback"]),
+            True,
+        )
+        for role in ("bias", "setup", "trigger")
+    ]
+    assert calls == expected_calls
     assert first.metadata()["candle_policy"] == "closed_only"
 
 

@@ -35,10 +35,13 @@ class TriCorePolicy:
     target_anchor_mode: str = "opposing_boundary"
     counter_trend_filter_enabled: bool = True
     candidate_selection_mode: Literal["rr_then_grade", "grade_then_rr"] = "rr_then_grade"
+    binance_trading_mode: Literal["futures", "spot"] = "futures"
 
     @classmethod
     def from_mapping(cls, raw: Any) -> "TriCorePolicy":
         values = raw if isinstance(raw, dict) else {}
+        raw_btm = str(values.get("binance_trading_mode", cls.binance_trading_mode)).lower()
+        btm: Literal["futures", "spot"] = "spot" if raw_btm == "spot" else "futures"
         policy = cls(
             version=str(values.get("version", cls.version)),
             calibration_status=str(values.get("calibration_status", cls.calibration_status)),
@@ -61,6 +64,7 @@ class TriCorePolicy:
             candidate_selection_mode=str(values.get(
                 "candidate_selection_mode", cls.candidate_selection_mode
             )),
+            binance_trading_mode=btm,
         )
         if policy.calibration_status not in {"draft_unvalidated", "walk_forward_validated"}:
             raise ValueError("Invalid Tri-Core calibration status")
@@ -85,7 +89,7 @@ class TriCoreSetup:
     stop_loss: float | None = None
     take_profit: float | None = None
     risk_reward: float = 0.0
-    grade: Literal["WAIT", "A", "S"] = "WAIT"
+    grade: Literal["WAIT", "S", "A", "B", "C"] = "WAIT"
     smc_confirmed: bool = False
     cvd_confirmed: bool = False
     flow_confirmed: bool = False
@@ -112,9 +116,49 @@ class TriCoreSetup:
     rejection_reasons: list[str] = field(default_factory=list)
     policy_version: str = "15m-migration-v1"
     calibration_status: str = "draft_unvalidated"
+    contract_mode: Literal["spot", "futures"] = "futures"
+    action_label: str = "WAIT"
+    spot_exit_signal: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _resolve_contract_mode(signal: Any, policy: TriCorePolicy) -> Literal["spot", "futures"]:
+    sym = str(getattr(signal, "symbol", "") or "").upper().strip()
+    if sym.endswith("/THB") or sym.endswith("-THB") or sym.endswith("THB"):
+        return "spot"
+    market_status = getattr(signal, "market_status", {}) or {}
+    if isinstance(market_status, dict) and market_status.get("market") == "US_EQUITY":
+        return "spot"
+    if sym.endswith("/USDT") or sym.endswith("-USDT") or sym.endswith("USDT"):
+        return "spot" if policy.binance_trading_mode == "spot" else "futures"
+    return "futures"
+
+
+def _stamp_contract_metadata(
+    setup: TriCoreSetup,
+    contract_mode: Literal["spot", "futures"],
+    spot_exit_detected: bool = False,
+) -> TriCoreSetup:
+    setup.contract_mode = contract_mode
+    if spot_exit_detected and not setup.actionable:
+        setup.spot_exit_signal = True
+    if contract_mode == "spot":
+        if setup.actionable and setup.direction == "long":
+            setup.action_label = "BUY"
+        elif setup.spot_exit_signal:
+            setup.action_label = "SELL"
+        else:
+            setup.action_label = "WAIT"
+    else:
+        if setup.actionable and setup.direction == "long":
+            setup.action_label = "LONG"
+        elif setup.actionable and setup.direction == "short":
+            setup.action_label = "SHORT"
+        else:
+            setup.action_label = "WAIT"
+    return setup
 
 
 def _atr(frame: pd.DataFrame, length: int = 14) -> float:
@@ -199,19 +243,35 @@ def _range_opposing_target(signal: Any, side: str, entry: float) -> float | None
 
     In a ranging/ping-pong structure, this locks take-profit directly at the edge
     of the primary opposing supply or demand zone rather than prematurely truncating
-    the trade at an internal minor obstacle.
+    the trade at an internal minor obstacle. When active range_zones exist, it prioritizes
+    the nearest major opposing boundary or Swing Order Block.
     """
+    candidates: list[float] = []
     if side == "long":
-        # 1. Look for Major Bearish Order Block bottom above entry
+        rz = getattr(signal, "range_zones", {}) or {}
+        p_zone = rz.get("premium_zone", {}) if isinstance(rz, dict) else {}
+        if isinstance(p_zone, dict) and p_zone.get("bottom"):
+            pz_bottom = float(p_zone["bottom"])
+            if pz_bottom > entry:
+                candidates.append(pz_bottom)
+
+        sw_high = getattr(signal, "strong_weak_high", None)
+        if isinstance(sw_high, dict) and sw_high.get("price") is not None:
+            price = float(sw_high["price"])
+            if price > entry:
+                candidates.append(price)
+
         bearish_obs = [
             float(zone.bottom) for zone in getattr(signal, "order_blocks", [])
             if zone.direction == "bearish" and not zone.mitigated and float(zone.bottom) > entry
             and getattr(zone, "source", "swing") == "swing"
         ]
         if bearish_obs:
-            return min(bearish_obs)
+            candidates.append(min(bearish_obs))
 
-        # 2. Look for Bearish FVG bottom above entry
+        if candidates:
+            return min(candidates)
+
         bearish_fvgs = [
             float(zone.bottom) for zone in getattr(signal, "fvgs", [])
             if zone.direction == "bearish" and not zone.mitigated and float(zone.bottom) > entry
@@ -219,27 +279,33 @@ def _range_opposing_target(signal: Any, side: str, entry: float) -> float | None
         if bearish_fvgs:
             return min(bearish_fvgs)
 
-        # 3. Look for Range Zones premium zone bottom
-        rz = getattr(signal, "range_zones", {}) or {}
-        p_zone = rz.get("premium_zone", {})
-        if isinstance(p_zone, dict) and p_zone.get("bottom"):
-            pz_bottom = float(p_zone["bottom"])
-            if pz_bottom > entry:
-                return pz_bottom
-
         return _nearest_target(signal, side, entry)
 
     else:
-        # 1. Look for Major Bullish Order Block top below entry
+        rz = getattr(signal, "range_zones", {}) or {}
+        d_zone = rz.get("discount_zone", {}) if isinstance(rz, dict) else {}
+        if isinstance(d_zone, dict) and d_zone.get("top"):
+            dz_top = float(d_zone["top"])
+            if 0 < dz_top < entry:
+                candidates.append(dz_top)
+
+        sw_low = getattr(signal, "strong_weak_low", None)
+        if isinstance(sw_low, dict) and sw_low.get("price") is not None:
+            price = float(sw_low["price"])
+            if 0 < price < entry:
+                candidates.append(price)
+
         bullish_obs = [
             float(zone.top) for zone in getattr(signal, "order_blocks", [])
             if zone.direction == "bullish" and not zone.mitigated and 0 < float(zone.top) < entry
             and getattr(zone, "source", "swing") == "swing"
         ]
         if bullish_obs:
-            return max(bullish_obs)
+            candidates.append(max(bullish_obs))
 
-        # 2. Look for Bullish FVG top below entry
+        if candidates:
+            return max(candidates)
+
         bullish_fvgs = [
             float(zone.top) for zone in getattr(signal, "fvgs", [])
             if zone.direction == "bullish" and not zone.mitigated and 0 < float(zone.top) < entry
@@ -247,15 +313,72 @@ def _range_opposing_target(signal: Any, side: str, entry: float) -> float | None
         if bullish_fvgs:
             return max(bullish_fvgs)
 
-        # 3. Look for Range Zones discount zone top
-        rz = getattr(signal, "range_zones", {}) or {}
-        d_zone = rz.get("discount_zone", {})
-        if isinstance(d_zone, dict) and d_zone.get("top"):
-            dz_top = float(d_zone["top"])
-            if 0 < dz_top < entry:
-                return dz_top
-
         return _nearest_target(signal, side, entry)
+
+
+def _range_location_ok(
+    signal: Any,
+    side: str,
+    candidate_entry: float,
+    *,
+    allow_equilibrium_sweep: bool = False,
+) -> tuple[bool, str]:
+    """Enforce strict Discount/Premium location relative to the active Swing range.
+
+    Prevents opening LONG positions above Equilibrium (50%) or inside the mid-range
+    no-man's-land (45%-55%), and prevents opening SHORT positions below Equilibrium (50%).
+    """
+    sw_high_dict = getattr(signal, "strong_weak_high", None)
+    sw_low_dict = getattr(signal, "strong_weak_low", None)
+    rz = getattr(signal, "range_zones", {}) or {}
+
+    top = 0.0
+    bottom = 0.0
+    if isinstance(sw_high_dict, dict) and sw_high_dict.get("price"):
+        top = float(sw_high_dict["price"])
+    elif isinstance(rz, dict) and isinstance(rz.get("premium_zone"), dict):
+        top = float(rz["premium_zone"].get("top", 0.0) or 0.0)
+
+    if isinstance(sw_low_dict, dict) and sw_low_dict.get("price"):
+        bottom = float(sw_low_dict["price"])
+    elif isinstance(rz, dict) and isinstance(rz.get("discount_zone"), dict):
+        bottom = float(rz["discount_zone"].get("bottom", 0.0) or 0.0)
+
+    if top <= bottom or bottom <= 0 or candidate_entry <= 0:
+        return True, ""
+
+    span = top - bottom
+    if span <= 0:
+        return True, ""
+
+    eq = (top + bottom) / 2.0
+    pos = (candidate_entry - bottom) / span
+    max_long_pos = 0.50 if allow_equilibrium_sweep else 0.45
+    min_short_pos = 0.50 if allow_equilibrium_sweep else 0.55
+
+    if side == "long":
+        if pos > 0.50:
+            return (
+                False,
+                f"Adverse location: Cannot LONG above Equilibrium 50% ({eq:.4f}; entry {candidate_entry:.4f} is at {pos:.0%} of swing range)",
+            )
+        if pos > max_long_pos:
+            return (
+                False,
+                f"Mid-range location: Cannot LONG in middle Equilibrium band ({candidate_entry:.4f} at {pos:.0%} of range; require Discount <= 45%)",
+            )
+    elif side == "short":
+        if pos < 0.50:
+            return (
+                False,
+                f"Adverse location: Cannot SHORT below Equilibrium 50% ({eq:.4f}; entry {candidate_entry:.4f} is at {pos:.0%} of swing range)",
+            )
+        if pos < min_short_pos:
+            return (
+                False,
+                f"Mid-range location: Cannot SHORT in middle Equilibrium band ({candidate_entry:.4f} at {pos:.0%} of range; require Premium >= 55%)",
+            )
+    return True, ""
 
 
 def _zone_overlaps(row: pd.Series, zone: Any) -> bool:
@@ -263,12 +386,10 @@ def _zone_overlaps(row: pd.Series, zone: Any) -> bool:
 
 
 def _candle_tests_zone(row: pd.Series, zone: Any, side: str, atr: float = 0.0) -> tuple[bool, bool]:
-    """Check if a candle retests a zone, returning (is_test, is_shallow).
+    """Check if a candle retests a zone deeply enough (into the zone pocket/mid).
 
-    Supports:
-    1. Standard penetration retest for OB, Breaker, and FVG.
-    2. Consequent Encroachment (50% CE) shallow retest for FVG.
-    3. Front-run buffer (within 0.15 ATR) shallow retest for Breaker Blocks.
+    Disables shallow front-run entries outside the zone so entries only trigger
+    when price genuinely tests the Order Block, FVG, or Breaker pocket.
     """
     low = float(row["low"])
     high = float(row["high"])
@@ -298,12 +419,10 @@ def _candle_tests_zone(row: pd.Series, zone: Any, side: str, atr: float = 0.0) -
     elif getattr(zone, "kind", "") == "fvg":
         if side == "long":
             if overlaps and close >= bottom:
-                # If low remained above mid, price respected the upper 50% CE shallowly
                 is_shallow = low > mid and close >= mid
                 return True, is_shallow
         elif side == "short":
             if overlaps and close <= top:
-                # If high remained below mid, price respected the lower 50% CE shallowly
                 is_shallow = high < mid and close <= mid
                 return True, is_shallow
         return False, False
@@ -461,7 +580,7 @@ def _bound_flow(signal: Any, side: str, sweep: dict[str, Any]) -> tuple[bool, st
 
 
 def _candidate(*, side: str, setup_type: str, entry: float, stop: float,
-               target: float | None, grade: Literal["A", "S"],
+               target: float | None, grade: Literal["WAIT", "S", "A", "B", "C"],
                evidence: list[str], invalidation_source: str,
                trigger_age_bars: int | None = None,
                extension_atr: float | None = None,
@@ -474,36 +593,85 @@ def _candidate(*, side: str, setup_type: str, entry: float, stop: float,
                ] = "market_eligible", limit_zone_id: str = "",
                policy: TriCorePolicy | None = None) -> TriCoreSetup:
     policy = policy or TriCorePolicy()
+    risk = abs(entry - stop)
+    eff_min_rr = policy.minimum_rr
+    structural_obstacle = target
+    if policy.target_anchor_mode == "settings_rr":
+        min_risk = entry * 0.0040
+        if risk < min_risk:
+            stop = (entry - min_risk) if side == "long" else (entry + min_risk)
+            risk = abs(entry - stop)
+        try:
+            from app.core.runtime_config import load_runtime_config
+            runtime_cfg = load_runtime_config()
+            configured_rr = float(runtime_cfg.get("target_rr", policy.minimum_rr))
+            if configured_rr < 1.0:
+                configured_rr = 2.0
+        except Exception:
+            configured_rr = 2.0
+        eff_min_rr = min(policy.minimum_rr, configured_rr)
+        # Ensure opposing structural obstacle is not blocking the way before eff_min_rr
+        if structural_obstacle is not None:
+            valid_obstacle = (
+                entry < float(structural_obstacle)
+                if side == "long"
+                else float(structural_obstacle) < entry
+            )
+            if valid_obstacle:
+                obstacle_rr = abs(float(structural_obstacle) - entry) / max(risk, 1e-6)
+                if obstacle_rr < eff_min_rr * 0.90:
+                    return TriCoreSetup(
+                        rejection_reasons=[
+                            f"Opposing structural obstacle at {float(structural_obstacle):.4f} blocks room to target ({obstacle_rr:.2f}R < {eff_min_rr:.2f}R)"
+                        ]
+                    )
+        if setup_type == "range_boundary_ping_pong":
+            # For ping-pong / range boundary trades, target MUST be the opposing boundary.
+            # Never extrapolate target past the range boundary.
+            target = structural_obstacle
+            if target is None:
+                return TriCoreSetup(rejection_reasons=["Ping-Pong requires a defined opposing range boundary target"])
+            boundary_rr = abs(float(target) - entry) / max(risk, 1e-6)
+            if boundary_rr < eff_min_rr:
+                return TriCoreSetup(
+                    rejection_reasons=[
+                        f"Ping-Pong opposing boundary target {float(target):.4f} gives insufficient R:R ({boundary_rr:.2f}R < {eff_min_rr:.2f}R)"
+                    ]
+                )
+        else:
+            reward_dist = risk * configured_rr * 1.04
+            target = entry + reward_dist if side == "long" else entry - reward_dist
+
     valid_geometry = target is not None and (
         stop < entry < target if side == "long" else target < entry < stop
     )
     if not valid_geometry:
         return TriCoreSetup(rejection_reasons=["No valid nearest opposing liquidity target"])
-    rr = abs(float(target) - entry) / abs(entry - stop)
+    rr = abs(float(target) - entry) / max(risk, 1e-6)
     return TriCoreSetup(
-        actionable=rr >= policy.minimum_rr, direction=side, setup_type=setup_type,
+        actionable=rr >= eff_min_rr, direction=side, setup_type=setup_type,
         entry=entry, stop_loss=stop, take_profit=float(target),
-        risk_reward=round(rr, 2), grade=grade if rr >= policy.minimum_rr else "WAIT",
+        risk_reward=round(rr, 2), grade=grade if rr >= eff_min_rr else "WAIT",
         smc_confirmed=True,
         cvd_confirmed=flow_confirmation_type != "single_bar_aggressor_delta",
         flow_confirmed=True,
         flow_confirmation_type=flow_confirmation_type,
         invalidation_source=invalidation_source, evidence=evidence,
         trigger_state=(
-            "entry_ready" if rr >= policy.minimum_rr and entry_policy == "market_eligible"
-            else "limit_retest_only" if rr >= policy.minimum_rr else "flow_confirmed"
+            "entry_ready" if rr >= eff_min_rr and entry_policy == "market_eligible"
+            else "limit_retest_only" if rr >= eff_min_rr else "flow_confirmed"
         ),
         event_id=event_id,
         state_reason=("Causal SMC and trusted flow confirmed"
-                      if rr >= policy.minimum_rr else "Flow confirmed but structural R:R is insufficient"),
+                      if rr >= eff_min_rr else "Flow confirmed but structural R:R is insufficient"),
         entry_policy=entry_policy,
         order_type="market" if entry_policy == "market_eligible" else "limit",
         limit_zone_id=limit_zone_id,
         trigger_age_bars=trigger_age_bars,
         extension_atr=(round(extension_atr, 3)
                        if extension_atr is not None else None),
-        rejection_reasons=[] if rr >= policy.minimum_rr else [
-            f"Nearest opposing obstacle provides R:R {rr:.2f} < {policy.minimum_rr:.2f}"
+        rejection_reasons=[] if rr >= eff_min_rr else [
+            f"Nearest opposing obstacle provides R:R {rr:.2f} < {eff_min_rr:.2f}"
         ],
         expires_after_bars=policy.ttl_bars,
         policy_version=policy.version,
@@ -617,7 +785,14 @@ class TriCoreSetupEngine:
         regime_label = str(regime_data.get("regime", "")).lower()
         trend_direction = str(regime_data.get("direction", "")).lower()
         htf_bias = str(getattr(signal, "htf_bias", "neutral") or "neutral").lower()
-        is_ranging = (regime_label == "ranging") or (policy.ping_pong_enabled and regime_label != "trending")
+        raw_intraday = getattr(signal, "intraday_bias", None)
+        if raw_intraday and str(raw_intraday).lower() != "neutral":
+            intraday_bias = str(raw_intraday).lower()
+        else:
+            intraday_bias = htf_bias
+        macro_bias = str(getattr(signal, "macro_bias", "neutral") or "neutral").lower()
+        macro_obstacles = getattr(signal, "macro_obstacles", []) or []
+        is_ranging = (regime_label == "ranging")
 
         for side in ("long", "short"):
             if policy.counter_trend_filter_enabled:
@@ -629,12 +804,52 @@ class TriCoreSetupEngine:
                         rejected.append("Counter-trend LONG rejected: Market regime is trending bearish")
                         continue
                 if regime_label != "ranging":
-                    if htf_bias == "bullish" and side == "short":
-                        rejected.append("Counter-trend SHORT rejected: HTF bias is bullish")
+                    # Scenario A: 1H Intraday trend opposes trade direction (Pullback against 1H)
+                    if intraday_bias == "bullish" and side == "short":
+                        rejected.append(f"Counter-trend SHORT rejected: {('1H intraday trend' if raw_intraday and str(raw_intraday).lower() != 'neutral' else 'HTF bias')} is bullish")
                         continue
-                    if htf_bias == "bearish" and side == "long":
-                        rejected.append("Counter-trend LONG rejected: HTF bias is bearish")
+                    if intraday_bias == "bearish" and side == "long":
+                        rejected.append(f"Counter-trend LONG rejected: {('1H intraday trend' if raw_intraday and str(raw_intraday).lower() != 'neutral' else 'HTF bias')} is bearish")
                         continue
+
+                    # Scenario B & C: 1H aligns, but 4H Macro opposes (Intraday Counter-4H Swing)
+                    is_counter_4h = (macro_bias == "bullish" and side == "short") or (macro_bias == "bearish" and side == "long")
+                    if is_counter_4h and macro_obstacles:
+                        nearest_obstacle = None
+                        min_dist = float("inf")
+                        for obs in macro_obstacles:
+                            obs_price = float(obs.get("price", 0.0) or obs.get("mid", 0.0) or (obs.get("low", 0.0) if side == "long" else obs.get("high", 0.0)) or 0.0)
+                            if side == "long" and obs_price > entry:
+                                dist = obs_price - entry
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    nearest_obstacle = obs_price
+                            elif side == "short" and obs_price < entry:
+                                dist = entry - obs_price
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    nearest_obstacle = obs_price
+
+                        if nearest_obstacle is not None:
+                            # Scenario C: Within 0.25 ATR of 4H obstacle -> No Chase
+                            if min_dist < (0.25 * atr):
+                                rejected.append(f"Adverse location: At major 4H obstacle ({nearest_obstacle:.2f}) (No Chase)")
+                                continue
+                            # Scenario B: Room to Target check
+                            est_risk = max(buffer, 1.2 * atr)
+                            est_rr = min_dist / max(est_risk, 1e-6)
+                            if est_rr < policy.minimum_rr:
+                                rejected.append(f"Insufficient room to 4H obstacle ({nearest_obstacle:.2f}): RR {est_rr:.2f} < {policy.minimum_rr:.2f} (No Chase)")
+                                continue
+
+            # Micro 5m momentum check (Veto trades opening directly into 3-bar opposite impulse)
+            micro = getattr(signal, "micro_momentum", {}) or {}
+            if micro.get("direction") == "bullish" and side == "short":
+                rejected.append(f"Opposing 5m micro-momentum: 3 consecutive bullish bars (+{micro.get('change_pct_3bar', 0):.2f}%)")
+                continue
+            if micro.get("direction") == "bearish" and side == "long":
+                rejected.append(f"Opposing 5m micro-momentum: 3 consecutive bearish bars ({micro.get('change_pct_3bar', 0):.2f}%)")
+                continue
 
             expected_sweep = "low" if side == "long" else "high"
             in_prem = getattr(signal, "in_premium", False)
@@ -666,21 +881,36 @@ class TriCoreSetupEngine:
                             f"{sweep.get('candle_time', sweep.get('candle_index', ''))}"
                         ))
                         entry_policy: Literal["market_eligible", "limit_retest_only"] = "market_eligible"
-                        limit_zone_id = ""
+                        causal_zone = _causal_limit_zone(signal, side, sweep)
+                        limit_zone_id = str(causal_zone.zone_id) if causal_zone is not None else ""
                         candidate_entry = entry
+                        if causal_zone is not None:
+                            zone_mid = float(causal_zone.mid)
+                            if side == "long" and entry > zone_mid:
+                                candidate_entry = zone_mid
+                                if (entry - zone_mid) > 0.10 * atr:
+                                    entry_policy = "limit_retest_only"
+                            elif side == "short" and entry < zone_mid:
+                                candidate_entry = zone_mid
+                                if (zone_mid - entry) > 0.10 * atr:
+                                    entry_policy = "limit_retest_only"
                         if extension_atr > policy.market_entry_max_extension_atr:
-                            limit_zone = _causal_limit_zone(signal, side, sweep)
-                            if limit_zone is None:
+                            if causal_zone is None:
                                 rejected.append(
                                     f"Price extended {extension_atr:.2f} ATR; no causal OB/FVG retest exists"
                                 )
                                 continue
                             entry_policy = "limit_retest_only"
-                            limit_zone_id = str(limit_zone.zone_id)
-                            candidate_entry = float(limit_zone.mid)
+                            candidate_entry = float(causal_zone.mid)
+                        loc_ok, loc_reason = _range_location_ok(
+                            signal, side, candidate_entry, allow_equilibrium_sweep=True
+                        )
+                        if not loc_ok:
+                            rejected.append(loc_reason)
+                            continue
                         target_val = (
                             _range_opposing_target(signal, side, candidate_entry)
-                            if is_ranging
+                            if (is_ranging or policy.target_anchor_mode == "settings_rr")
                             else _nearest_target(signal, side, candidate_entry)
                         ) if extreme > 0 else None
                         result = _candidate(
@@ -755,13 +985,29 @@ class TriCoreSetupEngine:
                     else:
                         evidence_items.append(f"Displacement continuation confirmed without opposing CVD (delta {pressure:+.1%})")
 
+                    disp_entry = entry
+                    disp_distance_from_mid = (
+                        (entry - disp_entry) if side == "long" else (disp_entry - entry)
+                    )
+                    disp_entry_policy: Literal["market_eligible", "limit_retest_only"] = (
+                        "limit_retest_only"
+                        if (atr > 0 and disp_distance_from_mid > 0.10 * atr)
+                        else "market_eligible"
+                    )
+                    loc_ok, loc_reason = _range_location_ok(
+                        signal, side, disp_entry, allow_equilibrium_sweep=False
+                    )
+                    if not loc_ok:
+                        rejected.append(loc_reason)
+                        continue
+
                     disp_target = (
-                        _range_opposing_target(signal, side, entry)
-                        if is_ranging
-                        else _nearest_target(signal, side, entry)
+                        _range_opposing_target(signal, side, disp_entry)
+                        if (is_ranging or policy.target_anchor_mode == "settings_rr")
+                        else _nearest_target(signal, side, disp_entry)
                     )
                     result = _candidate(
-                        side=side, setup_type=setup_type, entry=entry, stop=stop,
+                        side=side, setup_type=setup_type, entry=disp_entry, stop=stop,
                         target=disp_target, grade="A",
                         invalidation_source=f"first_retest:{zone.zone_id}",
                         flow_confirmation_type="single_bar_aggressor_delta",
@@ -769,7 +1015,8 @@ class TriCoreSetupEngine:
                             f"displacement:{side}:{displacement.get('structure_break_id')}:"
                             f"{getattr(zone, 'zone_id', '')}"
                         ),
-                        entry_policy="market_eligible",
+                        entry_policy=disp_entry_policy,
+                        limit_zone_id=str(getattr(zone, "zone_id", "")),
                         policy=policy,
                         evidence=evidence_items,
                     )
@@ -777,57 +1024,101 @@ class TriCoreSetupEngine:
                     rejected.extend(result.rejection_reasons)
 
             # --- Range Boundary Ping-Pong Resolver ---
-            if is_ranging and non_opposing_flow:
+            if policy.ping_pong_enabled and is_ranging and non_opposing_flow:
                 if side == "long":
                     bullish_obs = [
                         z for z in getattr(signal, "order_blocks", [])
                         if z.direction == "bullish" and not z.mitigated
-                        and float(z.bottom) - buffer <= entry <= float(z.top) + atr * 0.75
+                        and float(z.bottom) - buffer <= entry <= float(z.top) + atr * 0.15
                     ]
                     bullish_fvgs = [
                         z for z in getattr(signal, "fvgs", [])
                         if z.direction == "bullish" and not z.mitigated
-                        and float(z.bottom) - buffer <= entry <= float(z.top) + atr * 0.75
+                        and float(z.bottom) - buffer <= entry <= float(z.top) + atr * 0.15
                     ]
-                    # Location Rule: Ping-Pong LONG MUST be strictly in Discount; NEVER in Premium or Equilibrium
+                    loc_ok, loc_reason = _range_location_ok(
+                        signal, "long", entry, allow_equilibrium_sweep=False
+                    )
                     in_prem = getattr(signal, "in_premium", False)
                     in_disc = getattr(signal, "in_discount", False)
                     in_eq = getattr(signal, "in_equilibrium", False)
-                    at_demand = (in_disc or bool(bullish_obs) or bool(bullish_fvgs)) and not in_prem and not in_eq
-                    if in_eq:
+                    at_demand = loc_ok and (in_disc or bool(bullish_obs) or bool(bullish_fvgs)) and not in_prem and not in_eq
+                    if not loc_ok:
+                        rejected.append(f"Ping-Pong LONG rejected: {loc_reason}")
+                    elif in_eq:
                         rejected.append("Ping-Pong LONG rejected: Cannot enter in Equilibrium / mid-range zone")
                     if at_demand:
-                        if bullish_obs:
-                            stop = min(float(z.bottom) for z in bullish_obs) - buffer
-                            zone_id = str(bullish_obs[0].zone_id)
-                        elif bullish_fvgs:
-                            stop = min(float(z.bottom) for z in bullish_fvgs) - buffer
-                            zone_id = str(bullish_fvgs[0].zone_id)
+                        last_bar = frame.iloc[-1]
+                        bar_range = max(float(last_bar['high']) - float(last_bar['low']), 1e-6)
+                        lower_wick = float(min(last_bar['open'], last_bar['close'])) - float(last_bar['low'])
+                        close_pos = (float(last_bar['close']) - float(last_bar['low'])) / bar_range
+                        has_rejection = ((lower_wick / bar_range) >= 0.20) or (
+                            float(last_bar['close']) >= float(last_bar['open']) and close_pos >= 0.45
+                        )
+                        if not has_rejection:
+                            rejected.append("Ping-Pong LONG rejected: No bullish rejection candle at demand boundary")
+                            at_demand = False
+                        elif len(frame) >= 3:
+                            recent_vol = [float(v) for v in frame['volume'].iloc[-10:] if float(v) > 0]
+                            avg_vol = (sum(recent_vol) / len(recent_vol)) if recent_vol else 1.0
+                            last_vol = float(last_bar.get('volume', 0.0) or 0.0)
+                            if float(last_bar['close']) < float(last_bar['open']) and last_vol > 1.8 * avg_vol:
+                                rejected.append("Ping-Pong LONG rejected: Strong selling volume penetrating boundary")
+                                at_demand = False
+
+                    if at_demand:
+                        pp_entry = entry
+                        pp_policy: Literal["market_eligible", "limit_retest_only"] = "market_eligible"
+                        candidate_zones = [(z, "ob") for z in bullish_obs] + [(z, "fvg") for z in bullish_fvgs]
+                        if candidate_zones:
+                            candidate_zones.sort(key=lambda item: abs(entry - float(item[0].mid)))
+                            chosen, chosen_kind = candidate_zones[0]
+                            stop = float(chosen.bottom) - buffer
+                            zone_id = str(chosen.zone_id)
+                            z_mid = float(chosen.mid)
+                            invalidation_source = f"demand_boundary:{chosen_kind}:{zone_id}"
+                            if entry > z_mid:
+                                pp_entry = z_mid
+                                if (entry - z_mid) > 0.10 * atr:
+                                    pp_policy = "limit_retest_only"
                         else:
                             rz = getattr(signal, "range_zones", {}) or {}
                             d_zone = rz.get("discount_zone", {})
                             d_bottom = float(d_zone.get("bottom", 0.0) or 0.0)
                             stop = (d_bottom - buffer) if d_bottom > 0 else (entry - atr * 1.5)
                             zone_id = "discount_boundary"
+                            invalidation_source = "demand_boundary:discount_boundary"
 
-                        target = _range_opposing_target(signal, "long", entry)
-                        if target is not None and stop < entry < target:
+                        wick_ratio = lower_wick / bar_range
+                        strong_rejection = (wick_ratio >= 0.30) or (wick_ratio >= 0.20 and close_pos >= 0.55)
+                        flow_supporting = pressure >= 0.05
+                        has_concrete_zone = bool(candidate_zones)
+                        dynamic_grade: Literal["WAIT", "S", "A", "B", "C"] = (
+                            "B" if (strong_rejection and flow_supporting and has_concrete_zone) else "C"
+                        )
+
+                        target = _range_opposing_target(signal, "long", pp_entry)
+                        candle_ts = str(getattr(signal, "timestamp", "") or (frame.index[-1] if len(frame) else ""))
+                        sym = str(getattr(signal, "symbol", "UNKNOWN"))
+                        tf = str(getattr(signal, "timeframe", "15m"))
+                        if target is not None and stop < pp_entry < target:
                             candidates.append(_candidate(
                                 side="long",
                                 setup_type="range_boundary_ping_pong",
-                                entry=entry,
+                                entry=pp_entry,
                                 stop=stop,
                                 target=target,
-                                grade="A",
-                                invalidation_source=f"demand_boundary:{zone_id}",
+                                grade=dynamic_grade,
+                                invalidation_source=invalidation_source,
                                 flow_confirmation_type="single_bar_aggressor_delta",
-                                event_id=f"ping_pong:long:{getattr(signal, 'symbol', 'UNKNOWN')}:{len(frame)}",
-                                entry_policy="market_eligible",
+                                event_id=f"ping_pong:long:{sym}:{tf}:{zone_id}:{candle_ts}",
+                                entry_policy=pp_policy,
+                                limit_zone_id=zone_id if zone_id != "discount_boundary" else "",
                                 policy=policy,
                                 evidence=[
-                                    "Price tested SMC Demand Zone in Ranging Market",
+                                    f"Price tested SMC Demand Zone ({zone_id}) in Discount (<45% of range)",
                                     f"Targeting opposing Major Supply boundary at {target:.2f}",
-                                    f"Flow non-opposing (delta ratio {pressure:+.1%})",
+                                    f"Flow non-opposing (delta ratio {pressure:+.1%}), dynamic Grade {dynamic_grade}",
                                 ],
                             ))
 
@@ -835,54 +1126,117 @@ class TriCoreSetupEngine:
                     bearish_obs = [
                         z for z in getattr(signal, "order_blocks", [])
                         if z.direction == "bearish" and not z.mitigated
-                        and float(z.bottom) - atr * 0.75 <= entry <= float(z.top) + buffer
+                        and float(z.bottom) - atr * 0.15 <= entry <= float(z.top) + buffer
                     ]
                     bearish_fvgs = [
                         z for z in getattr(signal, "fvgs", [])
                         if z.direction == "bearish" and not z.mitigated
-                        and float(z.bottom) - atr * 0.75 <= entry <= float(z.top) + buffer
+                        and float(z.bottom) - atr * 0.15 <= entry <= float(z.top) + buffer
                     ]
-                    # Location Rule: Ping-Pong SHORT MUST be strictly in Premium; NEVER in Discount or Equilibrium
+                    loc_ok, loc_reason = _range_location_ok(
+                        signal, "short", entry, allow_equilibrium_sweep=False
+                    )
                     in_prem = getattr(signal, "in_premium", False)
                     in_disc = getattr(signal, "in_discount", False)
                     in_eq = getattr(signal, "in_equilibrium", False)
-                    at_supply = (in_prem or bool(bearish_obs) or bool(bearish_fvgs)) and not in_disc and not in_eq
-                    if in_eq:
+                    at_supply = loc_ok and (in_prem or bool(bearish_obs) or bool(bearish_fvgs)) and not in_disc and not in_eq
+                    if not loc_ok:
+                        rejected.append(f"Ping-Pong SHORT rejected: {loc_reason}")
+                    elif in_eq:
                         rejected.append("Ping-Pong SHORT rejected: Cannot enter in Equilibrium / mid-range zone")
                     if at_supply:
-                        if bearish_obs:
-                            stop = max(float(z.top) for z in bearish_obs) + buffer
-                            zone_id = str(bearish_obs[0].zone_id)
-                        elif bearish_fvgs:
-                            stop = max(float(z.top) for z in bearish_fvgs) + buffer
-                            zone_id = str(bearish_fvgs[0].zone_id)
+                        last_bar = frame.iloc[-1]
+                        bar_range = max(float(last_bar['high']) - float(last_bar['low']), 1e-6)
+                        upper_wick = float(last_bar['high']) - float(max(last_bar['open'], last_bar['close']))
+                        close_pos = (float(last_bar['high']) - float(last_bar['close'])) / bar_range
+                        has_rejection = ((upper_wick / bar_range) >= 0.20) or (
+                            float(last_bar['close']) <= float(last_bar['open']) and close_pos >= 0.45
+                        )
+                        if not has_rejection:
+                            rejected.append("Ping-Pong SHORT rejected: No bearish rejection candle at supply boundary")
+                            at_supply = False
+                        elif len(frame) >= 3:
+                            recent_vol = [float(v) for v in frame['volume'].iloc[-10:] if float(v) > 0]
+                            avg_vol = (sum(recent_vol) / len(recent_vol)) if recent_vol else 1.0
+                            last_vol = float(last_bar.get('volume', 0.0) or 0.0)
+                            if float(last_bar['close']) > float(last_bar['open']) and last_vol > 1.8 * avg_vol:
+                                rejected.append("Ping-Pong SHORT rejected: Strong buying volume penetrating boundary")
+                                at_supply = False
+
+                    if at_supply:
+                        pp_entry = entry
+                        pp_policy = "market_eligible"
+                        candidate_zones = [(z, "ob") for z in bearish_obs] + [(z, "fvg") for z in bearish_fvgs]
+                        if candidate_zones:
+                            candidate_zones.sort(key=lambda item: abs(entry - float(item[0].mid)))
+                            chosen, chosen_kind = candidate_zones[0]
+                            stop = float(chosen.top) + buffer
+                            zone_id = str(chosen.zone_id)
+                            z_mid = float(chosen.mid)
+                            invalidation_source = f"supply_boundary:{chosen_kind}:{zone_id}"
+                            if entry < z_mid:
+                                pp_entry = z_mid
+                                if (z_mid - entry) > 0.10 * atr:
+                                    pp_policy = "limit_retest_only"
                         else:
                             rz = getattr(signal, "range_zones", {}) or {}
                             p_zone = rz.get("premium_zone", {})
                             p_top = float(p_zone.get("top", 0.0) or 0.0)
                             stop = (p_top + buffer) if p_top > 0 else (entry + atr * 1.5)
                             zone_id = "premium_boundary"
+                            invalidation_source = "supply_boundary:premium_boundary"
 
-                        target = _range_opposing_target(signal, "short", entry)
-                        if target is not None and target < entry < stop:
+                        wick_ratio = upper_wick / bar_range
+                        strong_rejection = (wick_ratio >= 0.30) or (wick_ratio >= 0.20 and close_pos >= 0.55)
+                        flow_supporting = pressure <= -0.05
+                        has_concrete_zone = bool(candidate_zones)
+                        dynamic_grade: Literal["WAIT", "S", "A", "B", "C"] = (
+                            "B" if (strong_rejection and flow_supporting and has_concrete_zone) else "C"
+                        )
+
+                        target = _range_opposing_target(signal, "short", pp_entry)
+                        candle_ts = str(getattr(signal, "timestamp", "") or (frame.index[-1] if len(frame) else ""))
+                        sym = str(getattr(signal, "symbol", "UNKNOWN"))
+                        tf = str(getattr(signal, "timeframe", "15m"))
+                        if target is not None and target < pp_entry < stop:
                             candidates.append(_candidate(
                                 side="short",
                                 setup_type="range_boundary_ping_pong",
-                                entry=entry,
+                                entry=pp_entry,
                                 stop=stop,
                                 target=target,
-                                grade="A",
-                                invalidation_source=f"supply_boundary:{zone_id}",
+                                grade=dynamic_grade,
+                                invalidation_source=invalidation_source,
                                 flow_confirmation_type="single_bar_aggressor_delta",
-                                event_id=f"ping_pong:short:{getattr(signal, 'symbol', 'UNKNOWN')}:{len(frame)}",
-                                entry_policy="market_eligible",
+                                event_id=f"ping_pong:short:{sym}:{tf}:{zone_id}:{candle_ts}",
+                                entry_policy=pp_policy,
+                                limit_zone_id=zone_id if zone_id != "premium_boundary" else "",
                                 policy=policy,
                                 evidence=[
-                                    "Price tested SMC Supply Zone in Ranging Market",
+                                    f"Price tested SMC Supply Zone ({zone_id}) in Premium (>55% of range)",
                                     f"Targeting opposing Major Demand boundary at {target:.2f}",
-                                    f"Flow non-opposing (delta ratio {pressure:+.1%})",
+                                    f"Flow non-opposing (delta ratio {pressure:+.1%}), dynamic Grade {dynamic_grade}",
                                 ],
                             ))
+
+        contract_mode = _resolve_contract_mode(signal, policy)
+        spot_exit_detected = False
+        if contract_mode == "spot":
+            for cand in candidates:
+                if cand.direction == "short":
+                    if cand.actionable:
+                        spot_exit_detected = True
+                    cand.actionable = False
+                    cand.grade = "WAIT"
+                    cand.spot_exit_signal = True
+                    spot_reason = (
+                        "Spot market (BUY/SELL only): Short entry disabled — "
+                        "use SELL signal to exit existing Spot holdings"
+                    )
+                    if spot_reason not in cand.rejection_reasons:
+                        cand.rejection_reasons.append(spot_reason)
+                    if spot_reason not in rejected:
+                        rejected.append(spot_reason)
 
         actionable = [candidate for candidate in candidates if candidate.actionable]
         if not actionable:
@@ -893,7 +1247,7 @@ class TriCoreSetupEngine:
                 candidates.sort(key=lambda candidate: candidate.risk_reward, reverse=True)
                 armed = candidates[0]
                 armed.rejection_reasons = reasons
-                return armed
+                return _stamp_contract_metadata(armed, contract_mode, spot_exit_detected)
             state: Literal[
                 "wait", "zone_approach", "armed", "sweep_detected",
                 "flow_confirmed", "no_chase", "expired", "invalidated",
@@ -925,17 +1279,25 @@ class TriCoreSetupEngine:
             event_id = str(sweep.get("event_id") or "")
             if not event_id and zone is not None:
                 event_id = f"zone:{signal.symbol}:{signal.timeframe}:{zone.zone_id}"
-            return TriCoreSetup(
-                trigger_state=state,
-                event_id=event_id,
-                state_reason=state_reason,
-                entry_policy="no_chase" if state == "no_chase" else "none",
-                rejection_reasons=reasons,
-                expires_after_bars=policy.ttl_bars,
-                policy_version=policy.version,
-                calibration_status=policy.calibration_status,
+            return _stamp_contract_metadata(
+                TriCoreSetup(
+                    trigger_state=state,
+                    event_id=event_id,
+                    state_reason=state_reason,
+                    entry_policy="no_chase" if state == "no_chase" else "none",
+                    rejection_reasons=reasons,
+                    expires_after_bars=policy.ttl_bars,
+                    policy_version=policy.version,
+                    calibration_status=policy.calibration_status,
+                ),
+                contract_mode,
+                spot_exit_detected,
             )
-        return _select_actionable_candidate(actionable, policy)
+        return _stamp_contract_metadata(
+            _select_actionable_candidate(actionable, policy),
+            contract_mode,
+            spot_exit_detected,
+        )
 
     @classmethod
     def evaluate_with_micro_trigger(

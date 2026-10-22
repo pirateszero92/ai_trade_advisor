@@ -13,7 +13,34 @@ class StrategyGateView {
     this.coreSetupGrade = 'WAIT',
     this.longEvidence = 0,
     this.shortEvidence = 0,
+    this.contractMode = 'futures',
+    this.spotExitSignal = false,
   });
+
+  static bool isSpotSymbol(
+    String symbol, {
+    String? marketType,
+    String? exchange,
+    String? contractMode,
+  }) {
+    final mode = (contractMode ?? '').trim().toLowerCase();
+    if (mode == 'spot') return true;
+    if (mode == 'futures') {
+      final symUp = symbol.trim().toUpperCase();
+      if (symUp.endsWith('/THB') || symUp.endsWith('-THB')) return true;
+      return false;
+    }
+    final symUp = symbol.trim().toUpperCase();
+    final exLow = (exchange ?? '').trim().toLowerCase();
+    final mLow = (marketType ?? '').trim().toLowerCase();
+    if (symUp.endsWith('/THB') ||
+        symUp.endsWith('-THB') ||
+        exLow == 'innovestx' ||
+        mLow == 'stock') {
+      return true;
+    }
+    return false;
+  }
 
   factory StrategyGateView.fromPayload(Map<String, dynamic>? payload) {
     final source = payload ?? const <String, dynamic>{};
@@ -99,6 +126,17 @@ class StrategyGateView {
         ((action == 'long' && squeezeMomentum > 0) ||
             (action == 'short' && squeezeMomentum < 0));
 
+    final symStr = (source['symbol'] ?? '').toString();
+    final rawContractMode =
+        (triCore['contract_mode'] ?? source['contract_mode'] ?? '').toString();
+    final isSpot = isSpotSymbol(
+      symStr,
+      marketType: source['market_type']?.toString(),
+      exchange: source['exchange']?.toString(),
+      contractMode: rawContractMode,
+    );
+    final spotExit = triCore['spot_exit_signal'] == true;
+
     return StrategyGateView(
       approved: approved,
       action: action,
@@ -115,6 +153,8 @@ class StrategyGateView {
       longEvidence: ((directional['long'] as num?)?.toInt() ?? 0).clamp(0, 100),
       shortEvidence:
           ((directional['short'] as num?)?.toInt() ?? 0).clamp(0, 100),
+      contractMode: isSpot ? 'spot' : 'futures',
+      spotExitSignal: spotExit,
     );
   }
 
@@ -131,12 +171,16 @@ class StrategyGateView {
   final String coreSetupGrade;
   final int longEvidence;
   final int shortEvidence;
+  final String contractMode;
+  final bool spotExitSignal;
+
+  bool get isSpot => contractMode == 'spot';
 
   bool get confirmedNoEntry => entryStatus == 'CONFIRMED_NO_ENTRY';
   bool get pressureWarning => entryStatus == 'PRESSURE_WARNING';
 
   bool get allowsLong => approved && action == 'long';
-  bool get allowsShort => approved && action == 'short';
+  bool get allowsShort => approved && action == 'short' && !isSpot;
 
   int get confluenceGap {
     final gap = minConfluence - confluence;
@@ -144,12 +188,36 @@ class StrategyGateView {
   }
 
   String get setupLabel {
+    if (isSpot) {
+      if (setupDirection == 'long') return 'BUY BIAS (SPOT)';
+      if (setupDirection == 'short' || spotExitSignal) return 'SELL / EXIT BIAS';
+      return 'NEUTRAL (SPOT)';
+    }
     if (setupDirection == 'long') return 'BULLISH BIAS';
     if (setupDirection == 'short') return 'BEARISH BIAS';
     return 'NEUTRAL';
   }
 
   String get directionBadgeLabel {
+    if (isSpot) {
+      if (approved && action == 'long') return 'BUY (SPOT)';
+      if (spotExitSignal) return 'SELL · EXIT ONLY';
+      if (confirmedNoEntry && setupDirection == 'long') {
+        return 'BUY CONFIRMED · NO ENTRY';
+      }
+      if (confirmedNoEntry && setupDirection == 'short') {
+        return 'SELL WARNING · NO SHORT';
+      }
+      if (pressureWarning && setupDirection == 'long') {
+        return 'BUY PRESSURE · NOT ENTRY';
+      }
+      if (pressureWarning && setupDirection == 'short') {
+        return 'SELL PRESSURE · NOT ENTRY';
+      }
+      if (setupDirection == 'long') return 'BUY BIAS · NOT ENTRY';
+      if (setupDirection == 'short') return 'SELL BIAS · NO SHORT';
+      return 'SPOT · WAIT';
+    }
     if (approved) {
       if (action == 'long') return 'LONG';
       if (action == 'short') return 'SHORT';

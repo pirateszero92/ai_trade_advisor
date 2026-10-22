@@ -19,16 +19,16 @@ tri_core_policy:
   market_entry_max_extension_atr: 0.25
   no_chase_max_extension_atr: 0.60
   zone_approach_distance_atr: 0.50
-  minimum_rr: 2.0
+  minimum_rr: 1.5
   # Candidate seeds: calibrate with chronological rolling walk-forward data.
   strong_divergence_min_price_excursion_atr: 0.50
   strong_divergence_min_cvd_efficiency: 0.10
   # Until OOS evidence proves otherwise, prefer structural R:R and use grade
   # only as a tie-breaker. "grade_then_rr" remains available for replay.
   candidate_selection_mode: "rr_then_grade"
-  ping_pong_enabled: true
-  target_anchor_mode: "opposing_boundary"
-  counter_trend_filter_enabled: false
+  ping_pong_enabled: false
+  target_anchor_mode: "settings_rr"
+  counter_trend_filter_enabled: true
   btc_anchor_gate_enabled: false
 
 # Canonical decision input used by both Chart and Proactive Scanner. Strategy
@@ -47,7 +47,7 @@ timeframe_profiles:
   enabled: true
   roles:
     bias:
-      timeframe: 1d
+      timeframe: 1h
       lookback: 180
       smc:
         swing_length: 7
@@ -72,8 +72,8 @@ timeframe_profiles:
         allow_neutral_structure: false
         require_any_trigger: []
     setup:
-      timeframe: 4h
-      lookback: 300
+      timeframe: 30m
+      lookback: 180
       smc:
         swing_length: 5
         internal_swing_length: 3
@@ -189,7 +189,7 @@ regime_policy:
       require_liquidity_sweep: true
       require_volume_confirmation: false
       require_squeeze_fire: false
-      ping_pong_enabled: true
+      ping_pong_enabled: false
     volatile:
       entry_allowed: true
       min_confluence: 82
@@ -226,7 +226,7 @@ filters:
   require_ob: true            # Require Order Block
   require_fvg: false          # Require Fair Value Gap
   require_liquidity_sweep: false  # Require prior liquidity sweep
-  min_rr: 2.0                 # Minimum achievable structural Risk:Reward ratio
+  min_rr: 1.5                 # Minimum achievable structural Risk:Reward ratio
   htf_alignment_required: false   # Require HTF/LTF bias alignment
   allowed_directions:
     - long

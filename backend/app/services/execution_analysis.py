@@ -114,6 +114,11 @@ def analyze_execution_frame(
     entry_mode: str,
     config_snapshot: dict[str, Any],
     timeframe: str | None = None,
+    htf_bias: str = "neutral",
+    intraday_bias: str = "neutral",
+    macro_bias: str = "neutral",
+    macro_obstacles: list[dict[str, Any]] | None = None,
+    micro_momentum: dict[str, Any] | None = None,
 ) -> tuple[SMCSignal, StrategyResult, str]:
     """Pure closed-candle decision function shared by live and backtest paths."""
     profiles = validate_timeframe_profiles(config_snapshot.get("timeframe_profiles"))
@@ -127,12 +132,17 @@ def analyze_execution_frame(
         frame.copy(),
         symbol,
         effective_tf,
-        htf_bias="neutral",
+        htf_bias=htf_bias,
         entry_mode=entry_mode,
         indicator_config=indicator,
         regime_config=config_snapshot.get("regime_policy"),
         tri_core_policy=config_snapshot.get("tri_core_policy"),
+        intraday_bias=intraday_bias,
+        macro_bias=macro_bias,
+        macro_obstacles=macro_obstacles,
     )
+    if micro_momentum:
+        signal.micro_momentum = micro_momentum
     # VPIN Order Flow Toxicity
     try:
         from app.engines.vpin_engine import VPINEngine
@@ -181,6 +191,22 @@ class ExecutionAnalysisService:
             "entry_policy": str(runtime.get("auto_trade_entry_policy", "fixed")),
             "limit_timeout_bars": int(runtime.get("auto_trade_limit_timeout_bars", 3)),
         }
+        tcp = dict(config.get("tri_core_policy") or {})
+        if "target_rr" in runtime:
+            tcp["minimum_rr"] = float(runtime.get("target_rr", tcp.get("minimum_rr", 1.5)))
+        if "counter_trend_filter_enabled" in runtime:
+            tcp["counter_trend_filter_enabled"] = bool(runtime.get("counter_trend_filter_enabled", True))
+        if "ping_pong_enabled" in runtime:
+            is_pp_enabled = bool(runtime.get("ping_pong_enabled", False))
+            tcp["ping_pong_enabled"] = is_pp_enabled
+            rp = dict(config.get("regime_policy") or {})
+            if "policies" in rp and "ranging" in rp["policies"]:
+                rp["policies"]["ranging"]["ping_pong_enabled"] = is_pp_enabled
+            config["regime_policy"] = rp
+        if "btc_anchor_filter_enabled" in runtime:
+            tcp["btc_anchor_gate_enabled"] = bool(runtime.get("btc_anchor_filter_enabled", False))
+        tcp["binance_trading_mode"] = str(runtime.get("binance_trading_mode", getattr(cfg, "binance_trading_mode", "futures"))).lower()
+        config["tri_core_policy"] = tcp
         return config
 
     def clear(self) -> None:
@@ -493,7 +519,8 @@ class ExecutionAnalysisService:
         timeframe: str | None = None,
     ) -> ExecutionAnalysis:
         config = self._config_snapshot()
-        profile = validate_timeframe_profiles(config.get("timeframe_profiles"))["roles"]["trigger"]
+        profiles = validate_timeframe_profiles(config.get("timeframe_profiles"))
+        profile = profiles["roles"]["trigger"]
         effective_tf = timeframe or profile["timeframe"]
         if effective_tf != profile["timeframe"]:
             raise ValueError("Requested timeframe is not the configured execution timeframe")
@@ -512,7 +539,15 @@ class ExecutionAnalysisService:
             cached = self._cache.get(key)
             if cached and now < cached.valid_until:
                 return cached.clone()
-            frame = await self._market.get_ohlcv(
+            setup_role = profiles["roles"].get("setup", {})
+            htf_tf = str(setup_role.get("timeframe", "1h"))
+            htf_limit = int(setup_role.get("lookback", 120))
+
+            bias_role = profiles["roles"].get("bias", {})
+            macro_tf = str(bias_role.get("timeframe", "4h"))
+            macro_limit = int(bias_role.get("lookback", 120))
+
+            frame_coro = self._market.get_ohlcv(
                 symbol,
                 effective_tf,
                 market_type,
@@ -520,14 +555,126 @@ class ExecutionAnalysisService:
                 limit=int(profile["lookback"]),
                 closed_only=True,
             )
-            if frame.empty:
+            htf_coro = self._market.get_ohlcv(
+                symbol,
+                htf_tf,
+                market_type,
+                exchange,
+                limit=htf_limit,
+                closed_only=True,
+            )
+            macro_coro = self._market.get_ohlcv(
+                symbol,
+                macro_tf,
+                market_type,
+                exchange,
+                limit=macro_limit,
+                closed_only=True,
+            )
+            m5_coro = (
+                self._market.get_ohlcv(
+                    symbol,
+                    "5m",
+                    market_type,
+                    exchange,
+                    limit=12,
+                    closed_only=True,
+                )
+                if effective_tf == "15m"
+                else None
+            )
+
+            if m5_coro is not None:
+                frame_res, htf_res, macro_res, m5_res = await asyncio.gather(
+                    frame_coro, htf_coro, macro_coro, m5_coro, return_exceptions=True
+                )
+            else:
+                frame_res, htf_res, macro_res = await asyncio.gather(
+                    frame_coro, htf_coro, macro_coro, return_exceptions=True
+                )
+                m5_res = None
+
+            if isinstance(frame_res, Exception) or frame_res is None or frame_res.empty:
                 raise ValueError("No closed execution-timeframe candles available")
-            signal, strategy, res_timeframe = analyze_execution_frame(
+            frame = frame_res
+
+            calculated_htf_bias = "neutral"
+            calculated_intraday_bias = "neutral"
+            if not isinstance(htf_res, Exception) and htf_res is not None and not htf_res.empty:
+                try:
+                    def _run_htf_smc():
+                        return SMCEngine(**setup_role.get("smc", profile["smc"])).analyze(
+                            htf_res.copy(), symbol, htf_tf
+                        )
+                    htf_smc = await asyncio.to_thread(_run_htf_smc)
+                    calculated_htf_bias = str(htf_smc.bias or "neutral").lower()
+                    calculated_intraday_bias = calculated_htf_bias
+                except Exception as htf_err:
+                    logger.debug(f"HTF bias computation note: {htf_err}")
+
+            calculated_macro_bias = "neutral"
+            calculated_macro_obstacles: list[dict[str, Any]] = []
+            if not isinstance(macro_res, Exception) and macro_res is not None and not macro_res.empty:
+                try:
+                    def _run_macro_smc():
+                        return SMCEngine(**bias_role.get("smc", profile["smc"])).analyze(
+                            macro_res.copy(), symbol, macro_tf
+                        )
+                    macro_smc = await asyncio.to_thread(_run_macro_smc)
+                    calculated_macro_bias = str(macro_smc.bias or "neutral").lower()
+                    for ob in getattr(macro_smc, "order_blocks", []):
+                        calculated_macro_obstacles.append({
+                            "type": "order_block",
+                            "side": str(getattr(ob, "type", "")).lower(),
+                            "mid": float(getattr(ob, "mid", 0.0) or 0.0),
+                            "high": float(getattr(ob, "high", 0.0) or 0.0),
+                            "low": float(getattr(ob, "low", 0.0) or 0.0),
+                        })
+                    if getattr(macro_smc, "strong_weak_high", None):
+                        swh = macro_smc.strong_weak_high
+                        calculated_macro_obstacles.append({
+                            "type": "swing_high",
+                            "price": float(swh.get("price", 0.0) or 0.0),
+                        })
+                    if getattr(macro_smc, "strong_weak_low", None):
+                        swl = macro_smc.strong_weak_low
+                        calculated_macro_obstacles.append({
+                            "type": "swing_low",
+                            "price": float(swl.get("price", 0.0) or 0.0),
+                        })
+                except Exception as macro_err:
+                    logger.debug(f"Macro bias computation note: {macro_err}")
+
+            calculated_micro_momentum: dict[str, Any] = {}
+            if not isinstance(m5_res, Exception) and m5_res is not None and not m5_res.empty and len(m5_res) >= 3:
+                try:
+                    last3 = m5_res.iloc[-3:]
+                    c_open = last3["open"].values
+                    c_close = last3["close"].values
+                    all_green = all(c_close[i] > c_open[i] for i in range(3))
+                    all_red = all(c_close[i] < c_open[i] for i in range(3))
+                    total_pct = ((c_close[-1] - c_open[0]) / c_open[0]) * 100.0 if c_open[0] > 0 else 0.0
+                    calculated_micro_momentum = {
+                        "all_green": all_green,
+                        "all_red": all_red,
+                        "change_pct_3bar": round(total_pct, 2),
+                        "direction": "bullish" if all_green and total_pct > 0.4 else "bearish" if all_red and total_pct < -0.4 else "neutral",
+                    }
+                except Exception:
+                    pass
+
+            signal, strategy, res_timeframe = await asyncio.to_thread(
+                analyze_execution_frame,
                 frame=frame,
                 symbol=symbol,
                 entry_mode=entry_mode,
                 config_snapshot=config,
                 timeframe=effective_tf,
+                htf_bias=calculated_htf_bias,
+                intraday_bias=calculated_intraday_bias,
+                macro_bias=calculated_macro_bias,
+                macro_obstacles=calculated_macro_obstacles,
+                micro_momentum=calculated_micro_momentum,
             )
 
             # Hourly OI/funding is research context only.  It may be attached
@@ -677,7 +824,7 @@ class ExecutionAnalysisService:
                         "timeframe": analysis.timeframe,
                         "generated_at": analysis.generated_at.isoformat(),
                         "valid_until": analysis.valid_until.isoformat(),
-                        "candle_digest": _frame_digest(frame),
+                        "candle_digest": hashlib.sha256(_frame_digest(frame)).hexdigest()[:24],
                         "config_hash": fingerprint(config),
                         "policy_version": setup.get("policy_version"),
                         "calibration_status": setup.get("calibration_status"),

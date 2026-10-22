@@ -39,6 +39,30 @@ ASSET_CLUSTERS: dict[str, str] = {
     "AVAXUSDT": "crypto_l1",
     "SUI/USDT": "crypto_l1",
     "SUIUSDT": "crypto_l1",
+    "NEAR/USDT": "crypto_l1",
+    "NEARUSDT": "crypto_l1",
+    "DOT/USDT": "crypto_l1",
+    "DOTUSDT": "crypto_l1",
+    "APT/USDT": "crypto_l1",
+    "APTUSDT": "crypto_l1",
+
+    # Crypto DeFi / Infrastructure / Alts
+    "LINK/USDT": "crypto_alt",
+    "LINKUSDT": "crypto_alt",
+    "UNI/USDT": "crypto_alt",
+    "UNIUSDT": "crypto_alt",
+    "AAVE/USDT": "crypto_alt",
+    "AAVEUSDT": "crypto_alt",
+    "OP/USDT": "crypto_alt",
+    "OPUSDT": "crypto_alt",
+    "ARB/USDT": "crypto_alt",
+    "ARBUSDT": "crypto_alt",
+    "MATIC/USDT": "crypto_alt",
+    "MATICUSDT": "crypto_alt",
+    "INJ/USDT": "crypto_alt",
+    "INJUSDT": "crypto_alt",
+    "TIA/USDT": "crypto_alt",
+    "TIAUSDT": "crypto_alt",
 
     # Crypto Memes / Micro-cap Alts
     "DOGE/USDT": "crypto_meme",
@@ -49,6 +73,8 @@ ASSET_CLUSTERS: dict[str, str] = {
     "PEPEUSDT": "crypto_meme",
     "WIF/USDT": "crypto_meme",
     "WIFUSDT": "crypto_meme",
+    "BONK/USDT": "crypto_meme",
+    "BONKUSDT": "crypto_meme",
 
     # Precious Metals & Commodities
     "XAUUSD": "precious_metals",
@@ -70,6 +96,14 @@ ASSET_CLUSTERS: dict[str, str] = {
     "NVDA": "us_equities",
     "MSFT": "us_equities",
     "AMZN": "us_equities",
+    "GOOGL": "us_equities",
+    "AMD": "us_equities",
+    "META": "us_equities",
+    "PLTR": "us_equities",
+    "COIN": "us_equities",
+    "MSTR": "us_equities",
+    "SPY": "us_equities",
+    "QQQ": "us_equities",
 }
 
 
@@ -81,10 +115,17 @@ def get_asset_cluster(symbol: str) -> str:
     for key, cluster in ASSET_CLUSTERS.items():
         if clean == key.upper().replace("/", ""):
             return cluster
-    if ("USDT" in clean or "USD" in clean) and any(c in clean for c in ("BTC", "ETH", "SOL", "BNB", "ADA")):
-        return "crypto_l1"
-    if any(fx in clean for fx in ("EUR", "GBP", "JPY", "AUD", "CAD", "TRY", "CHF", "NZD")):
+    # Forex and metals check first to avoid false substring matches (e.g. USDT in USDTRY)
+    if any(fx in clean for fx in ("EUR", "GBP", "JPY", "AUD", "CAD", "TRY", "CHF", "NZD", "XAU", "XAG")):
+        if any(m in clean for m in ("XAU", "XAG", "GOLD")):
+            return "precious_metals"
         return "forex_majors"
+    if (clean.endswith("USDT") or "/USDT" in symbol.upper() or clean.endswith("USD")) and any(c in clean for c in ("BTC", "ETH", "SOL", "BNB", "ADA", "AVAX", "SUI", "NEAR", "DOT")):
+        return "crypto_l1"
+    if (clean.endswith("USDT") or "/USDT" in symbol.upper() or clean.endswith("USD")) and any(c in clean for c in ("DOGE", "SHIB", "PEPE", "WIF", "BONK", "FLOKI", "BOME", "MEME")):
+        return "crypto_meme"
+    if clean.endswith("USDT") or "/USDT" in symbol.upper() or clean.endswith("USD"):
+        return "crypto_alt"
     return "other"
 
 
@@ -99,13 +140,20 @@ def validate_btc_anchor(
 
 
 def squeeze_adjusted_risk_pct(signal: SMCSignal) -> float:
-    """Optionally translate SQZ strength into sizing; never create or veto a setup."""
+    """Use runtime-configured risk_per_trade (with optional SQZ scaling if enabled)."""
+    from app.core.runtime_config import load_runtime_config
+
     cfg = get_settings()
-    base = min(float(cfg.tri_core_base_risk_pct), float(cfg.default_risk_per_trade), 1.0)
+    try:
+        r_cfg = load_runtime_config()
+        configured_risk = float(r_cfg.get("risk_per_trade", getattr(cfg, "tri_core_base_risk_pct", cfg.default_risk_per_trade)))
+    except Exception:
+        configured_risk = float(getattr(cfg, "tri_core_base_risk_pct", cfg.default_risk_per_trade))
+    base = min(max(configured_risk, 0.1), 5.0)
     if not bool(getattr(cfg, "sqz_risk_scaling_enabled", False)):
         return round(base, 4)
 
-    cap = min(max(base, float(cfg.tri_core_max_risk_pct)), 1.0)
+    cap = min(max(base, float(cfg.tri_core_max_risk_pct)), 5.0)
     decision = getattr(signal, "indicator_decision", {}) or {}
     bonus = float(decision.get("squeeze_bonus", 0) or 0)
     bonus_max = max(float(decision.get("squeeze_bonus_max", 10) or 10), 1.0)
@@ -285,20 +333,29 @@ class RiskEngine:
             regime_policy = {}
 
         # --- 1. Daily loss limit ---
-        if daily_pnl_pct <= -self.cfg.max_daily_loss:
+        try:
+            from app.core.runtime_config import load_runtime_config
+            _rt = load_runtime_config()
+            eff_max_daily_loss = float(_rt.get("max_daily_loss", self.cfg.max_daily_loss))
+            eff_max_open_positions = int(_rt.get("max_open_positions", self.cfg.max_open_positions))
+        except Exception:
+            eff_max_daily_loss = float(self.cfg.max_daily_loss)
+            eff_max_open_positions = int(self.cfg.max_open_positions)
+
+        if daily_pnl_pct <= -eff_max_daily_loss:
             assessment.daily_loss_ok = False
             assessment.approved = False
             assessment.rejection_reason = (
-                f"Daily loss limit reached ({daily_pnl_pct:.2f}% vs limit -{self.cfg.max_daily_loss}%)"
+                f"Daily loss limit reached ({daily_pnl_pct:.2f}% vs limit -{eff_max_daily_loss}%)"
             )
             return assessment
 
         # --- 2. Max open positions ---
-        if open_positions >= self.cfg.max_open_positions:
+        if open_positions >= eff_max_open_positions:
             assessment.position_count_ok = False
             assessment.approved = False
             assessment.rejection_reason = (
-                f"Max open positions reached ({open_positions}/{self.cfg.max_open_positions})"
+                f"Max open positions reached ({open_positions}/{eff_max_open_positions})"
             )
             return assessment
 

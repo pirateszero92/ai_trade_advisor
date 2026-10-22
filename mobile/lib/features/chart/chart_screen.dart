@@ -73,6 +73,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
   // Bottom Dock Tab & Chat State
   int _bottomDockTab = 0; // 0: Apex AI Chat, 1: AI Blueprint, 2: Open Positions
+  bool _isBottomDockMinimized = false;
   final _chatInputCtrl = TextEditingController();
   final _chatScrollCtrl = ScrollController();
   final _qtyCtrl = TextEditingController(text: '0.10');
@@ -177,6 +178,8 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   StreamSubscription<WsConnectionState>? _wsStateSub;
   WsConnectionState _wsState = WsConnectionState.disconnected;
   final CancelToken _requestCancelToken = CancelToken();
+  Timer? _priceThrottleTimer;
+  DateTime? _lastPriceUiUpdate;
 
   @override
   void initState() {
@@ -236,14 +239,29 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           (ticks[normSel] ?? ticks[_selectedSymbol]) as Map<String, dynamic>;
       final newPrice = (t['price'] as num?)?.toDouble() ?? 0.0;
       if (newPrice > 0) {
-        setState(() {
-          _lastPrice = newPrice;
-          _change24h = (t['change_24h'] as num?)?.toDouble() ?? _change24h;
-          _high24h = (t['high_24h'] as num?)?.toDouble() ?? _high24h;
-          _low24h = (t['low_24h'] as num?)?.toDouble() ?? _low24h;
-          _vol24h = (t['volume_24h'] as num?)?.toDouble() ?? _vol24h;
-          _symbolLivePrices[_selectedSymbol] = _lastPrice;
-        });
+        _lastPrice = newPrice;
+        _change24h = (t['change_24h'] as num?)?.toDouble() ?? _change24h;
+        _high24h = (t['high_24h'] as num?)?.toDouble() ?? _high24h;
+        _low24h = (t['low_24h'] as num?)?.toDouble() ?? _low24h;
+        _vol24h = (t['volume_24h'] as num?)?.toDouble() ?? _vol24h;
+        _symbolLivePrices[_selectedSymbol] = _lastPrice;
+
+        final now = DateTime.now();
+        if (_lastPriceUiUpdate == null ||
+            now.difference(_lastPriceUiUpdate!).inMilliseconds >= 250) {
+          _lastPriceUiUpdate = now;
+          _priceThrottleTimer?.cancel();
+          _priceThrottleTimer = null;
+          setState(() {});
+        } else {
+          _priceThrottleTimer ??= Timer(const Duration(milliseconds: 250), () {
+            if (mounted) {
+              _lastPriceUiUpdate = DateTime.now();
+              _priceThrottleTimer = null;
+              setState(() {});
+            }
+          });
+        }
       }
     }
   }
@@ -257,6 +275,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
   @override
   void dispose() {
     _requestCancelToken.cancel('Chart screen disposed');
+    _priceThrottleTimer?.cancel();
     _wsPriceSub?.cancel();
     _wsStateSub?.cancel();
     _liveTickerTimer?.cancel();
@@ -1200,9 +1219,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                                 _buildMarketRegimeBar(),
                               if (_indicatorDecisionData != null)
                                 _buildIndicatorDecisionBar(),
-                              Expanded(flex: 62, child: _buildChartArea()),
-                              const Divider(),
-                              Expanded(flex: 38, child: _buildBottomDock()),
+                              if (_isBottomDockMinimized) ...[
+                                Expanded(child: _buildChartArea()),
+                                const Divider(),
+                                _buildBottomDock(),
+                              ] else ...[
+                                Expanded(flex: 72, child: _buildChartArea()),
+                                const Divider(),
+                                Expanded(flex: 28, child: _buildBottomDock()),
+                              ],
                             ],
                           ),
                         ),
@@ -1219,9 +1244,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                         if (_marketRegimeData != null) _buildMarketRegimeBar(),
                         if (_indicatorDecisionData != null)
                           _buildIndicatorDecisionBar(),
-                        Expanded(flex: 50, child: _buildChartArea()),
-                        const Divider(),
-                        Expanded(flex: 50, child: _buildBottomDock()),
+                        if (_isBottomDockMinimized) ...[
+                          Expanded(child: _buildChartArea()),
+                          const Divider(),
+                          _buildBottomDock(),
+                        ] else ...[
+                          Expanded(flex: 72, child: _buildChartArea()),
+                          const Divider(),
+                          Expanded(flex: 28, child: _buildBottomDock()),
+                        ],
                       ],
                     );
                   }
@@ -3956,13 +3987,15 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
     return Container(
       color: AppColors.background,
-      child: SMCInteractiveChart(
-        candles: _candles,
-        smcData: _smcOverlayData,
-        openPositions: _openPositions,
-        currentPrice: _lastPrice,
-        showOverlay: _showSMCOverlay,
-        symbol: _selectedSymbol,
+      child: RepaintBoundary(
+        child: SMCInteractiveChart(
+          candles: _candles,
+          smcData: _smcOverlayData,
+          openPositions: _openPositions,
+          currentPrice: _lastPrice,
+          showOverlay: _showSMCOverlay,
+          symbol: _selectedSymbol,
+        ),
       ),
     );
   }
@@ -4373,7 +4406,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     title: isLandscape ? '💬 APEX AI CHAT' : 'AI Chat',
                     isSelected: _bottomDockTab == 0,
                     badgeColor: AppColors.bullish,
-                    onTap: () => setState(() => _bottomDockTab = 0),
+                    onTap: () => setState(() { _bottomDockTab = 0; _isBottomDockMinimized = false; }),
                   ),
                 ),
                 const SizedBox(width: 5),
@@ -4384,7 +4417,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                     title: isLandscape ? '📊 AI BLUEPRINT' : 'AI Blueprint',
                     isSelected: _bottomDockTab == 1,
                     badgeColor: const Color(0xFF2E82FE),
-                    onTap: () => setState(() => _bottomDockTab = 1),
+                    onTap: () => setState(() { _bottomDockTab = 1; _isBottomDockMinimized = false; }),
                   ),
                 ),
                 const SizedBox(width: 5),
@@ -4397,7 +4430,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                         : 'Positions (${_openPositions.length})',
                     isSelected: _bottomDockTab == 2,
                     badgeColor: const Color(0xFF00E5FF),
-                    onTap: () => setState(() => _bottomDockTab = 2),
+                    onTap: () => setState(() { _bottomDockTab = 2; _isBottomDockMinimized = false; }),
                   ),
                 ),
                 const SizedBox(width: 6),
@@ -4439,18 +4472,42 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
                         size: 13, color: Colors.white70),
                   ),
                 ),
+                const SizedBox(width: 4),
+                // Action: Toggle Minimize / Expand Bottom Dock
+                InkWell(
+                  onTap: () => setState(() => _isBottomDockMinimized = !_isBottomDockMinimized),
+                  borderRadius: BorderRadius.circular(6),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF252540),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.white12, width: 0.8),
+                    ),
+                    child: Icon(
+                      _isBottomDockMinimized
+                          ? Icons.keyboard_arrow_up
+                          : Icons.keyboard_arrow_down,
+                      size: 13,
+                      color: Colors.white70,
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
-          const Divider(height: 1, color: Color(0xFF222B3D)),
-          // Dock Content
-          Expanded(
-            child: _bottomDockTab == 0
-                ? _buildApexChatDock()
-                : _bottomDockTab == 1
-                    ? _buildApexAIPanel()
-                    : _buildPositionsTable(),
-          ),
+          if (!_isBottomDockMinimized) ...[
+            const Divider(height: 1, color: Color(0xFF222B3D)),
+            // Dock Content
+            Expanded(
+              child: _bottomDockTab == 0
+                  ? _buildApexChatDock()
+                  : _bottomDockTab == 1
+                      ? _buildApexAIPanel()
+                      : _buildPositionsTable(),
+            ),
+          ],
         ],
       ),
     );

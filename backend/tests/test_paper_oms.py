@@ -1187,3 +1187,42 @@ async def test_hrd04_strategy_family_is_optional_oms_metadata(tmp_path):
 
     await oms.stop()
     await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_immediate_limit_fill_knife_slice_rejection(tmp_path):
+    from app.engines.price_hub import price_hub
+
+    oms, factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"KNIFE{uuid.uuid4().hex[:6]}/USDT"
+    now = datetime.now(timezone.utc)
+    payload = _approved_auto_pilot_payload(
+        direction="long",
+        symbol=symbol,
+    )
+    payload["order_type"] = "limit"
+    payload["entry"] = 100.0
+    payload["stop_loss"] = 90.0
+    payload["take_profit"] = 120.0
+    payload["valid_until"] = (now + timedelta(minutes=15)).isoformat()
+    payload["minimum_executable_rr"] = 1.5
+
+    # Update quote AFTER constructing payload so it isn't overridden by _order_payload default
+    price_hub.update_price(
+        symbol,
+        95.0,
+        bid=95.0,
+        ask=95.0,
+        source="test_ws",
+        transport="websocket",
+        data_quality="test",
+    )
+
+    result = await oms.place_order(payload)
+
+    # Must be cancelled immediately due to knife-slice overshoot rather than filled
+    assert result["status"] == "cancelled"
+    assert "sliced too deep" in str(result.get("close_reason", "")).lower()
+
+    await oms.stop()
+    await engine.dispose()

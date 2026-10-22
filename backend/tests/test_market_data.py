@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 import pandas as pd
 from unittest.mock import AsyncMock
 from app.engines.market_data import (
@@ -148,3 +148,37 @@ async def test_stock_without_alpaca_credentials_is_explicitly_watch_only(monkeyp
     assert result.attrs["market_data_status"]["market"] == "US_EQUITY"
     assert result.attrs["market_data_status"]["data_provider"] == "yfinance_watch_only"
     assert result.attrs["market_data_status"]["execution_mode"] == "shadow_manual"
+
+
+@pytest.mark.anyio
+async def test_bybit_fallback_tagged_accurately(monkeypatch):
+    engine = MarketDataEngine()
+
+    class MockResp:
+        def __init__(self, status_code, json_data):
+            self.status_code = status_code
+            self._json = json_data
+
+        def json(self):
+            return self._json
+
+    class MockClient:
+        async def get(self, url, *args, **kwargs):
+            if "bybit.com" in str(url):
+                base_ms = 1700000000000
+                klines = []
+                for i in range(6):
+                    t = base_ms + i * 15 * 60 * 1000
+                    klines.append([str(t), "100.0", "101.0", "99.0", "100.5", "500.0", "50250.0"])
+                return MockResp(200, {"result": {"list": klines}})
+            # Binance hosts fail
+            return MockResp(500, {})
+
+    monkeypatch.setattr("app.engines.market_data.get_shared_http_client", lambda: MockClient())
+    _OHLCV_CACHE.clear()
+
+    df = await engine._get_crypto("BTC/USDT", "15m", "binance", 10)
+    assert not df.empty
+    assert df["flow_source"].iloc[-1] == "bybit_rest_ohlcv"
+
+

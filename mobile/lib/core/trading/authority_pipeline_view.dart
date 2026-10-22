@@ -80,12 +80,6 @@ class AuthorityPipelineView {
     final risk = section('risk');
     final order = section('order');
     final oms = section('oms');
-    final conflicts = ai['conflicts'] is List
-        ? (ai['conflicts'] as List)
-            .map((e) => e.toString())
-            .where((e) => e.isNotEmpty)
-            .toList()
-        : <String>[];
     final aiStatus = (ai['status'] ?? 'not_requested').toString().toLowerCase();
     final aiVerdict = (ai['verdict'] ?? '').toString().toUpperCase();
     final aiReviewStage = (ai['review_stage'] ?? '').toString().toUpperCase();

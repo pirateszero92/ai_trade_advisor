@@ -1290,12 +1290,22 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
     final riskDistance = (entry - stopLoss).abs();
     final plannedRr =
         riskDistance > 0 ? (takeProfit - entry).abs() / riskDistance : 0.0;
+    final symUp = sym.toString().toUpperCase();
+    final isSpotTrade = symUp.endsWith('/THB') ||
+        symUp.endsWith('-THB') ||
+        (t['contract_mode']?.toString().toLowerCase() == 'spot') ||
+        (t['market_type']?.toString().toLowerCase() == 'stock') ||
+        (t['exchange']?.toString().toLowerCase() == 'innovestx');
+    final displaySide = isSpotTrade
+        ? (dir == 'LONG' ? 'BUY' : (dir == 'SHORT' ? 'SELL' : dir))
+        : dir;
 
     return _TradeCard(
       id: id,
       tag: tag,
       symbol: sym,
       direction: dir,
+      displaySide: displaySide,
       entry: entry,
       livePrice: livePrice,
       closePrice: closePrice,
@@ -2644,6 +2654,7 @@ class _TradeCard extends StatelessWidget {
       aiReview,
       lessons;
   final String setupGrade, gradeProvenance;
+  final String displaySide;
   final int executionRating;
   final List<String> tags;
   final bool isClosing;
@@ -2661,6 +2672,7 @@ class _TradeCard extends StatelessWidget {
     required this.tag,
     required this.symbol,
     required this.direction,
+    this.displaySide = '',
     required this.entry,
     required this.livePrice,
     required this.closePrice,
@@ -2773,7 +2785,8 @@ class _TradeCard extends StatelessWidget {
                           borderRadius: BorderRadius.circular(4),
                           border: Border.all(color: sideColor, width: 0.8),
                         ),
-                        child: Text(direction,
+                        child: Text(
+                            displaySide.isNotEmpty ? displaySide : direction,
                             style: TextStyle(
                                 color: sideColor,
                                 fontWeight: FontWeight.bold,

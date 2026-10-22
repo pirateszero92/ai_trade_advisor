@@ -834,17 +834,21 @@ class PaperOMS:
                 quote = initial_quote
                 should_fill = order_type == "market" or self._is_marketable(order, quote)
                 if should_fill:
-                    fill_quantity = quantity if order_type == "market" else self._available_quantity(order, quote)
-                    if fill_quantity > ZERO:
-                        self._apply_fill(
-                            session,
-                            position,
-                            order,
-                            fill_quantity,
-                            quote,
-                            execution_key=f"api:{order.id}:{quote.get('sequence') or int(now.timestamp() * 1000)}",
-                            liquidity="taker" if order_type == "market" else "maker",
-                        )
+                    if order_type == "limit":
+                        if not await self._pending_limit_still_valid(session, position, order, quote):
+                            should_fill = False
+                    if should_fill:
+                        fill_quantity = quantity if order_type == "market" else self._available_quantity(order, quote)
+                        if fill_quantity > ZERO:
+                            self._apply_fill(
+                                session,
+                                position,
+                                order,
+                                fill_quantity,
+                                quote,
+                                execution_key=f"api:{order.id}:{quote.get('sequence') or int(now.timestamp() * 1000)}",
+                                liquidity="taker" if order_type == "market" else "maker",
+                            )
                 await session.commit()
                 self._active_symbols.add(_norm_symbol(symbol))
                 result = await self._serialize_by_id(position.id)
@@ -902,6 +906,56 @@ class PaperOMS:
         result = await self._serialize_by_id(position_id)
         await self._after_mutation([result])
         return result
+
+    async def sweep_expired_pending_orders(self) -> list[str]:
+        """Automatically cancel any pending limit order whose valid_until timestamp has passed."""
+        cancelled_ids = []
+        now = _utcnow()
+        async with self._session_factory() as session:
+            try:
+                account = await self._active_account(session, lock=True)
+                stmt = (
+                    select(PaperOMSPosition)
+                    .where(
+                        PaperOMSPosition.account_id == account.id,
+                        PaperOMSPosition.status == "pending",
+                    )
+                )
+                positions = (await session.execute(stmt)).scalars().all()
+                for pos in positions:
+                    payload = dict(pos.source_payload or {})
+                    vu_raw = str(payload.get("valid_until") or "")
+                    if not vu_raw:
+                        continue
+                    try:
+                        vu = _timestamp(vu_raw)
+                        if vu and now >= vu:
+                            order = await self._active_entry_order(session, account.id, pos.id, lock=True)
+                            if order:
+                                order.status = "cancelled"
+                                order.cancelled_at = now
+                                order.completed_at = now
+                                order.updated_at = now
+                                order.close_reason = "Order timeout expired (valid_until passed)"
+                                order.remaining_quantity = ZERO
+                                order.version += 1
+                            pos.status = "cancelled"
+                            pos.close_reason = "Order timeout expired (valid_until passed)"
+                            pos.closed_at = now
+                            pos.updated_at = now
+                            pos.version += 1
+                            cancelled_ids.append(str(pos.id))
+                    except Exception:
+                        pass
+                if cancelled_ids:
+                    await session.commit()
+            except Exception as e:
+                logger.error(f"[PaperOMS] Error sweeping expired pending orders: {e}")
+                await session.rollback()
+        if cancelled_ids:
+            results = [await self._serialize_by_id(pid) for pid in cancelled_ids]
+            await self._after_mutation(results)
+        return cancelled_ids
 
     async def close_position(
         self,
@@ -1657,12 +1711,28 @@ class PaperOMS:
             cfg = get_settings()
             bid = _decimal(quote.get("bid") or quote.get("price"))
             ask = _decimal(quote.get("ask") or quote.get("price"))
+            stop_distance = abs(entry - stop)
+
+            # Option 2: Retest Knife-Slice & Instant SL Breach Defense
+            if position.direction == "long":
+                if bid <= stop:
+                    reason = "Limit touch rejected: Price already traded through Stop Loss (falling knife)"
+                elif stop_distance > ZERO and (entry - bid) > (stop_distance * Decimal("0.35")):
+                    overshoot_pct = float((entry - bid) / stop_distance)
+                    reason = f"Limit touch rejected: Price sliced too deep into zone without rejection wick ({overshoot_pct:.0%} towards SL)"
+            elif position.direction == "short":
+                if ask >= stop:
+                    reason = "Limit touch rejected: Price already traded through Stop Loss (flash pump)"
+                elif stop_distance > ZERO and (ask - entry) > (stop_distance * Decimal("0.35")):
+                    overshoot_pct = float((ask - entry) / stop_distance)
+                    reason = f"Limit touch rejected: Price sliced too deep into zone without rejection wick ({overshoot_pct:.0%} towards SL)"
+
+        if not reason:
             execution_cost = entry * (
                 (_decimal(cfg.paper_oms_fee_bps) * Decimal("2")
                  + _decimal(cfg.paper_oms_slippage_bps) * Decimal("2"))
                 / Decimal("10000")
             ) + abs(ask - bid)
-            stop_distance = abs(entry - stop)
             reward_distance = max(abs(target - entry) - execution_cost, ZERO)
             executable_rr = reward_distance / max(stop_distance + execution_cost, EPSILON)
             cost_to_stop = execution_cost / max(stop_distance, EPSILON)

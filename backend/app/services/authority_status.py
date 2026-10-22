@@ -39,7 +39,7 @@ def _quote_freshness(facts: dict[str, Any]) -> str:
         return "stale"
     if facts.get("quote_freshness"):
         return str(facts.get("quote_freshness"))
-    return "fresh" if facts.get("quote_age_seconds") is not None else "fresh"
+    return "fresh" if facts.get("quote_age_seconds") is not None else "unavailable"
 
 
 def _project_lifecycle_from_oms(
@@ -112,11 +112,33 @@ async def build_authority_status(
             from app.services.paper_oms import paper_oms
             active_snapshot = await paper_oms.list_positions(include_live=False)
             norm_sym = symbol.upper().replace(" ", "")
-            matching = [
-                p for p in (active_snapshot.get("trades") or [])
-                if str(p.get("symbol", "")).upper().replace(" ", "") == norm_sym
-                and str(p.get("status", "")).lower() in {"open", "pending", "partially_filled"}
-            ]
+            setup_dir = str(setup.get("direction") or "").lower()
+            matching = []
+            for p in (active_snapshot.get("trades") or []):
+                p_sym = str(p.get("symbol", "")).upper().replace(" ", "")
+                p_dir = str(p.get("direction") or p.get("side") or "").lower()
+                p_st = str(p.get("status", "")).lower()
+                if p_sym != norm_sym or p_st not in {"open", "pending", "partially_filled"}:
+                    continue
+                # Direction MUST be present and match setup direction exactly
+                if setup_dir and (not p_dir or p_dir != setup_dir):
+                    continue
+                payload = p.get("source_payload") or {}
+                p_snap = str(p.get("decision_snapshot_id") or payload.get("decision_snapshot_id") or "")
+                p_event = str(p.get("tri_core_event_id") or payload.get("tri_core_event_id") or "")
+                # Candidate ID correlation: require match if candidate or record provides IDs
+                if snapshot_id or event_id:
+                    if not p_snap and not p_event:
+                        continue
+                    if snapshot_id and p_snap and p_snap != snapshot_id:
+                        continue
+                    if event_id and p_event and p_event != event_id:
+                        continue
+                    if snapshot_id and not p_snap and p_event != event_id:
+                        continue
+                    if event_id and not p_event and p_snap != snapshot_id:
+                        continue
+                matching.append(p)
             if matching:
                 latest = matching[0]
                 oms = {
@@ -243,13 +265,15 @@ async def build_authority_status(
     elif not execution_validated:
         final_decision = "BLOCKED"
         final_block_stage = "EXECUTION_REVALIDATION"
-        final_block_reason_code = str(execution.get("reason_code") or "EXECUTION_REJECTED")
-        final_block_reason = "; ".join(str(r) for r in execution.get("reasons", [])) or f"Execution intent: {exec_status}"
+        final_block_reason_code = str(execution.get("reason_code") or ("NOT_RUN" if exec_status == "not_run" else "EXECUTION_REJECTED"))
+        final_block_reason = "; ".join(str(r) for r in execution.get("reasons", [])) or (
+            "Execution revalidation has not run" if exec_status == "not_run" else f"Execution intent: {exec_status}"
+        )
     elif not risk_approved:
         final_decision = "BLOCKED"
         final_block_stage = "RISK"
-        final_block_reason_code = str(effective_risk_reason or "RISK_REJECTED")
-        final_block_reason = str(effective_risk_reason or "Risk limits exceeded")
+        final_block_reason_code = str(effective_risk_reason or ("NOT_RUN" if effective_risk_status == "not_run" else "RISK_REJECTED"))
+        final_block_reason = str(effective_risk_reason or ("Risk evaluation has not run" if effective_risk_status == "not_run" else "Risk limits exceeded"))
     else:
         final_decision = "READY"
         final_block_stage = None
@@ -338,11 +362,12 @@ async def build_authority_status(
                 "wait" if exec_status == "waiting_retest"
                 else "place_limit" if exec_status == "limit_armed"
                 else "market_now" if exec_status == "validated"
+                else "not_run" if exec_status == "not_run"
                 else "cancel"
             )),
-            "reason_code": str(execution.get("reason_code") or ""),
+            "reason_code": str(execution.get("reason_code") or ("NOT_RUN" if exec_status == "not_run" else "")),
             "reasons": list(execution.get("reasons") or []),
-            "structural_rr": execution.get("structural_rr", structural_rr),
+            "structural_rr": execution.get("structural_rr", structural_rr if execution else None),
             "executable_rr": execution.get("executable_rr"),
             "minimum_executable_rr": execution.get("minimum_executable_rr"),
             "quote_age_seconds": execution.get("quote_age_seconds"),
@@ -358,7 +383,8 @@ async def build_authority_status(
         },
         "risk": {
             "status": effective_risk_status,
-            "reason": effective_risk_reason,
+            "reason": effective_risk_reason or ("Risk evaluation has not run" if effective_risk_status == "not_run" else None),
+            "reason_code": str(risk.get("reason_code") or ("NOT_RUN" if effective_risk_status == "not_run" else "")),
             "risk_pct": risk.get("risk_pct"),
             "risk_amount": risk.get("risk_amount"),
             "position_size": risk.get("position_size"),
@@ -455,15 +481,25 @@ async def build_authority_status(
             "execution": {
                 "stage": "EXECUTION_REVALIDATION",
                 "passed": execution_validated,
-                "reason_code": str(execution.get("reason_code") or ("VALIDATED" if execution_validated else "REJECTED")),
-                "reason": "; ".join(execution.get("reasons", [])) or f"Execution intent: {exec_status}",
+                "reason_code": str(execution.get("reason_code") or ("VALIDATED" if execution_validated else ("NOT_RUN" if exec_status == "not_run" else "REJECTED"))),
+                "reason": "; ".join(execution.get("reasons", [])) or (
+                    "Execution revalidation has not run" if exec_status == "not_run" else f"Execution intent: {exec_status}"
+                ),
                 "status": exec_status,
             },
             "risk": {
                 "stage": "RISK",
                 "passed": risk_approved,
-                "reason_code": "RISK_APPROVED" if risk_approved else str(effective_risk_reason or "RISK_REJECTED"),
-                "reason": effective_risk_reason or ("Risk approved" if risk_approved else "Risk limits exceeded"),
+                "reason_code": (
+                    "RISK_APPROVED"
+                    if risk_approved
+                    else ("NOT_RUN" if effective_risk_status == "not_run" else str(effective_risk_reason or "RISK_REJECTED"))
+                ),
+                "reason": effective_risk_reason or (
+                    "Risk evaluation has not run"
+                    if effective_risk_status == "not_run"
+                    else ("Risk approved" if risk_approved else "Risk limits exceeded")
+                ),
                 "status": effective_risk_status,
             },
             "oms": {

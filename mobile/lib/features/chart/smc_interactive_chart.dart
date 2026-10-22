@@ -260,14 +260,16 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
                                     .clamp(0.1, 10.0);
                           }
                         } else {
-                          // Pan chart horizontally
+                          // Pan chart horizontally (Time axis)
                           _scrollOffset =
                               (_scrollOffset + details.focalPointDelta.dx)
                                   .clamp(minScrollLeft, maxScrollRight);
 
-                          // Pan chart vertically (TradingView style 2D drag)
+                          // Only pan vertically if gesture is deliberately vertical (dy > dx * 2.2)
+                          // Prevents thumb tilt when swiping horizontally from throwing candles off-screen
+                          final dx = details.focalPointDelta.dx.abs();
                           final dy = details.focalPointDelta.dy;
-                          if (dy != 0 && chartHeight > 0) {
+                          if (dy.abs() > dx * 2.2 && dy.abs() > 3.0 && chartHeight > 0) {
                             final maxPriceOffset = scaledHalfSpan * 20.0;
                             _priceOffset = (_priceOffset + (dy * pricePerPixel))
                                 .clamp(-maxPriceOffset, maxPriceOffset);
@@ -319,21 +321,23 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
                         _hoverOffset = null;
                       });
                     },
-                    child: CustomPaint(
-                      size: Size(constraints.maxWidth, constraints.maxHeight),
-                      painter: _SMCUnifiedPainter(
-                        candles: widget.candles,
-                        candleIndexByTime: _candleIndexByTime,
-                        smcData: widget.smcData,
-                        openPositions: widget.openPositions,
-                        currentPrice: widget.currentPrice,
-                        showOverlay: widget.showOverlay,
-                        symbol: widget.symbol,
-                        candleWidth: _candleWidth,
-                        scrollOffset: effectiveScrollOffset,
-                        priceScaleMultiplier: _priceScaleMultiplier,
-                        priceOffset: _priceOffset,
-                        hoverOffset: _hoverOffset,
+                    child: RepaintBoundary(
+                      child: CustomPaint(
+                        size: Size(constraints.maxWidth, constraints.maxHeight),
+                        painter: _SMCUnifiedPainter(
+                          candles: widget.candles,
+                          candleIndexByTime: _candleIndexByTime,
+                          smcData: widget.smcData,
+                          openPositions: widget.openPositions,
+                          currentPrice: widget.currentPrice,
+                          showOverlay: widget.showOverlay,
+                          symbol: widget.symbol,
+                          candleWidth: _candleWidth,
+                          scrollOffset: effectiveScrollOffset,
+                          priceScaleMultiplier: _priceScaleMultiplier,
+                          priceOffset: _priceOffset,
+                          hoverOffset: _hoverOffset,
+                        ),
                       ),
                     ),
                   ),
@@ -372,20 +376,20 @@ class _SMCInteractiveChartState extends State<SMCInteractiveChart> {
       required VoidCallback onTap}) {
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1E2533).withValues(alpha: 0.9),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: AppColors.border),
+        color: const Color(0xCC121620),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: AppColors.border.withValues(alpha: 0.6)),
       ),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          borderRadius: BorderRadius.circular(6),
+          borderRadius: BorderRadius.circular(4),
           onTap: onTap,
           child: Tooltip(
             message: tooltip,
             child: Padding(
-              padding: const EdgeInsets.all(6),
-              child: Icon(icon, size: 16, color: Colors.white70),
+              padding: const EdgeInsets.all(4),
+              child: Icon(icon, size: 13, color: Colors.white70),
             ),
           ),
         ),
@@ -535,10 +539,16 @@ class _SMCUnifiedPainter extends CustomPainter {
       ..color = const Color(0xFF1E2533).withValues(alpha: 0.6)
       ..strokeWidth = 1.0;
 
-    const numPriceTicks = 7;
+    const numPriceTicks = 6;
+    final currentPriceY = (currentPrice > 0) ? priceToY(currentPrice) : -999.0;
     for (int i = 0; i <= numPriceTicks; i++) {
       final y = (chartHeight / numPriceTicks) * i;
       canvas.drawLine(Offset(0, y), Offset(chartWidth, y), gridPaint);
+
+      // Skip background tick label if it is too close to currentPrice badge
+      if ((y - currentPriceY).abs() < 16.0) {
+        continue;
+      }
 
       // Price label on right axis
       final priceAtTick = yToPrice(y);
@@ -554,11 +564,13 @@ class _SMCUnifiedPainter extends CustomPainter {
 
     // Keep time-grid strokes behind the market data, as TradingView does.
     // Previously they were drawn inside the candle loop and covered bodies.
-    final timeLabelStep = math.max(1, (60 / candleWidth).round());
+    // Ensure at least 95 pixels between time labels so 'MM/dd HH:mm' (width ~70px) NEVER overlaps!
+    const minTimeLabelGap = 95.0;
+    final timeLabelStep = math.max(1, (minTimeLabelGap / candleWidth).ceil());
     for (int i = startIndex; i <= endIndex; i++) {
       if (i % timeLabelStep != 0) continue;
       final x = candleIndexToX(i);
-      if (x < 0 || x > chartWidth) continue;
+      if (x < 35 || x > chartWidth - 35) continue;
       canvas.drawLine(Offset(x, 0), Offset(x, chartHeight),
           Paint()..color = const Color(0xFF1E2533).withValues(alpha: 0.4));
       final timeStr =
@@ -566,9 +578,9 @@ class _SMCUnifiedPainter extends CustomPainter {
       _drawText(
         canvas,
         text: timeStr,
-        offset: Offset(x - 30, chartHeight + 6),
+        offset: Offset(x - 28, chartHeight + 6),
         style: const TextStyle(
-            fontSize: 9, color: Colors.white38, fontFamily: 'monospace'),
+            fontSize: 9, color: Colors.white54, fontFamily: 'monospace'),
       );
     }
 

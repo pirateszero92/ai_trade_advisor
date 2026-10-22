@@ -710,6 +710,46 @@ async def test_notifications(
     return {"status": "ok", "results": results}
 
 
+class NotificationConfigRequest(BaseModel):
+    telegram_token: Optional[str] = ""
+    telegram_chat_id: Optional[str] = ""
+    line_token: Optional[str] = ""
+
+
+@router.get("/notifications/config")
+async def get_notification_config(_key: str = Depends(verify_api_key)):
+    """Fetch stored notification tokens for Telegram and LINE."""
+    from app.core.config import get_settings
+    env_cfg = get_settings()
+    current = load_runtime_config()
+    tg_token = current.get("telegram_token") or env_cfg.telegram_bot_token or ""
+    tg_chat = current.get("telegram_chat_id") or env_cfg.telegram_chat_id or ""
+    ln_token = current.get("line_token") or env_cfg.line_notify_token or ""
+    return {
+        "telegram_token": tg_token,
+        "telegram_chat_id": tg_chat,
+        "line_token": ln_token,
+    }
+
+
+@router.post("/notifications/config")
+async def save_notification_config(
+    req: NotificationConfigRequest,
+    _key: str = Depends(verify_api_key),
+):
+    """Save notification tokens to runtime configuration."""
+    updates = {}
+    if req.telegram_token is not None:
+        updates["telegram_token"] = req.telegram_token.strip()
+    if req.telegram_chat_id is not None:
+        updates["telegram_chat_id"] = req.telegram_chat_id.strip()
+    if req.line_token is not None:
+        updates["line_token"] = req.line_token.strip()
+    if updates:
+        update_runtime_config(updates)
+    return {"status": "ok", "message": "Notification configuration saved"}
+
+
 # ------------------------------------------------------------------
 # Proactive Scanner Watchlist Settings
 # ------------------------------------------------------------------
@@ -1401,6 +1441,7 @@ async def set_trading_mode(req: TradingModeRequest, _key: str = Depends(verify_a
 
 class RiskConfigRequest(BaseModel):
     entry_mode: Optional[Literal["limit", "market"]] = None
+    binance_trading_mode: Optional[Literal["futures", "spot"]] = None
     auto_sl_tp: Optional[bool] = None
     auto_invalidation: Optional[bool] = None
     risk_per_trade: Optional[float] = Field(default=None, gt=0, le=5)
@@ -1417,6 +1458,11 @@ class RiskConfigRequest(BaseModel):
     btc_anchor_dump_threshold_pct: Optional[float] = Field(default=None, ge=0.2, le=5.0)
     cluster_loss_cooldown_enabled: Optional[bool] = None
     cluster_loss_cooldown_minutes: Optional[int] = Field(default=None, ge=5, le=240)
+    loss_streak_halt_enabled: Optional[bool] = None
+    loss_streak_halt_hours: Optional[int] = Field(default=None, ge=1, le=24)
+    ping_pong_enabled: Optional[bool] = None
+    counter_trend_filter_enabled: Optional[bool] = None
+    ping_pong_enabled: Optional[bool] = None
 
 
 def _runtime_contract_metadata(runtime: dict[str, Any]) -> dict[str, Any]:
@@ -1501,12 +1547,28 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
         cluster_loss_cooldown_minutes = int(data.get(
             "cluster_loss_cooldown_minutes", cfg.cluster_loss_cooldown_minutes
         ))
+        loss_streak_halt_enabled = bool(data.get(
+            "loss_streak_halt_enabled", getattr(cfg, "loss_streak_halt_enabled", True)
+        ))
+        loss_streak_halt_hours = int(data.get(
+            "loss_streak_halt_hours", getattr(cfg, "loss_streak_halt_hours", 2)
+        ))
+        counter_trend_filter_enabled = bool(data.get(
+            "counter_trend_filter_enabled", True
+        ))
+        ping_pong_enabled = bool(data.get(
+            "ping_pong_enabled", False
+        ))
+        binance_trading_mode = str(data.get(
+            "binance_trading_mode", getattr(cfg, "binance_trading_mode", "futures")
+        ))
     except Exception as exc:
         logger.error(f"Failed to load risk config: {exc}")
         raise HTTPException(status_code=500, detail="Unable to load risk configuration") from exc
 
     return {
         "entry_mode": entry_mode,
+        "binance_trading_mode": binance_trading_mode,
         "auto_sl_tp": auto_sl_tp,
         "auto_invalidation": auto_invalidation,
         "risk_per_trade": cfg.default_risk_per_trade,
@@ -1525,6 +1587,10 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
         "btc_anchor_dump_threshold_pct": btc_anchor_dump_threshold_pct,
         "cluster_loss_cooldown_enabled": cluster_loss_cooldown_enabled,
         "cluster_loss_cooldown_minutes": cluster_loss_cooldown_minutes,
+        "loss_streak_halt_enabled": loss_streak_halt_enabled,
+        "loss_streak_halt_hours": loss_streak_halt_hours,
+        "counter_trend_filter_enabled": counter_trend_filter_enabled,
+        "ping_pong_enabled": ping_pong_enabled,
         "config_contract": _runtime_contract_metadata(data),
     }
 
@@ -1592,6 +1658,9 @@ async def update_risk_config(
         }
         if req.entry_mode is not None:
             updates["entry_mode"] = req.entry_mode
+        if req.binance_trading_mode is not None:
+            updates["binance_trading_mode"] = req.binance_trading_mode
+            cfg.binance_trading_mode = req.binance_trading_mode
         if req.auto_sl_tp is not None:
             updates["auto_sl_tp"] = req.auto_sl_tp
         if req.auto_invalidation is not None:
@@ -1625,11 +1694,43 @@ async def update_risk_config(
             updates["cluster_loss_cooldown_enabled"] = req.cluster_loss_cooldown_enabled
         if req.cluster_loss_cooldown_minutes is not None:
             updates["cluster_loss_cooldown_minutes"] = req.cluster_loss_cooldown_minutes
+        if req.loss_streak_halt_enabled is not None:
+            updates["loss_streak_halt_enabled"] = req.loss_streak_halt_enabled
+        if req.loss_streak_halt_hours is not None:
+            updates["loss_streak_halt_hours"] = req.loss_streak_halt_hours
+        if req.counter_trend_filter_enabled is not None:
+            updates["counter_trend_filter_enabled"] = req.counter_trend_filter_enabled
+            try:
+                from app.core.strategy_config_store import read_strategy_config, update_strategy_section
+                from app.engines.strategy_engine import STRATEGY_FILE
+                strat = read_strategy_config(STRATEGY_FILE)
+                tcp = dict(strat.get("tri_core_policy", {}))
+                tcp["counter_trend_filter_enabled"] = bool(req.counter_trend_filter_enabled)
+                update_strategy_section(STRATEGY_FILE, "tri_core_policy", tcp)
+            except Exception as strat_err:
+                logger.warning(f"Could not synchronize tri_core_policy.counter_trend_filter_enabled: {strat_err}")
+        if req.ping_pong_enabled is not None:
+            updates["ping_pong_enabled"] = req.ping_pong_enabled
+            try:
+                from app.core.strategy_config_store import read_strategy_config, update_strategy_section
+                from app.engines.strategy_engine import STRATEGY_FILE
+                strat = read_strategy_config(STRATEGY_FILE)
+                tcp = dict(strat.get("tri_core_policy", {}))
+                tcp["ping_pong_enabled"] = bool(req.ping_pong_enabled)
+                update_strategy_section(STRATEGY_FILE, "tri_core_policy", tcp)
+                rp = dict(strat.get("regime_policy", {}))
+                if "policies" in rp and "ranging" in rp["policies"]:
+                    rp["policies"]["ranging"]["ping_pong_enabled"] = bool(req.ping_pong_enabled)
+                    update_strategy_section(STRATEGY_FILE, "regime_policy", rp)
+            except Exception as strat_err:
+                logger.warning(f"Could not synchronize ping_pong_enabled: {strat_err}")
         # MTF is permanently informational-only.
         updates["mtf_hierarchy_required"] = False
         saved = update_runtime_config(updates)
         from app.services.event_trigger import invalidate_runtime_settings_cache
+        from app.services.execution_analysis import execution_analyses
         invalidate_runtime_settings_cache()
+        execution_analyses.clear()
     except Exception as e:
         logger.error(f"Failed to save risk config: {e}")
         raise HTTPException(status_code=500, detail="Unable to persist risk configuration") from e
@@ -1639,6 +1740,7 @@ async def update_risk_config(
         "message": "Risk & Entry settings saved successfully",
         "config": {
             "entry_mode": saved.get("entry_mode", "limit"),
+            "binance_trading_mode": saved.get("binance_trading_mode", getattr(cfg, "binance_trading_mode", "futures")),
             "auto_sl_tp": saved.get("auto_sl_tp", True),
             "auto_invalidation": saved.get("auto_invalidation", True),
             "risk_per_trade": cfg.default_risk_per_trade,
@@ -1665,6 +1767,18 @@ async def update_risk_config(
             "cluster_loss_cooldown_minutes": saved.get(
                 "cluster_loss_cooldown_minutes", cfg.cluster_loss_cooldown_minutes
             ),
+            "loss_streak_halt_enabled": saved.get(
+                "loss_streak_halt_enabled", getattr(cfg, "loss_streak_halt_enabled", True)
+            ),
+            "loss_streak_halt_hours": saved.get(
+                "loss_streak_halt_hours", getattr(cfg, "loss_streak_halt_hours", 2)
+            ),
+            "counter_trend_filter_enabled": saved.get(
+                "counter_trend_filter_enabled", True
+            ),
+            "ping_pong_enabled": saved.get(
+                "ping_pong_enabled", False
+            ),
             "config_contract": _runtime_contract_metadata(saved),
         },
     }
@@ -1672,12 +1786,16 @@ async def update_risk_config(
 
 class RuntimeSettingsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    binance_trading_mode: Optional[Literal["futures", "spot"]] = None
     auto_sl_tp: Optional[bool] = None
     auto_invalidation: Optional[bool] = None
     auto_trade_enabled: Optional[bool] = None
     auto_trade_min_grade: Optional[Literal["S", "A"]] = None
     auto_trade_entry_type: Optional[Literal["momentum_market", "limit_pullback"]] = None
     auto_trade_cooldown_seconds: Optional[int] = Field(default=None, ge=30, le=3600)
+    loss_streak_halt_enabled: Optional[bool] = None
+    loss_streak_halt_hours: Optional[int] = Field(default=None, ge=1, le=24)
+    ping_pong_enabled: Optional[bool] = None
 
 
 @router.get("/runtime")
@@ -1698,6 +1816,8 @@ async def update_runtime_settings(
 ):
     """Fast-path update for runtime settings (e.g. quick toggle from UI)."""
     updates = {}
+    if req.binance_trading_mode is not None:
+        updates["binance_trading_mode"] = req.binance_trading_mode
     if req.auto_sl_tp is not None:
         updates["auto_sl_tp"] = req.auto_sl_tp
     if req.auto_invalidation is not None:
@@ -1710,6 +1830,25 @@ async def update_runtime_settings(
         updates["auto_trade_entry_type"] = req.auto_trade_entry_type
     if req.auto_trade_cooldown_seconds is not None:
         updates["auto_trade_cooldown_seconds"] = req.auto_trade_cooldown_seconds
+    if req.loss_streak_halt_enabled is not None:
+        updates["loss_streak_halt_enabled"] = req.loss_streak_halt_enabled
+    if req.loss_streak_halt_hours is not None:
+        updates["loss_streak_halt_hours"] = req.loss_streak_halt_hours
+    if req.ping_pong_enabled is not None:
+        updates["ping_pong_enabled"] = req.ping_pong_enabled
+        try:
+            from app.core.strategy_config_store import read_strategy_config, update_strategy_section
+            from app.engines.strategy_engine import STRATEGY_FILE
+            strat = read_strategy_config(STRATEGY_FILE)
+            tcp = dict(strat.get("tri_core_policy", {}))
+            tcp["ping_pong_enabled"] = bool(req.ping_pong_enabled)
+            update_strategy_section(STRATEGY_FILE, "tri_core_policy", tcp)
+            rp = dict(strat.get("regime_policy", {}))
+            if "policies" in rp and "ranging" in rp["policies"]:
+                rp["policies"]["ranging"]["ping_pong_enabled"] = bool(req.ping_pong_enabled)
+                update_strategy_section(STRATEGY_FILE, "regime_policy", rp)
+        except Exception as strat_err:
+            logger.warning(f"Could not synchronize strategy ping_pong_enabled: {strat_err}")
 
     if updates:
         saved = update_runtime_config(updates)
