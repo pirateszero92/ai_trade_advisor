@@ -1728,18 +1728,31 @@ class PaperOMS:
                     reason = f"Limit touch rejected: Price sliced too deep into zone without rejection wick ({overshoot_pct:.0%} towards SL)"
 
         if not reason:
+            # Limit entry rests on the order book (maker order). It does not cross
+            # the bid-ask spread on entry, and has zero entry slippage.
             execution_cost = entry * (
                 (_decimal(cfg.paper_oms_fee_bps) * Decimal("2")
-                 + _decimal(cfg.paper_oms_slippage_bps) * Decimal("2"))
+                 + _decimal(cfg.paper_oms_slippage_bps))
                 / Decimal("10000")
-            ) + abs(ask - bid)
-            reward_distance = max(abs(target - entry) - execution_cost, ZERO)
-            executable_rr = reward_distance / max(stop_distance + execution_cost, EPSILON)
-            cost_to_stop = execution_cost / max(stop_distance, EPSILON)
+            )
+            raw_reward = abs(target - entry)
+            raw_risk = max(stop_distance, EPSILON)
+            reward_distance = max(raw_reward - execution_cost, ZERO)
+            net_rr = reward_distance / max(stop_distance + execution_cost, EPSILON)
+            chart_rr = raw_reward / raw_risk
+            cost_to_stop = execution_cost / raw_risk
+
             payload_min_rr = payload.get("minimum_executable_rr")
             min_rr = _decimal(payload_min_rr) if payload_min_rr else Decimal("1.5")
-            if executable_rr < min_rr:
-                reason = f"Limit touch executable R:R {float(executable_rr):.2f} is below {float(min_rr):.2f}"
+            net_floor = max(Decimal("0.90"), min_rr * Decimal("0.65"))
+
+            # Economic viability & structural validity check:
+            # Pre-trade ExecutionRevalidator already approved this limit order.
+            # At touch time, reject only if structural geometry degraded or net expectancy is unviable.
+            if chart_rr + Decimal("0.03") < min_rr:
+                reason = f"Limit touch chart R:R {float(chart_rr):.2f} is below {float(min_rr):.2f}"
+            elif net_rr < net_floor:
+                reason = f"Limit touch net R:R {float(net_rr):.2f} is below net floor {float(net_floor):.2f}"
             elif cost_to_stop > Decimal("0.50"):
                 reason = f"Limit touch cost/SL {float(cost_to_stop):.1%} exceeds 50%"
 

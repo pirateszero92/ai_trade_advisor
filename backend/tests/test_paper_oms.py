@@ -1226,3 +1226,60 @@ async def test_immediate_limit_fill_knife_slice_rejection(tmp_path):
 
     await oms.stop()
     await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_limit_order_fills_at_structural_rr_without_friction_rejection(tmp_path):
+    from app.engines.price_hub import price_hub
+
+    oms, factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"LINK{uuid.uuid4().hex[:6]}/USDT"
+    now = datetime.now(timezone.utc)
+    now_ts = now.timestamp()
+    payload = _approved_auto_pilot_payload(
+        direction="long",
+        symbol=symbol,
+    )
+    payload["order_type"] = "limit"
+    payload["entry_policy"] = "limit_retest_only"
+    payload["limit_zone_id"] = "ob-zone-1"
+    payload["entry"] = 11.706
+    payload["stop_loss"] = 11.657
+    payload["take_profit"] = 11.782
+    payload["valid_until"] = (now + timedelta(minutes=15)).isoformat()
+    payload["minimum_executable_rr"] = 1.5
+
+    # Price is above entry initially (order goes to pending)
+    price_hub.update_price(
+        symbol,
+        11.720,
+        bid=11.719,
+        ask=11.721,
+        source="test_ws",
+        transport="websocket",
+        data_quality="test",
+    )
+
+    pending = await oms.place_order(payload)
+    assert pending["status"] == "pending"
+
+    # Price moves down to touch entry (11.706) with slight overshoot without hitting SL
+    changed = await oms.process_market_tick({
+        "symbol": symbol,
+        "price": 11.705,
+        "bid": 11.704,
+        "ask": 11.705,
+        "last_trade_quantity": 500.0,
+        "sequence": 888,
+        "source": "test_ws",
+        "received_timestamp": now_ts,
+    })
+
+    assert len(changed) >= 1
+    # Order must fill (status 'open' for position), NOT be cancelled due to R:R friction
+    assert changed[0]["status"] in {"open", "filled"}
+    assert changed[0]["close_reason"] != "Limit touch executable R:R 0.95 is below 1.50"
+
+    await oms.stop()
+    await engine.dispose()
+
