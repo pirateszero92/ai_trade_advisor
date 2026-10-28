@@ -390,3 +390,52 @@ def test_breaker_blocks_tracked_on_order_block_mitigation():
     assert len(overlay["breaker_blocks"]) == 1
     assert overlay["breaker_blocks"][0]["direction"] == "bullish"
 
+
+def test_fvg_close_through_creates_ifvg_role_flip_breaker():
+    pre = [{"open": 98, "high": 100, "low": 97, "close": 99, "volume": 50} for _ in range(30)]
+    records = [
+        {"open": 100, "high": 102, "low": 99, "close": 101, "volume": 100},   # candle 30: high=102
+        {"open": 101, "high": 115, "low": 101, "close": 114, "volume": 500},  # candle 31: expansion
+        {"open": 114, "high": 120, "low": 108, "close": 118, "volume": 200},  # candle 32: low=108 -> Bullish FVG [102, 108]
+        {"open": 118, "high": 119, "low": 99, "close": 100, "volume": 400},   # candle 33: closes below 102 -> iFVG bearish breaker
+        {"open": 100, "high": 101, "low": 98, "close": 99.5, "volume": 150},  # candle 34: stays below 102
+    ]
+    all_recs = pre + records
+    df = pd.DataFrame(
+        all_recs,
+        index=pd.date_range("2026-01-01", periods=len(all_recs), freq="1h", tz="UTC"),
+    )
+    signal = SMCEngine(swing_length=5).analyze(df, symbol="TEST", timeframe="1h")
+    ifvg_zones = [
+        z for z in signal.breaker_blocks
+        if z.source == "ifvg" and z.direction == "bearish" and z.bottom == 102 and z.top == 108
+    ]
+    assert len(ifvg_zones) == 1
+
+
+def test_session_sweep_detects_asian_range_raid_during_london_ny_killzone():
+    index = pd.date_range("2026-09-01 00:00", periods=10, freq="1h", tz="UTC")
+    # Bars 0..6 are Asian session (00:00..06:00 UTC) with range [100.0, 105.0]
+    # Bar 9 is 09:00 UTC (London Killzone): sweeps below 100.0 (low=98.5) and reclaims at 101.0
+    frame = pd.DataFrame(
+        {
+            "open": [102.0] * 9 + [100.5],
+            "high": [105.0] * 9 + [101.5],
+            "low": [100.0] * 9 + [98.5],
+            "close": [102.0] * 9 + [101.0],
+            "volume": [1000.0] * 10,
+        },
+        index=index,
+    )
+    signal = SMCSignal("TEST", "1h")
+    signal.swing_lows = [
+        SwingPoint(
+            3, 100.0, "low", index[3], confirmed_index=5, confirmed_timestamp=index[5]
+        )
+    ]
+    SMCEngine()._detect_liquidity_sweep(frame, signal)
+    assert signal.liquidity_swept is True
+    assert signal.liquidity_sweep.get("session_sweep") is True
+    assert signal.liquidity_sweep.get("session_window") == "london_ny_killzone"
+
+

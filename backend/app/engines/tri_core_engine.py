@@ -497,6 +497,90 @@ def _first_lineage_retest(
     return chosen_zone, chosen_is_shallow
 
 
+def _is_session_judas_sweep(frame: pd.DataFrame, sweep: dict[str, Any]) -> bool:
+    """Return True when a sweep raids Asian Session liquidity during the London/NY Killzone."""
+    if bool(sweep.get("session_sweep", False)):
+        return True
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        return False
+    ref_idx = _index(sweep.get("reference_swing_index", -1))
+    sweep_idx = _index(sweep.get("index", len(frame) - 1))
+    if not (0 <= ref_idx < sweep_idx < len(frame)):
+        return False
+    try:
+        ref_ts = pd.Timestamp(frame.index[ref_idx])
+        sweep_ts = pd.Timestamp(frame.index[sweep_idx])
+        if ref_ts.tzinfo is not None:
+            ref_ts = ref_ts.tz_convert("UTC")
+        if sweep_ts.tzinfo is not None:
+            sweep_ts = sweep_ts.tz_convert("UTC")
+        return bool(
+            ref_ts.date() == sweep_ts.date()
+            and 0 <= ref_ts.hour < 7
+            and 7 <= sweep_ts.hour <= 16
+        )
+    except Exception:
+        return False
+
+
+def _detect_unicorn_overlap(
+    signal: Any,
+    side: str,
+    zone: Any,
+    displacement: dict[str, Any],
+) -> tuple[bool, float, float]:
+    """Check if a lineage-bound Breaker Block and Fair Value Gap overlap in price (Unicorn Setup).
+
+    Returns (is_unicorn, overlap_bottom, overlap_top).
+    """
+    expected = "bullish" if side == "long" else "bearish"
+    displacement_index = _index(displacement.get("index"))
+    break_index = _index(displacement.get("structure_break_index"))
+    zone_kind = str(getattr(zone, "kind", ""))
+    zone_source = str(getattr(zone, "source", "swing"))
+
+    if zone_kind == "breaker" and zone_source != "ifvg":
+        counterpart_pool = list(getattr(signal, "fvgs", []))
+    elif zone_kind == "fvg":
+        counterpart_pool = [
+            b for b in getattr(signal, "breaker_blocks", [])
+            if str(getattr(b, "source", "swing")) != "ifvg"
+        ]
+    else:
+        return False, 0.0, 0.0
+
+    z_bottom = float(getattr(zone, "bottom", 0.0))
+    z_top = float(getattr(zone, "top", 0.0))
+    for other in counterpart_pool:
+        if getattr(other, "direction", "") != expected or getattr(other, "mitigated", False):
+            continue
+        origin = _index(getattr(other, "index", -1))
+        confirmed = _index(getattr(other, "confirmed_index", -1))
+        other_kind = str(getattr(other, "kind", ""))
+        if other_kind == "breaker":
+            related = (
+                confirmed == displacement_index
+                or confirmed == break_index
+                or abs(confirmed - displacement_index) <= 2
+                or abs(confirmed - break_index) <= 2
+            )
+        else:  # fvg
+            related = (
+                (origin == displacement_index and confirmed == displacement_index + 1)
+                or abs(confirmed - break_index) <= 2
+                or abs(confirmed - displacement_index) <= 2
+            )
+        if not related:
+            continue
+        o_bottom = float(getattr(other, "bottom", 0.0))
+        o_top = float(getattr(other, "top", 0.0))
+        overlap_bottom = max(z_bottom, o_bottom)
+        overlap_top = min(z_top, o_top)
+        if overlap_bottom < overlap_top:
+            return True, overlap_bottom, overlap_top
+    return False, 0.0, 0.0
+
+
 def _nearest_active_zone(signal: Any, frame: pd.DataFrame) -> tuple[Any | None, float]:
     """Return the closest currently-active SMC zone and distance from it."""
     close = float(frame["close"].iloc[-1])
@@ -913,10 +997,20 @@ class TriCoreSetupEngine:
                             if (is_ranging or policy.target_anchor_mode == "settings_rr")
                             else _nearest_target(signal, side, candidate_entry)
                         ) if extreme > 0 else None
+                        is_session_sweep = _is_session_judas_sweep(frame, sweep)
+                        sweep_evidence = [
+                            f"Confirmed {sweep.get('event_type', 'sweep')} of the same {expected_sweep} swing and close reclaim",
+                            f"Sweep trigger age {sweep_age}/{policy.ttl_bars} bars; extension {extension_atr:.2f} ATR",
+                            f"CVD {flow_label} confirms {side}",
+                        ]
+                        if is_session_sweep:
+                            sweep_evidence.append(
+                                "Session Sweep (Judas/AMD): Raided Asian Range liquidity during London/NY Killzone -> Grade S"
+                            )
                         result = _candidate(
                             side=side, setup_type="sweep_reversal", entry=candidate_entry, stop=stop,
                             target=target_val,
-                            grade="S" if strong else "A",
+                            grade="S" if (strong or is_session_sweep) else "A",
                             invalidation_source="full_sweep_window_extreme",
                             trigger_age_bars=sweep_age,
                             extension_atr=extension_atr,
@@ -929,9 +1023,7 @@ class TriCoreSetupEngine:
                             entry_policy=entry_policy,
                             limit_zone_id=limit_zone_id,
                             policy=policy,
-                            evidence=[f"Confirmed {sweep.get('event_type', 'sweep')} of the same {expected_sweep} swing and close reclaim",
-                                      f"Sweep trigger age {sweep_age}/{policy.ttl_bars} bars; extension {extension_atr:.2f} ATR",
-                                      f"CVD {flow_label} confirms {side}"],
+                            evidence=sweep_evidence,
                         )
                         candidates.append(result)
                         rejected.extend(result.rejection_reasons)
@@ -951,8 +1043,11 @@ class TriCoreSetupEngine:
                 zone, is_shallow = _first_lineage_retest(signal, frame, side, displacement, atr=atr)
                 if zone is not None:
                     stop = float(zone.bottom) - buffer if side == "long" else float(zone.top) + buffer
+                    zone_source = str(getattr(zone, "source", "swing"))
                     zone_label = (
-                        "S/R Flip Breaker Block" if zone.kind == "breaker"
+                        "Inversion FVG (iFVG Role-Flip)"
+                        if (zone.kind == "breaker" and zone_source == "ifvg")
+                        else "S/R Flip Breaker Block" if zone.kind == "breaker"
                         else "Fair Value Gap" if zone.kind == "fvg"
                         else "Order Block"
                     )
@@ -980,6 +1075,14 @@ class TriCoreSetupEngine:
                             evidence_items.append(
                                 f"Shallow retest respecting 50% Consequent Encroachment (CE) of {side} Fair Value Gap"
                             )
+                    is_unicorn, uni_bottom, uni_top = _detect_unicorn_overlap(
+                        signal, side, zone, displacement
+                    )
+                    disp_grade: Literal["S", "A"] = "S" if is_unicorn else "A"
+                    if is_unicorn:
+                        evidence_items.append(
+                            f"Unicorn Confluence (Grade S): Breaker Block overlaps with Fair Value Gap ({uni_bottom:.4f}-{uni_top:.4f})"
+                        )
                     if flow_aligned:
                         evidence_items.append(f"Aggressor delta ratio {pressure:+.1%} confirms {side}")
                     else:
@@ -1008,7 +1111,7 @@ class TriCoreSetupEngine:
                     )
                     result = _candidate(
                         side=side, setup_type=setup_type, entry=disp_entry, stop=stop,
-                        target=disp_target, grade="A",
+                        target=disp_target, grade=disp_grade,
                         invalidation_source=f"first_retest:{zone.zone_id}",
                         flow_confirmation_type="single_bar_aggressor_delta",
                         event_id=(

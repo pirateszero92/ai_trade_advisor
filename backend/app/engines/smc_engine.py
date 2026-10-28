@@ -100,7 +100,7 @@ class Zone:
     index: int = 0
     timestamp: Optional[pd.Timestamp] = None
     mitigated: bool = False
-    source: Literal["swing", "internal"] = "swing"
+    source: Literal["swing", "internal", "ifvg"] = "swing"
     # ``index`` is the historical origin candle. ``confirmed_index`` is the
     # candle on which the engine could first know this zone existed (BOS/FVG
     # confirmation). Keeping both prevents hindsight/self-referential retests.
@@ -1238,7 +1238,7 @@ class SMCEngine:
                         fvgs.append(new_fvg)
                         active_fvgs.append(new_fvg)
 
-            # FVG Mitigation
+            # FVG Mitigation & Inversion FVG (iFVG) Role-Flip Creation
             rem_active_fvgs: list[Zone] = []
             for fvg_item in active_fvgs:
                 if fvg_item.index >= i:
@@ -1246,8 +1246,36 @@ class SMCEngine:
                     continue
                 if fvg_item.direction == "bullish" and c_low < fvg_item.bottom:
                     fvg_item.mitigated = True
+                    if c_close < fvg_item.bottom:
+                        inv = Zone(
+                            kind="breaker",
+                            direction="bearish",
+                            top=float(fvg_item.top),
+                            bottom=float(fvg_item.bottom),
+                            index=int(fvg_item.index),
+                            timestamp=fvg_item.timestamp,
+                            source="ifvg",
+                            confirmed_index=i,
+                            confirmed_timestamp=timestamps[i],
+                        )
+                        breaker_blocks.append(inv)
+                        active_breakers.append(inv)
                 elif fvg_item.direction == "bearish" and c_high > fvg_item.top:
                     fvg_item.mitigated = True
+                    if c_close > fvg_item.top:
+                        inv = Zone(
+                            kind="breaker",
+                            direction="bullish",
+                            top=float(fvg_item.top),
+                            bottom=float(fvg_item.bottom),
+                            index=int(fvg_item.index),
+                            timestamp=fvg_item.timestamp,
+                            source="ifvg",
+                            confirmed_index=i,
+                            confirmed_timestamp=timestamps[i],
+                        )
+                        breaker_blocks.append(inv)
+                        active_breakers.append(inv)
                 else:
                     rem_active_fvgs.append(fvg_item)
             active_fvgs = rem_active_fvgs
@@ -1708,6 +1736,104 @@ class SMCEngine:
                     "reclaim_close": c_close,
                 }
                 break
+
+        # Session Sweep (Judas / AMD): Check if an existing sweep raided the
+        # Asian session range (00:00-07:00 UTC) during London/NY open (07:00-16:00 UTC),
+        # or detect a direct Asian Session High/Low raid if no swing sweep triggered.
+        if isinstance(df.index, pd.DatetimeIndex):
+            if signal.liquidity_swept and signal.liquidity_sweep:
+                sw_idx = int(signal.liquidity_sweep.get("candle_index", -1))
+                ref_idx = int(signal.liquidity_sweep.get("reference_index", -1))
+                if 0 <= ref_idx < sw_idx < len(df):
+                    sw_ts = df.index[sw_idx]
+                    ref_ts = df.index[ref_idx]
+                    asian_indices = [
+                        k for k in range(sw_idx)
+                        if df.index[k].date() == sw_ts.date() and 0 <= df.index[k].hour < 7
+                    ]
+                    if 7 <= sw_ts.hour <= 16:
+                        is_asian_ref = (ref_ts.date() == sw_ts.date() and 0 <= ref_ts.hour < 7)
+                        raided_asian = False
+                        if asian_indices:
+                            a_high = float(np.max(highs[asian_indices]))
+                            a_low = float(np.min(lows[asian_indices]))
+                            ext = float(signal.liquidity_sweep.get("extreme", 0.0))
+                            if signal.sweep_direction == "high" and ext >= a_high:
+                                raided_asian = True
+                            elif signal.sweep_direction == "low" and ext <= a_low:
+                                raided_asian = True
+                        if is_asian_ref or raided_asian:
+                            signal.liquidity_sweep["session_sweep"] = True
+                            signal.liquidity_sweep["session_window"] = "london_ny_killzone"
+            else:
+                for idx in range(-1, -4, -1):
+                    if abs(idx) >= len(df):
+                        break
+                    absolute = len(df) + idx
+                    sw_ts = df.index[absolute]
+                    if not (7 <= sw_ts.hour <= 16):
+                        continue
+                    asian_indices = [
+                        k for k in range(absolute)
+                        if df.index[k].date() == sw_ts.date() and 0 <= df.index[k].hour < 7
+                    ]
+                    if len(asian_indices) < 3:
+                        continue
+                    a_high_pos = int(np.argmax(highs[asian_indices]))
+                    a_low_pos = int(np.argmin(lows[asian_indices]))
+                    a_high_idx = asian_indices[a_high_pos]
+                    a_low_idx = asian_indices[a_low_pos]
+                    a_high = float(highs[a_high_idx])
+                    a_low = float(lows[a_low_idx])
+                    c_high = float(highs[absolute])
+                    c_low = float(lows[absolute])
+                    c_close = float(closes[absolute])
+                    if absolute > 0 and c_high > a_high and c_close < a_high and closes[absolute - 1] <= a_high:
+                        signal.liquidity_swept = True
+                        signal.sweep_direction = "high"
+                        signal.sweep_price = a_high
+                        level_id = f"asian_high:{sw_ts.date().isoformat()}:{a_high:.8f}"
+                        signal.liquidity_sweep = {
+                            "event_id": f"sweep:{signal.symbol}:{signal.timeframe}:high:{level_id}:{sw_ts.isoformat()}",
+                            "level_id": level_id,
+                            "reference_index": int(a_high_idx),
+                            "reference_confirmed_index": int(asian_indices[-1]),
+                            "level": a_high,
+                            "event_type": "session_judas_sweep",
+                            "session_sweep": True,
+                            "session_window": "london_ny_killzone",
+                            "breach_start_index": int(absolute),
+                            "breach_start_time": sw_ts.isoformat(),
+                            "extreme": c_high,
+                            "extreme_index": int(absolute),
+                            "candle_index": int(absolute),
+                            "candle_time": sw_ts.isoformat(),
+                            "reclaim_close": c_close,
+                        }
+                        break
+                    elif absolute > 0 and c_low < a_low and c_close > a_low and closes[absolute - 1] >= a_low:
+                        signal.liquidity_swept = True
+                        signal.sweep_direction = "low"
+                        signal.sweep_price = a_low
+                        level_id = f"asian_low:{sw_ts.date().isoformat()}:{a_low:.8f}"
+                        signal.liquidity_sweep = {
+                            "event_id": f"sweep:{signal.symbol}:{signal.timeframe}:low:{level_id}:{sw_ts.isoformat()}",
+                            "level_id": level_id,
+                            "reference_index": int(a_low_idx),
+                            "reference_confirmed_index": int(asian_indices[-1]),
+                            "level": a_low,
+                            "event_type": "session_judas_sweep",
+                            "session_sweep": True,
+                            "session_window": "london_ny_killzone",
+                            "breach_start_index": int(absolute),
+                            "breach_start_time": sw_ts.isoformat(),
+                            "extreme": c_low,
+                            "extreme_index": int(absolute),
+                            "candle_index": int(absolute),
+                            "candle_time": sw_ts.isoformat(),
+                            "reclaim_close": c_close,
+                        }
+                        break
 
     def _detect_inducement(self, df: pd.DataFrame, signal: SMCSignal) -> None:
         """

@@ -902,3 +902,100 @@ def test_intraday_mtf_scenario_c_at_4h_obstacle_rejected():
     setup = TriCoreSetupEngine.evaluate(signal, _frame(), {"minimum_rr": 1.5})
     assert not setup.actionable
     assert any("Adverse location: At major 4H obstacle" in r for r in setup.rejection_reasons)
+
+
+def test_unicorn_breaker_fvg_overlap_upgrades_displacement_retest_to_grade_s():
+    signal = _signal()
+    signal.liquidity_swept = False
+    signal.liquidity_sweep = {}
+    signal.delta_ratio = 0.22
+    signal.displacement = {
+        "direction": "long",
+        "index": 17,
+        "structure_break_index": 17,
+        "structure_break_id": "BOS:bullish:17:100.0",
+    }
+    # Breaker Block [99.8, 100.8] and overlapping Bullish FVG [100.2, 101.0]
+    signal.breaker_blocks = [
+        Zone(
+            kind="breaker",
+            direction="bullish",
+            top=100.8,
+            bottom=99.8,
+            index=12,
+            confirmed_index=17,
+            source="swing",
+        )
+    ]
+    signal.fvgs = [
+        Zone(
+            kind="fvg",
+            direction="bullish",
+            top=101.0,
+            bottom=100.2,
+            index=17,
+            confirmed_index=18,
+            source="swing",
+        )
+    ]
+    frame = _frame()
+    # Keep bars 18 away from zone so bar 19 is the first retest
+    frame.iloc[18, frame.columns.get_loc("low")] = 102.0
+    frame.iloc[18, frame.columns.get_loc("close")] = 102.5
+    frame.iloc[19, frame.columns.get_loc("low")] = 100.1
+    frame.iloc[19, frame.columns.get_loc("close")] = 100.5
+
+    setup = TriCoreSetupEngine.evaluate(signal, frame)
+    assert setup.actionable is True
+    assert setup.grade == "S"
+    assert any("Unicorn Confluence (Grade S)" in item for item in setup.evidence)
+
+
+def test_ifvg_role_flip_retest_labeled_in_displacement_evidence():
+    signal = _signal()
+    signal.liquidity_swept = False
+    signal.liquidity_sweep = {}
+    signal.delta_ratio = 0.22
+    signal.displacement = {
+        "direction": "long",
+        "index": 17,
+        "structure_break_index": 17,
+        "structure_break_id": "BOS:bullish:17:100.0",
+    }
+    signal.breaker_blocks = [
+        Zone(
+            kind="breaker",
+            direction="bullish",
+            top=100.8,
+            bottom=99.8,
+            index=14,
+            confirmed_index=17,
+            source="ifvg",
+        )
+    ]
+    frame = _frame()
+    frame.iloc[18, frame.columns.get_loc("low")] = 102.0
+    frame.iloc[18, frame.columns.get_loc("close")] = 102.5
+    frame.iloc[19, frame.columns.get_loc("low")] = 100.1
+    frame.iloc[19, frame.columns.get_loc("close")] = 100.5
+
+    setup = TriCoreSetupEngine.evaluate(signal, frame)
+    assert setup.actionable is True
+    assert setup.setup_type == "breaker_retest"
+    assert setup.grade == "A"
+    assert any("Inversion FVG (iFVG Role-Flip)" in item for item in setup.evidence)
+
+
+def test_session_judas_sweep_upgrades_moderate_cvd_sweep_reversal_to_grade_s():
+    signal = _signal()
+    # Moderate CVD efficiency (< 0.15) would normally produce Grade A, not Grade S
+    signal.cvd_divergence_evidence["cvd_efficiency"] = 0.05
+    signal.liquidity_sweep["session_sweep"] = True
+    signal.liquidity_sweep["session_window"] = "london_ny_killzone"
+
+    setup = TriCoreSetupEngine.evaluate(signal, _frame())
+    assert setup.actionable is True
+    assert setup.setup_type == "sweep_reversal"
+    assert setup.grade == "S"
+    assert any("Session Sweep (Judas/AMD)" in item for item in setup.evidence)
+
