@@ -26,6 +26,6 @@ def test_phase7_execution_safety_defaults_are_present():
     runtime = json.loads(RUNTIME_FILE.read_text(encoding="utf-8"))
     assert 1 <= int(runtime["auto_trade_limit_timeout_bars"]) <= 20
     assert runtime["auto_trade_entry_policy"] in {"fixed", "adaptive"}
-    assert runtime["auto_trade_min_grade"] in {"A", "S"}
+    assert runtime["auto_trade_min_grade"] in {"A", "S", "B"}
     assert float(runtime["target_rr"]) >= 1.0
 

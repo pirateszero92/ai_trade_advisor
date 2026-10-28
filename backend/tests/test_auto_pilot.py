@@ -146,7 +146,8 @@ async def test_auto_pilot_hands_every_canonical_setup_type_to_oms(
     service = MarketMonitor()
     mock_mtf.trigger_signal.tri_core_setup["setup_type"] = setup_type
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_min_grade": "A",
         "auto_trade_entry_type": "momentum_market",
@@ -197,7 +198,8 @@ async def test_auto_pilot_hands_every_canonical_setup_type_to_oms(
 async def test_auto_pilot_blocked_when_disabled(mock_mtf):
     service = MarketMonitor()
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": False,
     }), patch("app.services.paper_oms.paper_oms.ready", True), \
        patch("app.services.paper_oms.paper_oms.list_positions", AsyncMock(return_value=[])), \
@@ -259,7 +261,8 @@ async def test_auto_pilot_15m_agile_mode_triggers_without_4h(mock_mtf):
     mock_mtf.stages["bias"].status = "forming"
 
     # When mtf_hierarchy_required is False (Fast 15M Agile Mode)
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_min_grade": "A",
         "auto_trade_entry_type": "momentum_market",
@@ -308,7 +311,8 @@ async def test_auto_pilot_fast_mode_blocks_non_actionable_trigger(mock_mtf):
     mock_mtf.strategy.approved = False
     mock_mtf.strategy.direction = "wait"
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
     }), patch("app.services.paper_oms.paper_oms.place_order", AsyncMock()) as mock_create:
         result = await service._evaluate_and_execute_auto_pilot(
@@ -333,7 +337,8 @@ async def test_auto_pilot_counts_pending_positions_and_prevents_duplicate(mock_m
     service = MarketMonitor()
     pending = {"symbol": "MSFT", "status": "pending"}
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_min_grade": "A",
         "mtf_hierarchy_required": False,
@@ -372,7 +377,8 @@ async def test_auto_pilot_vetoed_by_ai_scalper_conflict(mock_mtf):
         "conflicts": ["Delta positive divergence into resistance zone", "Trap OB detected"],
     }
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
         "auto_trade_min_grade": "A",
@@ -407,7 +413,8 @@ async def test_auto_pilot_blocks_when_ai_review_is_unavailable(mock_mtf):
         "error": "AI advisory unavailable or invalid",
     }))
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
         "auto_trade_min_grade": "A",
@@ -432,7 +439,8 @@ async def test_auto_pilot_blocks_when_ai_review_raises(mock_mtf):
     service = MarketMonitor()
     mock_mtf.trigger_signal.ai_review = {}
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
         "auto_trade_min_grade": "A",
@@ -457,10 +465,12 @@ async def test_auto_pilot_advisory_mode_does_not_forge_ai_approval(mock_mtf):
     service = MarketMonitor()
     mock_mtf.trigger_signal.ai_review = {}
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": False,
         "auto_trade_min_grade": "A",
+        "risk_per_trade": 0.75,
         "auto_trade_cooldown_seconds": 300,
     }), patch("app.services.paper_oms.paper_oms.ready", True), \
        patch("app.services.paper_oms.paper_oms.list_positions", AsyncMock(return_value=[])), \
@@ -490,7 +500,8 @@ async def test_auto_pilot_blocks_direction_mismatch_with_tri_core(mock_mtf):
     service = MarketMonitor()
     mock_mtf.trigger_signal.tri_core_setup["direction"] = "short"
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
     }), patch("app.services.paper_oms.paper_oms.place_order", AsyncMock()) as mock_create:
@@ -516,10 +527,12 @@ async def test_legacy_ai_execution_fields_are_ignored(mock_mtf):
         "execution_action": "VETO_BLOCKED",
     })
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
         "auto_trade_min_grade": "A",
+        "risk_per_trade": 0.75,
         "auto_trade_cooldown_seconds": 300,
     }), patch("app.services.paper_oms.paper_oms.ready", True), \
        patch("app.services.paper_oms.paper_oms.list_positions", AsyncMock(return_value=[])), \
@@ -561,10 +574,12 @@ async def test_auto_pilot_blocks_when_execution_revalidation_rejects(mock_mtf, m
         ),
     )
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
         "auto_trade_min_grade": "A",
+        "risk_per_trade": 0.75,
         "auto_trade_cooldown_seconds": 300,
     }), patch("app.services.paper_oms.paper_oms.ready", True), \
        patch("app.services.paper_oms.paper_oms.list_positions", AsyncMock(return_value=[])), \
@@ -600,10 +615,12 @@ async def test_auto_pilot_persistent_risk_halt_blocks_before_risk_and_oms(
         }),
     )
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
         "auto_trade_min_grade": "A",
+        "risk_per_trade": 0.75,
         "auto_trade_cooldown_seconds": 300,
         "target_rr": 2.0,
         "default_sl_pct": 1.0,
@@ -659,10 +676,12 @@ async def test_auto_pilot_btc_market_anchor_blocks_altcoin_long_before_execution
         ),
     )
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": False,
         "auto_trade_min_grade": "A",
+        "risk_per_trade": 0.75,
         "auto_trade_cooldown_seconds": 300,
         "target_rr": 2.0,
         "default_sl_pct": 1.0,
@@ -703,11 +722,13 @@ async def test_auto_pilot_fast_track_grade_s_bypasses_ai_latency(mock_mtf):
     mock_mtf.trigger_signal.ai_review = {}
     mock_mtf.trigger_signal.tri_core_setup["grade"] = "S"
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
         "auto_trade_fast_track_grade_s": True,
         "auto_trade_min_grade": "A",
+        "risk_per_trade": 0.75,
         "auto_trade_cooldown_seconds": 300,
     }), patch("app.services.paper_oms.paper_oms.ready", True), \
        patch("app.services.paper_oms.paper_oms.list_positions", AsyncMock(return_value=[])), \
@@ -750,7 +771,8 @@ async def test_auto_pilot_soft_caution_proceeds_with_halved_position_risk(mock_m
         "input_timeframe": "15m",
     }))
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
         "auto_trade_ai_gate_hard": True,
@@ -758,6 +780,7 @@ async def test_auto_pilot_soft_caution_proceeds_with_halved_position_risk(mock_m
         "auto_trade_fast_track_grade_s": False,
         "auto_trade_soft_caution_sizing_pct": 0.5,
         "auto_trade_min_grade": "A",
+        "risk_per_trade": 0.75,
         "auto_trade_cooldown_seconds": 300,
     }), patch("app.services.execution_analysis.execution_analyses.get", AsyncMock(return_value=object())), \
        patch("app.services.scanner_ai.scanner_ai.review", AsyncMock(return_value=caution_review)), \
@@ -802,7 +825,8 @@ async def test_auto_pilot_soft_caution_blocked_by_default_hard_gate(mock_mtf):
         "input_timeframe": "15m",
     }))
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
         "auto_trade_ai_gate_hard": True,
@@ -810,6 +834,7 @@ async def test_auto_pilot_soft_caution_blocked_by_default_hard_gate(mock_mtf):
         "auto_trade_fast_track_grade_s": False,
         "auto_trade_soft_caution_sizing_pct": 0.5,
         "auto_trade_min_grade": "A",
+        "risk_per_trade": 0.75,
         "auto_trade_cooldown_seconds": 300,
     }), patch("app.services.execution_analysis.execution_analyses.get", AsyncMock(return_value=object())), \
        patch("app.services.scanner_ai.scanner_ai.review", AsyncMock(return_value=caution_review)), \
@@ -845,12 +870,14 @@ async def test_auto_pilot_hard_conflict_blocks_trade(mock_mtf):
         "input_timeframe": "15m",
     }))
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
         "auto_trade_ai_gate_hard": True,
         "auto_trade_fast_track_grade_s": False,
         "auto_trade_min_grade": "A",
+        "risk_per_trade": 0.75,
         "auto_trade_cooldown_seconds": 300,
     }), patch("app.services.execution_analysis.execution_analyses.get", AsyncMock(return_value=object())), \
        patch("app.services.scanner_ai.scanner_ai.review", AsyncMock(return_value=conflict_review)), \
@@ -885,12 +912,14 @@ async def test_tri_core_to_ai_decision_streamlined_execution(mock_mtf):
         "input_timeframe": "15m",
     }))
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
         "auto_trade_ai_gate_hard": True,
         "auto_trade_fast_track_grade_s": False,
         "auto_trade_min_grade": "A",
+        "risk_per_trade": 0.75,
         "auto_trade_cooldown_seconds": 300,
     }), patch("app.services.execution_analysis.execution_analyses.get", AsyncMock(return_value=object())), \
        patch("app.services.scanner_ai.scanner_ai.review", AsyncMock(return_value=buy_review)), \
@@ -925,12 +954,14 @@ async def test_tri_core_to_ai_decision_streamlined_execution(mock_mtf):
         "input_timeframe": "15m",
     }))
 
-    with patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+    with patch("app.core.runtime_config.load_runtime_config", return_value={"risk_per_trade": 0.75}), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
         "auto_trade_enabled": True,
         "auto_trade_require_ai_approval": True,
         "auto_trade_ai_gate_hard": True,
         "auto_trade_fast_track_grade_s": False,
         "auto_trade_min_grade": "A",
+        "risk_per_trade": 0.75,
         "auto_trade_cooldown_seconds": 300,
     }), patch("app.services.execution_analysis.execution_analyses.get", AsyncMock(return_value=object())), \
        patch("app.services.scanner_ai.scanner_ai.review", AsyncMock(return_value=pass_review)), \

@@ -1219,7 +1219,11 @@ class MarketMonitor:
         ):
             # Pre-check grade and cooldown before invoking expensive LLM review
             _min_g = str(r_cfg.get("auto_trade_min_grade", "A")).upper()
-            if (_min_g == "S" and setup_grade != "S") or (_min_g == "A" and setup_grade not in {"A", "S"}):
+            if (
+                (_min_g == "S" and setup_grade != "S")
+                or (_min_g == "A" and setup_grade not in {"A", "S"})
+                or (_min_g == "B" and setup_grade not in {"B", "A", "S"})
+            ):
                 await decision_trace.record(
                     snapshot_id=decision_snapshot_id,
                     event_id=event_id,
@@ -1528,8 +1532,13 @@ class MarketMonitor:
         setup_grade = str(setup.get("grade", "WAIT")).upper()
         is_grade_s = setup_grade == "S"
         is_grade_a = setup_grade in {"A", "S"}
+        is_grade_b = setup_grade in {"B", "A", "S"}
         min_grade = str(r_cfg.get("auto_trade_min_grade", "A")).upper()
-        if (min_grade == "S" and not is_grade_s) or (min_grade == "A" and not is_grade_a):
+        if (
+            (min_grade == "S" and not is_grade_s)
+            or (min_grade == "A" and not is_grade_a)
+            or (min_grade == "B" and not is_grade_b)
+        ):
             await decision_trace.record(
                 snapshot_id=decision_snapshot_id,
                 event_id=event_id,
@@ -1538,7 +1547,7 @@ class MarketMonitor:
                 facts={"passed": False, "reason_code": "MIN_GRADE_NOT_MET", "grade": setup_grade, "min_grade": min_grade},
             )
             return None
-        grade_label = "👑 SETUP S" if is_grade_s else "💎 SETUP A"
+        grade_label = "👑 SETUP S" if is_grade_s else "💎 SETUP A" if is_grade_a else "⚡ SETUP B"
 
         # 3. Cooldown Check
         cooldown_sec = float(r_cfg.get("auto_trade_cooldown_seconds", 300))

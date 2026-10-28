@@ -117,8 +117,8 @@ def validate_runtime_config(data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("entry_mode must be limit or market")
     if "binance_trading_mode" in clean and clean["binance_trading_mode"] not in {"futures", "spot"}:
         raise ValueError("binance_trading_mode must be futures or spot")
-    if "auto_trade_min_grade" in clean and clean["auto_trade_min_grade"] not in {"S", "A"}:
-        raise ValueError("auto_trade_min_grade must be S or A")
+    if "auto_trade_min_grade" in clean and clean["auto_trade_min_grade"] not in {"S", "A", "B"}:
+        raise ValueError("auto_trade_min_grade must be S, A or B")
     if "auto_trade_entry_type" in clean and clean["auto_trade_entry_type"] not in {
         "momentum_market", "limit_pullback"
     }:

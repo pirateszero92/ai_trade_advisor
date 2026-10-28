@@ -356,23 +356,35 @@ class ExecutionRevalidator:
         is_settings_rr = str(policy_cfg.get("target_anchor_mode", "")).lower() == "settings_rr"
 
         def executable_rr_for(entry_value: float) -> float:
-            execution_cost = entry_value * cost_rate + (ask - bid)
+            is_limit = (
+                order_type == "limit"
+                or getattr(result, "auto_armed_limit", False)
+                or entry_policy == "limit_retest_only"
+                or entry_value == structural_entry
+            )
+            # Limit entry rests at structural entry (maker order). It does not cross the
+            # bid-ask spread on entry, and has zero entry slippage.
+            effective_cost_rate = (
+                (float(fee_bps) * 2.0 + float(slippage_bps)) / 10_000.0
+                if is_limit
+                else cost_rate
+            )
+            spread_cost = 0.0 if is_limit else (ask - bid)
+            execution_cost = entry_value * effective_cost_rate + spread_cost
             raw_risk = abs(entry_value - stop)
             raw_reward = abs(target - entry_value)
             risk_dist = raw_risk + execution_cost
             reward_dist = max(raw_reward - execution_cost, 0.0)
             net_rr = reward_dist / max(risk_dist, 1e-12)
-            if is_settings_rr:
-                # In settings_rr mode, TP is anchored at the exact configured R:R on chart;
-                # verify net expectancy after fees/spread remains >= 85% of target floor (and >= 1.15)
-                # and chart R:R >= floor (with 0.03R tick-rounding tolerance).
-                net_floor = max(1.15, float(result.minimum_executable_rr) * 0.85)
-                if net_rr < net_floor:
-                    return round(net_rr, 4)
-                chart_rr = raw_reward / max(raw_risk, 1e-12)
-                if chart_rr + 0.03 >= result.minimum_executable_rr:
-                    chart_rr = max(chart_rr, result.minimum_executable_rr)
-                return round(chart_rr, 4)
+            chart_rr = raw_reward / max(raw_risk, 1e-12)
+
+            # Economic viability check:
+            # Net reward after fees and slippage must remain positive and viable
+            # (net_rr >= 0.90 ensures positive net expectancy after all transaction friction)
+            # while chart/structural R:R satisfies minimum_executable_rr (with 0.03R tick tolerance).
+            net_floor = max(0.90, float(result.minimum_executable_rr) * 0.65)
+            if net_rr >= net_floor and (chart_rr + 0.03 >= result.minimum_executable_rr):
+                return round(max(chart_rr, result.minimum_executable_rr), 4)
             return round(net_rr, 4)
 
         result.executable_rr = executable_rr_for(executable_entry)

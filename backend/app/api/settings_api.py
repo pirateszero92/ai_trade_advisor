@@ -1450,7 +1450,7 @@ class RiskConfigRequest(BaseModel):
     target_rr: Optional[float] = Field(default=None, ge=1, le=20)
     default_sl_pct: Optional[float] = Field(default=None, gt=0, le=20)
     auto_trade_enabled: Optional[bool] = None
-    auto_trade_min_grade: Optional[Literal["S", "A"]] = None
+    auto_trade_min_grade: Optional[Literal["S", "A", "B"]] = None
     auto_trade_entry_type: Optional[Literal["momentum_market", "limit_pullback"]] = None
     auto_trade_cooldown_seconds: Optional[int] = Field(default=None, ge=30, le=3600)
     mtf_hierarchy_required: Optional[bool] = None
@@ -1790,7 +1790,7 @@ class RuntimeSettingsUpdateRequest(BaseModel):
     auto_sl_tp: Optional[bool] = None
     auto_invalidation: Optional[bool] = None
     auto_trade_enabled: Optional[bool] = None
-    auto_trade_min_grade: Optional[Literal["S", "A"]] = None
+    auto_trade_min_grade: Optional[Literal["S", "A", "B"]] = None
     auto_trade_entry_type: Optional[Literal["momentum_market", "limit_pullback"]] = None
     auto_trade_cooldown_seconds: Optional[int] = Field(default=None, ge=30, le=3600)
     loss_streak_halt_enabled: Optional[bool] = None
