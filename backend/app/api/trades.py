@@ -320,7 +320,7 @@ class PlaceOrderRequest(BaseModel):
     # Immutable deterministic setup metadata.  These fields are copied onto
     # the position at entry so Journal never has to infer a historical grade
     # from today's market state.
-    setup_grade: Optional[Literal["A", "S"]] = None
+    setup_grade: Optional[Literal["S", "A", "B", "C"]] = None
     setup_type: Optional[str] = Field(default=None, max_length=64)
     decision_snapshot_id: Optional[str] = Field(
         default=None, min_length=8, max_length=64, pattern=r"^[a-fA-F0-9]+$"

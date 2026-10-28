@@ -602,8 +602,8 @@ class PaperOMS:
             setup_timeframe = "15m"
         else:
             setup_timeframe = setup_timeframe.lower()
-        if setup_grade not in {None, "A", "S"}:
-            raise PaperOMSValidation("setup_grade must be A or S")
+        if setup_grade not in {None, "S", "A", "B", "C"}:
+            raise PaperOMSValidation("setup_grade must be S, A, B, or C")
         # A grade without its causal setup and immutable decision identity is
         # not auditable and must not be persisted as a historical fact.
         setup_values = (setup_grade, setup_type, decision_snapshot_id, setup_timeframe)

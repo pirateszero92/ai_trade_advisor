@@ -1283,3 +1283,24 @@ async def test_limit_order_fills_at_structural_rr_without_friction_rejection(tmp
     await oms.stop()
     await engine.dispose()
 
+
+@pytest.mark.anyio
+async def test_setup_grade_b_from_ping_pong_is_accepted_by_oms(tmp_path):
+    oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
+    symbol = f"SOL{uuid.uuid4().hex[:6]}/USDT"
+    payload = _order_payload(direction="long", symbol=symbol)
+    payload.update({
+        "setup_grade": "B",
+        "setup_type": "range_boundary_ping_pong",
+        "decision_snapshot_id": "a1b2c3d4e5f60718293a4b5c",
+        "setup_timeframe": "15m",
+    })
+
+    opened = await oms.place_order(payload)
+    assert opened["setup_grade"] == "B"
+    assert opened["setup_type"] == "range_boundary_ping_pong"
+
+    await oms.stop()
+    await engine.dispose()
+
+
