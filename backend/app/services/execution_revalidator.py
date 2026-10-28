@@ -380,9 +380,9 @@ class ExecutionRevalidator:
 
             # Economic viability check:
             # Net reward after fees and slippage must remain positive and viable
-            # (net_rr >= 0.90 ensures positive net expectancy after all transaction friction)
+            # (net_rr >= 0.85 ensures positive net expectancy after all transaction friction)
             # while chart/structural R:R satisfies minimum_executable_rr (with 0.03R tick tolerance).
-            net_floor = max(0.90, float(result.minimum_executable_rr) * 0.65)
+            net_floor = max(0.85, float(result.minimum_executable_rr) * 0.55)
             if net_rr >= net_floor and (chart_rr + 0.03 >= result.minimum_executable_rr):
                 return round(max(chart_rr, result.minimum_executable_rr), 4)
             return round(net_rr, 4)

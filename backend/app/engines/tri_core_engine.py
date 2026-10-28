@@ -681,7 +681,7 @@ def _candidate(*, side: str, setup_type: str, entry: float, stop: float,
     eff_min_rr = policy.minimum_rr
     structural_obstacle = target
     if policy.target_anchor_mode == "settings_rr":
-        min_risk = entry * 0.0040
+        min_risk = entry * 0.0065
         if risk < min_risk:
             stop = (entry - min_risk) if side == "long" else (entry + min_risk)
             risk = abs(entry - stop)
@@ -887,6 +887,13 @@ class TriCoreSetupEngine:
                     if trend_direction == "bearish" and side == "long":
                         rejected.append("Counter-trend LONG rejected: Market regime is trending bearish")
                         continue
+                elif regime_label == "volatile" and intraday_bias == "neutral":
+                    if trend_direction == "bullish" and side == "short":
+                        rejected.append("Counter-trend SHORT rejected: Market regime is volatile bullish")
+                        continue
+                    if trend_direction == "bearish" and side == "long":
+                        rejected.append("Counter-trend LONG rejected: Market regime is volatile bearish")
+                        continue
                 if regime_label != "ranging":
                     # Scenario A: 1H Intraday trend opposes trade direction (Pullback against 1H)
                     if intraday_bias == "bullish" and side == "short":
@@ -968,16 +975,6 @@ class TriCoreSetupEngine:
                         causal_zone = _causal_limit_zone(signal, side, sweep)
                         limit_zone_id = str(causal_zone.zone_id) if causal_zone is not None else ""
                         candidate_entry = entry
-                        if causal_zone is not None:
-                            zone_mid = float(causal_zone.mid)
-                            if side == "long" and entry > zone_mid:
-                                candidate_entry = zone_mid
-                                if (entry - zone_mid) > 0.10 * atr:
-                                    entry_policy = "limit_retest_only"
-                            elif side == "short" and entry < zone_mid:
-                                candidate_entry = zone_mid
-                                if (zone_mid - entry) > 0.10 * atr:
-                                    entry_policy = "limit_retest_only"
                         if extension_atr > policy.market_entry_max_extension_atr:
                             if causal_zone is None:
                                 rejected.append(

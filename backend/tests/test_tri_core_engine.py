@@ -999,3 +999,34 @@ def test_session_judas_sweep_upgrades_moderate_cvd_sweep_reversal_to_grade_s():
     assert setup.grade == "S"
     assert any("Session Sweep (Judas/AMD)" in item for item in setup.evidence)
 
+
+def test_fresh_sweep_reversal_remains_market_eligible_with_causal_zone_attached():
+    signal = _signal()
+    signal.liquidity_sweep["breach_start_index"] = 18
+    signal.order_blocks = [
+        Zone(
+            kind="ob",
+            direction="bullish",
+            top=100.2,
+            bottom=98.8,
+            index=18,
+            confirmed_index=19,
+            source="swing",
+        )
+    ]
+    setup = TriCoreSetupEngine.evaluate(signal, _frame())
+    assert setup.actionable is True
+    assert setup.entry_policy == "market_eligible"
+    assert setup.order_type == "market"
+    assert setup.limit_zone_id != ""
+
+
+def test_counter_trend_long_rejected_in_volatile_bearish_regime():
+    signal = _signal()
+    signal.market_regime = {"regime": "volatile", "direction": "bearish"}
+    signal.intraday_bias = "neutral"
+    setup = TriCoreSetupEngine.evaluate(signal, _frame())
+    assert not setup.actionable
+    assert any("Counter-trend LONG rejected: Market regime is volatile bearish" in r for r in setup.rejection_reasons)
+
+

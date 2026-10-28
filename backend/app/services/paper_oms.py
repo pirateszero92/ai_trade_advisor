@@ -999,6 +999,7 @@ class PaperOMS:
                     active_entry.cancelled_at = now
                     active_entry.completed_at = now
                     active_entry.updated_at = now
+                    active_entry.remaining_quantity = ZERO
                     active_entry.close_reason = "Remaining entry quantity cancelled before reduce"
                     active_entry.version += 1
 
@@ -1537,6 +1538,7 @@ class PaperOMS:
                                     active_entry.cancelled_at = now_entry
                                     active_entry.completed_at = now_entry
                                     active_entry.updated_at = now_entry
+                                    active_entry.remaining_quantity = ZERO
                                     active_entry.close_reason = "Unfilled entry cancelled upon reaching Take Profit 1"
                                     active_entry.version += 1
 
@@ -1615,6 +1617,7 @@ class PaperOMS:
                         active_entry.cancelled_at = _utcnow()
                         active_entry.completed_at = active_entry.cancelled_at
                         active_entry.updated_at = active_entry.cancelled_at
+                        active_entry.remaining_quantity = ZERO
                         active_entry.close_reason = "Protective exit cancelled remaining entry quantity"
                         active_entry.version += 1
                     exit_order = PaperOMSOrder(
@@ -1744,7 +1747,7 @@ class PaperOMS:
 
             payload_min_rr = payload.get("minimum_executable_rr")
             min_rr = _decimal(payload_min_rr) if payload_min_rr else Decimal("1.5")
-            net_floor = max(Decimal("0.90"), min_rr * Decimal("0.65"))
+            net_floor = max(Decimal("0.85"), min_rr * Decimal("0.55"))
 
             # Economic viability & structural validity check:
             # Pre-trade ExecutionRevalidator already approved this limit order.
