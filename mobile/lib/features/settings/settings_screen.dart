@@ -3138,6 +3138,34 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                       },
                     ),
                   ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _modeButton(
+                      label: 'Grade B+\n(Include Swings)',
+                      icon: Icons.bolt,
+                      selected: settings.autoTradeMinGrade == 'B',
+                      color: const Color(0xFF64B5F6),
+                      onTap: () async {
+                        ref
+                            .read(settingsProvider.notifier)
+                            .save(settings.copyWith(autoTradeMinGrade: 'B'));
+                        try {
+                          await AppApi.dio.post(
+                              AppApi.url('/api/v1/settings/runtime'),
+                              data: {'auto_trade_min_grade': 'B'});
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                backgroundColor: AppColors.bearish,
+                                content: Text('บันทึกเกรดไม่สำเร็จ: $e'),
+                              ),
+                            );
+                          }
+                        }
+                      },
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 12),
