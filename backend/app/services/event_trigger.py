@@ -1238,9 +1238,10 @@ class MarketMonitor:
             order_type = "limit"
             entry_policy = "limit_retest_only"
 
-        exec_entry = rules.round_price(raw_entry)
-        exec_sl = rules.round_price(raw_sl)
-        exec_tp = rules.round_price(raw_tp)
+        is_long = direction == "long"
+        exec_entry = rules.price(raw_entry, upward=(is_long if order_type == "market" else not is_long))
+        exec_sl = rules.price(raw_sl, upward=(not is_long))
+        exec_tp = rules.price(raw_tp, upward=(not is_long))
         exec_rr = round(abs(exec_tp - exec_entry) / max(abs(exec_entry - exec_sl), 1e-6), 2)
         if exec_rr < 1.15:
             logger.info(
@@ -1440,7 +1441,7 @@ class MarketMonitor:
         management_policy = "tp1_1r_50pct_be_then_trail"
         exec_risk = abs(exec_entry - exec_sl)
         one_r_target = (exec_entry + exec_risk) if direction == "long" else (exec_entry - exec_risk)
-        take_profit_1: float | None = rules.round_price(one_r_target)
+        take_profit_1: float | None = rules.price(one_r_target, upward=(direction != "long"))
 
         if setup_type == "range_boundary_ping_pong" and canonical_analysis is not None:
             equilibrium = float(getattr(canonical_analysis.signal, "equilibrium", 0.0) or 0.0)
@@ -1463,7 +1464,7 @@ class MarketMonitor:
                 ) else None
             )
             if cand_tp1 is not None and math.isfinite(cand_tp1):
-                take_profit_1 = rules.round_price(cand_tp1)
+                take_profit_1 = rules.price(cand_tp1, upward=(direction != "long"))
                 management_policy = "local_obstacle_tp1_50_be_macro_tp2"
 
         limit_valid_until = ""

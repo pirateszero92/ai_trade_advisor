@@ -32,6 +32,9 @@ class InstrumentRules:
         rounded = self._ceil(value, self.price_tick) if upward else self._floor(value, self.price_tick)
         return round(rounded, max(0, int(round(-math.log10(self.price_tick))) + 2))
 
+    def round_price(self, value: float, *, upward: bool = False) -> float:
+        return self.price(value, upward=upward)
+
 
 class InstrumentRulesService:
     def __init__(self) -> None:
