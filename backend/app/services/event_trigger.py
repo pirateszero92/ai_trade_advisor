@@ -1362,7 +1362,7 @@ class MarketMonitor:
             active_positions=active_positions,
             execution_cost_per_unit=execution_cost_per_unit,
             risk_per_trade_pct=calculated_risk_pct,
-            minimum_rr=0.5,
+            minimum_rr=1.2,
             max_stop_distance_pct=20.0,
             min_stop_distance_pct=0.05,
             atr_pct=None,

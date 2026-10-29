@@ -368,19 +368,14 @@ class RiskEngine:
                 and p.get("status") in ("open", "pending")
                 and (not signal.direction or p.get("direction") == signal.direction)
             ]
-            if len(same_cluster_pos) >= self.MAX_CLUSTER_POSITIONS:
+            max_cluster_allowed = max(self.MAX_CLUSTER_POSITIONS, eff_max_open_positions)
+            if len(same_cluster_pos) >= max_cluster_allowed:
                 assessment.cluster_exposure_ok = False
                 assessment.approved = False
                 assessment.rejection_reason = (
-                    f"Cluster exposure limit reached (max {self.MAX_CLUSTER_POSITIONS} positions in '{cluster}' cluster)"
+                    f"Cluster exposure limit reached (max {max_cluster_allowed} positions in '{cluster}' cluster)"
                 )
                 return assessment
-            elif len(same_cluster_pos) == 1:
-                # 2nd position in same cluster: scale risk down by 50%
-                cluster_multiplier = 0.50
-                assessment.warnings.append(
-                    f"Cluster concentration: scaling 2nd position in '{cluster}' by 50%"
-                )
         assessment.cluster_risk_multiplier = cluster_multiplier
 
         # --- 4. Entry / SL validity ---
@@ -488,8 +483,8 @@ class RiskEngine:
         assessment.risk_reward = assessment.executable_rr
         assessment.execution_cost_per_unit = round(execution_cost_per_unit, 10)
         if minimum_rr is not None:
-            if not math.isfinite(float(minimum_rr)) or not 1 <= float(minimum_rr) <= 20:
-                assessment.rejection_reason = "Minimum R:R must be between 1 and 20"
+            if not math.isfinite(float(minimum_rr)) or not 0.5 <= float(minimum_rr) <= 20:
+                assessment.rejection_reason = "Minimum R:R must be between 0.5 and 20"
                 return assessment
         effective_min_rr = (
             float(minimum_rr) if minimum_rr is not None else self.MIN_RR
