@@ -1238,6 +1238,10 @@ class MarketMonitor:
             order_type = "limit"
             entry_policy = "limit_retest_only"
 
+        if abs(raw_entry - raw_sl) < raw_entry * 0.0035:
+            min_sl_dist = raw_entry * 0.0035
+            raw_sl = (raw_entry - min_sl_dist) if direction == "long" else (raw_entry + min_sl_dist)
+
         is_long = direction == "long"
         exec_entry = rules.price(raw_entry, upward=(is_long if order_type == "market" else not is_long))
         exec_sl = rules.price(raw_sl, upward=(not is_long))
