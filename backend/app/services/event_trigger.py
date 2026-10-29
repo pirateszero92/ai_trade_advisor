@@ -29,10 +29,6 @@ from app.services.candidate_lifecycle import (
 )
 from app.services.decision_trace import decision_trace
 from app.services.execution_analysis import execution_analyses
-from app.services.execution_revalidator import (
-    ExecutionIntent,
-    execution_revalidator,
-)
 from app.services.instrument_rules import instrument_rules
 from app.services.lifecycle_state_store import lifecycle_state_store
 from app.services.observability import observability, risk_rejection_category
@@ -52,7 +48,6 @@ DEFAULT_WATCHLIST = [
 ]
 
 _ALERT_HISTORY: dict[str, float] = {}
-_AUTO_TRADE_HISTORY: dict[str, float] = {}
 _RUNTIME_CFG_CACHE: tuple[int, dict] = (0, {})
 
 
@@ -1262,7 +1257,7 @@ class MarketMonitor:
             return None
 
         reval_reason = "DIRECT_MARKET_READY" if order_type == "market" else "ANTI_CHASE_FVG_LIMIT_ARMED"
-        reval_intent = ExecutionIntent.MARKET_NOW.value if order_type == "market" else ExecutionIntent.PLACE_LIMIT.value
+        reval_intent = "market_now" if order_type == "market" else "place_limit"
         observability.inc(
             "ai_trade_execution_revalidations",
             outcome="passed",
@@ -1672,7 +1667,6 @@ class MarketMonitor:
                     new_state=CandidateState.OPEN,
                     reason_code=f"OMS_{(oms_status or 'FILLED').upper()}",
                 )
-            _AUTO_TRADE_HISTORY[history_key] = now_ts
             logger.info(f"🚀 [AUTO-PILOT EXECUTED] {direction.upper()} {qty} {symbol} @ {exec_entry} ({grade_label})")
             await broadcast({"type": "auto_trade_executed", "data": res})
             await self.notifier.send_signal_alert(

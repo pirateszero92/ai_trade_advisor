@@ -381,10 +381,6 @@ def _range_location_ok(
     return True, ""
 
 
-def _zone_overlaps(row: pd.Series, zone: Any) -> bool:
-    return float(row["low"]) <= float(zone.top) and float(row["high"]) >= float(zone.bottom)
-
-
 def _candle_tests_zone(row: pd.Series, zone: Any, side: str, atr: float = 0.0) -> tuple[bool, bool]:
     """Check if a candle retests a zone deeply enough (into the zone pocket/mid).
 
