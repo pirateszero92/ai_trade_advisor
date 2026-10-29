@@ -107,7 +107,7 @@ def validate_runtime_config(data: dict[str, Any]) -> dict[str, Any]:
     number("risk_per_trade", 0.01, 5.0)
     number("max_daily_loss", 0.01, 20.0)
     number("max_open_positions", 1, 100)
-    number("auto_trade_cooldown_seconds", 30, 3600)
+    number("auto_trade_cooldown_seconds", 0, 3600)
     number("auto_trade_limit_timeout_bars", 1, 20)
     number("btc_anchor_dump_threshold_pct", 0.2, 5.0)
     number("cluster_loss_cooldown_minutes", 5, 240)
@@ -120,7 +120,7 @@ def validate_runtime_config(data: dict[str, Any]) -> dict[str, Any]:
     if "auto_trade_min_grade" in clean and clean["auto_trade_min_grade"] not in {"S", "A", "B"}:
         raise ValueError("auto_trade_min_grade must be S, A or B")
     if "auto_trade_entry_type" in clean and clean["auto_trade_entry_type"] not in {
-        "momentum_market", "limit_pullback"
+        "momentum_market", "limit_pullback", "market"
     }:
         raise ValueError("auto_trade_entry_type is invalid")
     if "auto_trade_entry_policy" in clean and clean["auto_trade_entry_policy"] not in {

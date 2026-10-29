@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     paper_oms_slippage_bps: float = Field(default=2.0, ge=0.0, le=500.0)
     paper_oms_max_volume_participation: float = Field(default=0.01, gt=0.0, le=1.0)
     paper_oms_fallback_partial_fill_ratio: float = Field(default=0.35, gt=0.0, le=1.0)
-    paper_oms_auto_be_trigger_r: float = Field(default=1.5, ge=0.5, le=5.0)
+    paper_oms_auto_be_trigger_r: float = Field(default=1.0, ge=0.5, le=5.0)
     paper_oms_auto_be_buffer_r: float = Field(default=0.05, ge=0.0, le=0.5)
     paper_oms_trailing_min_step_r: float = Field(default=0.05, ge=0.01, le=1.0)
     paper_oms_tp1_enabled: bool = Field(default=True)
@@ -103,11 +103,11 @@ class Settings(BaseSettings):
     sqz_risk_scaling_enabled: bool = False
     max_daily_loss: float = 3.0
     max_open_positions: int = 5
-    btc_anchor_filter_enabled: bool = True
+    btc_anchor_filter_enabled: bool = False
     btc_anchor_dump_threshold_pct: float = Field(default=1.0, ge=0.2, le=5.0)
-    cluster_loss_cooldown_enabled: bool = True
+    cluster_loss_cooldown_enabled: bool = False
     cluster_loss_cooldown_minutes: int = Field(default=30, ge=5, le=240)
-    loss_streak_halt_enabled: bool = True
+    loss_streak_halt_enabled: bool = False
     loss_streak_halt_hours: int = Field(default=2, ge=1, le=24)
     binance_trading_mode: str = "futures"
 

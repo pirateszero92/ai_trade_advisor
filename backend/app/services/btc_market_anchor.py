@@ -87,8 +87,8 @@ class BTCMarketAnchor:
                 "reason": "not_altcoin",
             }
 
-        cfg_enabled = getattr(cfg, "btc_anchor_filter_enabled", True)
-        enabled = bool(cfg_enabled) and bool(runtime.get("btc_anchor_filter_enabled", True))
+        cfg_enabled = getattr(cfg, "btc_anchor_filter_enabled", False)
+        enabled = bool(cfg_enabled) and bool(runtime.get("btc_anchor_filter_enabled", False))
         if not enabled:
             return True, None, {
                 "status": "DISABLED",

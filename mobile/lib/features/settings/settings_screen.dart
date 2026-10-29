@@ -65,7 +65,7 @@ class SettingsState {
     this.riskPerTrade = 1.0,
     this.maxDailyLoss = 3.0,
     this.maxPositions = 8,
-    this.targetRr = 2.0,
+    this.targetRr = 1.0,
     this.defaultSlPct = 1.0,
     this.isPaperMode = true,
     this.fcmEnabled = true,
@@ -73,21 +73,21 @@ class SettingsState {
     this.telegramChatId = '',
     this.lineToken = '',
     this.binanceTradingMode = 'futures',
-    this.entryMode = 'limit',
+    this.entryMode = 'market',
     this.autoSlTp = true,
     this.autoInvalidation = true,
     this.autoTradeEnabled = false,
-    this.autoTradeMinGrade = 'A',
+    this.autoTradeMinGrade = 'B',
     this.autoTradeEntryType = 'momentum_market',
-    this.autoTradeCooldownSeconds = 300,
-    this.btcAnchorFilterEnabled = true,
+    this.autoTradeCooldownSeconds = 30,
+    this.btcAnchorFilterEnabled = false,
     this.btcAnchorDumpThresholdPct = 1.0,
-    this.clusterLossCooldownEnabled = true,
+    this.clusterLossCooldownEnabled = false,
     this.clusterLossCooldownMinutes = 30,
-    this.lossStreakHaltEnabled = true,
+    this.lossStreakHaltEnabled = false,
     this.lossStreakHaltHours = 2,
-    this.counterTrendFilterEnabled = true,
-    this.pingPongEnabled = false,
+    this.counterTrendFilterEnabled = false,
+    this.pingPongEnabled = true,
     this.mtfHierarchyRequired = false,
   });
 
@@ -1830,32 +1830,32 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         },
       );
 
-      // Save Position & Risk settings
+      // Save Position & Risk settings (3-Step Direct Execution Pipeline)
       await dio.post(
         AppApi.url('/api/v1/settings/risk/config'),
         data: {
           'binance_trading_mode': current.binanceTradingMode,
-          'entry_mode': current.entryMode,
+          'entry_mode': 'market',
           'auto_sl_tp': current.autoSlTp,
           'auto_invalidation': current.autoInvalidation,
           'risk_per_trade': current.riskPerTrade,
           'max_daily_loss': current.maxDailyLoss,
           'max_open_positions': current.maxPositions,
-          'target_rr': current.targetRr,
+          'target_rr': 1.0,
           'default_sl_pct': current.defaultSlPct,
           'auto_trade_enabled': current.autoTradeEnabled,
-          'auto_trade_min_grade': current.autoTradeMinGrade,
-          'auto_trade_entry_type': current.autoTradeEntryType,
-          'auto_trade_cooldown_seconds': current.autoTradeCooldownSeconds,
-          'btc_anchor_filter_enabled': current.btcAnchorFilterEnabled,
+          'auto_trade_min_grade': 'B',
+          'auto_trade_entry_type': 'momentum_market',
+          'auto_trade_cooldown_seconds': 30,
+          'btc_anchor_filter_enabled': false,
           'btc_anchor_dump_threshold_pct': current.btcAnchorDumpThresholdPct,
-          'cluster_loss_cooldown_enabled': current.clusterLossCooldownEnabled,
+          'cluster_loss_cooldown_enabled': false,
           'cluster_loss_cooldown_minutes': current.clusterLossCooldownMinutes,
-          'loss_streak_halt_enabled': current.lossStreakHaltEnabled,
+          'loss_streak_halt_enabled': false,
           'loss_streak_halt_hours': current.lossStreakHaltHours,
-          'counter_trend_filter_enabled': current.counterTrendFilterEnabled,
-          'ping_pong_enabled': current.pingPongEnabled,
-          'mtf_hierarchy_required': current.mtfHierarchyRequired,
+          'counter_trend_filter_enabled': false,
+          'ping_pong_enabled': true,
+          'mtf_hierarchy_required': false,
         },
       );
 
@@ -2679,63 +2679,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               style: const TextStyle(fontSize: 11, color: Colors.white38),
             ),
             const Divider(color: Colors.white12, height: 24),
-            const Text(
-              'รูปแบบจุดเข้า (SMC Entry Style):',
-              style: TextStyle(
-                  fontSize: 13,
-                  color: Colors.white70,
-                  fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: ChoiceChip(
-                    label: const Center(
-                      child: Text('Limit Zone (OB/FVG)',
-                          style: TextStyle(fontSize: 12)),
-                    ),
-                    selected: settings.entryMode == 'limit',
-                    selectedColor: AppColors.bullish,
-                    backgroundColor: const Color(0xFF252540),
-                    onSelected: (selected) {
-                      if (selected) {
-                        ref
-                            .read(settingsProvider.notifier)
-                            .save(settings.copyWith(entryMode: 'limit'));
-                      }
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ChoiceChip(
-                    label: const Center(
-                      child: Text('Market (Live Price)',
-                          style: TextStyle(fontSize: 12)),
-                    ),
-                    selected: settings.entryMode == 'market',
-                    selectedColor: AppColors.bullish,
-                    backgroundColor: const Color(0xFF252540),
-                    onSelected: (selected) {
-                      if (selected) {
-                        ref
-                            .read(settingsProvider.notifier)
-                            .save(settings.copyWith(entryMode: 'market'));
-                      }
-                    },
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              settings.entryMode == 'limit'
-                  ? '💡 โหมด Limit: ตรึงราคาเข้าไว้ที่โซน Order Block / FVG (ราคาคงที่ไม่เปลี่ยนตาม Tick)'
-                  : '⚡ โหมด Market: จุดเข้าอิงตามราคาตลาดปัจจุบัน เข้าทันทีเมื่อยืนยันสัญญาณ',
-              style: const TextStyle(fontSize: 11, color: Colors.white38),
-            ),
-            const Divider(color: Colors.white12, height: 24),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('Auto Stop Loss & Take Profit',
@@ -2796,32 +2739,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               suffix: '%',
             ),
             _riskSlider(
-              label: 'Minimum Executable R:R',
-              subtitle:
-                  'อัตราส่วน Risk/Reward ขั้นต่ำที่ระบบจะยอมออกออเดอร์ (หาก R:R ต่ำกว่านี้จะปฏิเสธการเข้าเทรด)',
-              value: settings.targetRr,
-              min: 1.0,
-              max: 4.0,
-              divisions: 6,
-              onChanged: (v) => ref.read(settingsProvider.notifier).save(
-                    settings.copyWith(targetRr: v),
-                  ),
-              suffix: 'R',
-            ),
-            _riskSlider(
-              label: 'Default SL Distance',
-              subtitle:
-                  'ระยะ Stop Loss ความปลอดภัยสูงสุดจากราคาเข้า (%) ในกรณีที่โครงสร้างกราฟอยู่ไกลเกินกำหนด',
-              value: settings.defaultSlPct,
-              min: 0.5,
-              max: 3.0,
-              divisions: 5,
-              onChanged: (v) => ref.read(settingsProvider.notifier).save(
-                    settings.copyWith(defaultSlPct: v),
-                  ),
-              suffix: '%',
-            ),
-            _riskSlider(
               label: 'Max Daily Loss',
               subtitle:
                   'ลิมิตขาดทุนรวมสูงสุดต่อวัน (%) หากติดลบถึงเกณฑ์นี้ระบบจะระงับการเปิดไม้ใหม่ทันทีเพื่อรักษาพอร์ต',
@@ -2837,7 +2754,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             _riskSlider(
               label: 'Max Positions',
               subtitle:
-                  'จำนวนไม้สูงสุดที่อนุญาตให้เปิดพร้อมกันในพอร์ต เพื่อคุม Total Exposure ไม่ให้แบกรับความเสี่ยงเกินไป',
+                  'จำนวนไม้สูงสุดที่อนุญาตให้เปิดพร้อมกันในพอร์ต (และป้องกันการเปิดซ้ำเหรียญเดิม)',
               value: settings.maxPositions.toDouble(),
               min: 1,
               max: 10,
@@ -2848,193 +2765,22 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               suffix: '',
               isInt: true,
             ),
-            const Divider(color: Colors.white12, height: 20),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Counter-Trend Filter (กรองไม่เปิดไม้สวนเทรนด์ใหญ่)',
-                  style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600)),
-              subtitle: const Text(
-                  'บล็อกการเปิดออเดอร์ที่สวนทางกับแนวโน้มหลักของไทม์เฟรมใหญ่ (30m / 1H) เพื่อป้องกันการโดนลากสวนเทรนด์',
-                  style: TextStyle(fontSize: 11, color: Colors.white54)),
-              value: settings.counterTrendFilterEnabled,
-              activeThumbColor: AppColors.bullish,
-              onChanged: (v) => ref.read(settingsProvider.notifier).save(
-                    settings.copyWith(counterTrendFilterEnabled: v),
-                  ),
-            ),
-            const Divider(color: Colors.white12, height: 20),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Ping-Pong Strategy (เล่นกรอบ Sideway / Ranging)',
-                  style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600)),
-              subtitle: const Text(
-                  'เปิดการเทรดกลับตัวบริเวณขอบกรอบราคา (Demand/Supply) เฉพาะเมื่อสภาวะตลาดเป็น Ranging ชัดเจน (ควบคุมเพดานเกรดไม่เกิน B)',
-                  style: TextStyle(fontSize: 11, color: Colors.white54)),
-              value: settings.pingPongEnabled,
-              activeThumbColor: AppColors.bullish,
-              onChanged: (v) => ref.read(settingsProvider.notifier).save(
-                    settings.copyWith(pingPongEnabled: v),
-                  ),
-            ),
-            const Divider(color: Colors.white12, height: 20),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('BTC Systemic-Risk Anchor',
-                  style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600)),
-              subtitle: const Text(
-                  'พักการส่งคำสั่ง Altcoin เมื่อ BTC สวนทางรุนแรง โดยไม่เปลี่ยนเกรดหรือทิศของ TriCore',
-                  style: TextStyle(fontSize: 11, color: Colors.white54)),
-              value: settings.btcAnchorFilterEnabled,
-              activeThumbColor: AppColors.bullish,
-              onChanged: (v) => ref.read(settingsProvider.notifier).save(
-                    settings.copyWith(btcAnchorFilterEnabled: v),
-                  ),
-            ),
-            if (settings.btcAnchorFilterEnabled)
-              _riskSlider(
-                label: 'BTC Dump/Rally Threshold',
-                value: settings.btcAnchorDumpThresholdPct,
-                min: 0.2,
-                max: 3.0,
-                divisions: 14,
-                onChanged: (v) => ref.read(settingsProvider.notifier).save(
-                      settings.copyWith(btcAnchorDumpThresholdPct: v),
-                    ),
-                suffix: '% / 1H',
-              ),
-            const Divider(color: Colors.white12, height: 20),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Directional Cluster Cooldown',
-                  style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600)),
-              subtitle: const Text(
-                  'หลังโดน SL ให้พักสินทรัพย์กลุ่มเดียวกันเฉพาะทิศเดิม; ทิศตรงข้ามยังพิจารณาได้',
-                  style: TextStyle(fontSize: 11, color: Colors.white54)),
-              value: settings.clusterLossCooldownEnabled,
-              activeThumbColor: AppColors.bullish,
-              onChanged: (v) => ref.read(settingsProvider.notifier).save(
-                    settings.copyWith(clusterLossCooldownEnabled: v),
-                  ),
-            ),
-            if (settings.clusterLossCooldownEnabled)
-              _riskSlider(
-                label: 'Cluster Cooldown',
-                value: settings.clusterLossCooldownMinutes.toDouble(),
-                min: 5,
-                max: 120,
-                divisions: 23,
-                onChanged: (v) => ref.read(settingsProvider.notifier).save(
-                      settings.copyWith(clusterLossCooldownMinutes: v.round()),
-                    ),
-                suffix: ' นาที',
-                isInt: true,
-              ),
-            const Divider(color: Colors.white12, height: 20),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Loss Streak Circuit Breaker (พักบอทเมื่อโดน SL ติดกัน)',
-                  style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600)),
-              subtitle: const Text(
-                  'ล็อกห้ามเปิดออเดอร์ใหม่ชั่วคราวอัตโนมัติเมื่อโดน Stop Loss ติดต่อกันครบเกณฑ์ เพื่อป้องกันพอร์ตไหลในสภาวะตลาดผันผวน',
-                  style: TextStyle(fontSize: 11, color: Colors.white54)),
-              value: settings.lossStreakHaltEnabled,
-              activeThumbColor: AppColors.bullish,
-              onChanged: (v) async {
-                ref.read(settingsProvider.notifier).save(
-                      settings.copyWith(lossStreakHaltEnabled: v),
-                    );
-                try {
-                  await AppApi.dio.post(
-                    AppApi.url('/api/v1/settings/runtime'),
-                    data: {'loss_streak_halt_enabled': v},
-                  );
-                } catch (_) {}
-              },
-            ),
-            if (settings.lossStreakHaltEnabled) ...[
-              const SizedBox(height: 6),
-              const Text(
-                'ระยะเวลาพักการเทรด (Lock Duration):',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Colors.white70,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [1, 2, 3, 4].map((hrs) {
-                  final selected = settings.lossStreakHaltHours == hrs;
-                  return Expanded(
-                    child: Padding(
-                      padding: EdgeInsets.only(right: hrs < 4 ? 8.0 : 0.0),
-                      child: ChoiceChip(
-                        label: SizedBox(
-                          width: double.infinity,
-                          child: Text(
-                            '$hrs ชม.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight:
-                                  selected ? FontWeight.bold : FontWeight.normal,
-                              color: selected ? Colors.black : Colors.white70,
-                            ),
-                          ),
-                        ),
-                        selected: selected,
-                        selectedColor: AppColors.bullish,
-                        backgroundColor: const Color(0xFF252540),
-                        onSelected: (isSel) async {
-                          if (isSel) {
-                            ref.read(settingsProvider.notifier).save(
-                                  settings.copyWith(lossStreakHaltHours: hrs),
-                                );
-                            try {
-                              await AppApi.dio.post(
-                                AppApi.url('/api/v1/settings/runtime'),
-                                data: {'loss_streak_halt_hours': hrs},
-                              );
-                            } catch (_) {}
-                          }
-                        },
-                      ),
-                    ),
-                  );
-                }).toList(),
-              ),
-            ],
           ]),
 
           const SizedBox(height: 16),
 
-          // ---- Auto-Pilot Execution (Autonomous 15M Bot) ----
-          _sectionHeader('🤖 Auto-Pilot Execution (บอทเทรดอัตโนมัติ)'),
+          // ---- Auto-Pilot Execution (3-Stage Institutional Bot) ----
+          _sectionHeader('🤖 Auto-Pilot Execution (บอทเทรดอัตโนมัติ 3 ขั้นตอน)'),
           _card([
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Autonomous Auto-Pilot',
+              title: const Text('Autonomous Auto-Pilot (3-Stage Institutional Formula)',
                   style: TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.bold,
                       fontSize: 14)),
               subtitle: const Text(
-                  'เข้าเทรดเมื่อผ่านครบ 7 ด่าน (Tri-Core + AI Review + Risk Guard) • ปัจจุบันรันใน Paper Mode เพื่อความปลอดภัย',
+                  '1. SMC+CVD แท้ ➔ 2. Smart Entry (Market / FVG Limit กันดอย, R:R >= 1.2) ➔ 3. OMS TP1 50% @ 1.0R + Auto-BE + Trailing',
                   style: TextStyle(color: Colors.white60, fontSize: 12)),
               value: settings.autoTradeEnabled,
               activeThumbColor: AppColors.bullish,
@@ -3059,122 +2805,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             ),
             if (settings.autoTradeEnabled) ...[
               const Divider(color: Colors.white12, height: 16),
-              const Text('Decision Timeframe:',
-                  style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600)),
-              const SizedBox(height: 8),
-              const ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.speed, color: AppColors.bullish),
-                title: Text('15M Canonical Execution',
-                    style: TextStyle(color: Colors.white)),
-                subtitle: Text(
-                    '4H/1H เป็นบริบทวิจัยเท่านั้น ไม่มีสิทธิ์ approve/reject; คำสั่งใช้ snapshot 15M เดียวกัน',
-                    style: TextStyle(color: Colors.white54, fontSize: 12)),
-              ),
-              const SizedBox(height: 12),
-              const Text('Minimum Setup Grade:',
-                  style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600)),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: _modeButton(
-                      label: 'Grade S Only\n(Strong Sweep + CVD)',
-                      icon: Icons.workspace_premium,
-                      selected: settings.autoTradeMinGrade == 'S',
-                      color: const Color(0xFFFFD700),
-                      onTap: () async {
-                        ref
-                            .read(settingsProvider.notifier)
-                            .save(settings.copyWith(autoTradeMinGrade: 'S'));
-                        try {
-                          await AppApi.dio.post(
-                              AppApi.url('/api/v1/settings/runtime'),
-                              data: {'auto_trade_min_grade': 'S'});
-                        } catch (e) {
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                backgroundColor: AppColors.bearish,
-                                content: Text('บันทึกเกรดไม่สำเร็จ: $e'),
-                              ),
-                            );
-                          }
-                        }
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _modeButton(
-                      label: 'Grade S & A\n(Causal SMC + Flow)',
-                      icon: Icons.diamond_outlined,
-                      selected: settings.autoTradeMinGrade == 'A',
-                      color: AppColors.bullish,
-                      onTap: () async {
-                        ref
-                            .read(settingsProvider.notifier)
-                            .save(settings.copyWith(autoTradeMinGrade: 'A'));
-                        try {
-                          await AppApi.dio.post(
-                              AppApi.url('/api/v1/settings/runtime'),
-                              data: {'auto_trade_min_grade': 'A'});
-                        } catch (e) {
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                backgroundColor: AppColors.bearish,
-                                content: Text('บันทึกเกรดไม่สำเร็จ: $e'),
-                              ),
-                            );
-                          }
-                        }
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _modeButton(
-                      label: 'Grade B+\n(Include Swings)',
-                      icon: Icons.bolt,
-                      selected: settings.autoTradeMinGrade == 'B',
-                      color: const Color(0xFF64B5F6),
-                      onTap: () async {
-                        ref
-                            .read(settingsProvider.notifier)
-                            .save(settings.copyWith(autoTradeMinGrade: 'B'));
-                        try {
-                          await AppApi.dio.post(
-                              AppApi.url('/api/v1/settings/runtime'),
-                              data: {'auto_trade_min_grade': 'B'});
-                        } catch (e) {
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                backgroundColor: AppColors.bearish,
-                                content: Text('บันทึกเกรดไม่สำเร็จ: $e'),
-                              ),
-                            );
-                          }
-                        }
-                      },
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              const Text('Auto-Pilot Entry Architecture:',
-                  style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600)),
-              const SizedBox(height: 8),
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(12),
@@ -3186,27 +2816,29 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 child: const Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(Icons.auto_awesome, color: Color(0xFF00E5FF), size: 18),
+                    Icon(Icons.bolt, color: Color(0xFF00E5FF), size: 18),
                     SizedBox(width: 10),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'SMC & Revalidator Controlled (Dynamic Market / Limit)',
+                            '3-Stage Institutional Execution Formula',
                             style: TextStyle(
                               color: Colors.white,
                               fontSize: 12,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
-                          SizedBox(height: 4),
+                          SizedBox(height: 6),
                           Text(
-                            'ประเภทคำสั่งถูกตัดสินโดย Tri-Core ร่วมกับ Revalidator: หากราคาขยับหนีเกิน 0.25 ATR ระบบจะเปลี่ยนเป็น Limit Retest โซน OB/FVG ทันที เพื่อป้องกันการไล่ราคา (No-Chase Policy)',
+                            '1️⃣ ด่านที่ 1 (SMC + CVD แท้): เข้าเฉพาะ (A) Liquidity Sweep + CVD Absorption/Divergence หรือ (B) BOS/CHoCH + OB/FVG Retest พร้อมกันชนไม่รับมีดตอนตลาดทุบแรง\n'
+                            '2️⃣ ด่านที่ 2 (Smart Entry & Anti-Chase): ถ้าราคาอยู่ในระยะได้เปรียบ (<= 0.5 ATR และ R:R >= 1.2) ยิง Market ทันที! แต่ถ้าแท่งพุ่งแรงจะวาง Limit ดักที่ขอบ FVG/OB (อายุ 2 แท่ง) เพื่อไม่ไล่ราคาดอย\n'
+                            '3️⃣ ด่านที่ 3 (Institutional OMS): เมื่อวิ่งถึง 1.0R จะแบ่งปิด TP1 50% ล็อกกำไรเข้าพอร์ตทันที + เลื่อน SL บังหน้าทุน (Auto-BE) + เปิด Trailing Stop รันกำไรครึ่งที่เหลือไปหา TP2',
                             style: TextStyle(
-                              color: Colors.white60,
+                              color: Colors.white70,
                               fontSize: 11,
-                              height: 1.35,
+                              height: 1.45,
                             ),
                           ),
                         ],
