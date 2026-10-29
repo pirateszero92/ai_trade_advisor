@@ -1860,11 +1860,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'auto_trade_cooldown_seconds': 30,
           'btc_anchor_filter_enabled': false,
           'btc_anchor_dump_threshold_pct': current.btcAnchorDumpThresholdPct,
-          'cluster_loss_cooldown_enabled': false,
+          'cluster_loss_cooldown_enabled': current.clusterLossCooldownEnabled,
           'cluster_loss_cooldown_minutes': current.clusterLossCooldownMinutes,
-          'loss_streak_halt_enabled': false,
+          'loss_streak_halt_enabled': current.lossStreakHaltEnabled,
           'loss_streak_halt_hours': current.lossStreakHaltHours,
-          'counter_trend_filter_enabled': false,
+          'counter_trend_filter_enabled': current.counterTrendFilterEnabled,
           'ping_pong_enabled': true,
           'mtf_hierarchy_required': false,
         },
@@ -2789,6 +2789,52 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                   ),
               suffix: 'x',
               isInt: true,
+            ),
+            const Divider(color: Colors.white12, height: 16),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Cluster Loss Cooldown (พักเทรดกลุ่มเหรียญที่แพ้)',
+                  style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600)),
+              subtitle: const Text(
+                  'เมื่อเหรียญในกลุ่ม (เช่น Crypto L1) โดน SL จะหยุดเปิดไม้ในกลุ่มนั้นชั่วคราว 30 นาที ป้องกันการแพ้ซ้ำซ้อนพร้อมกัน',
+                  style: TextStyle(fontSize: 11, color: Colors.white54)),
+              value: settings.clusterLossCooldownEnabled,
+              activeThumbColor: AppColors.bullish,
+              onChanged: (v) async {
+                ref
+                    .read(settingsProvider.notifier)
+                    .save(settings.copyWith(clusterLossCooldownEnabled: v));
+                try {
+                  await AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'),
+                      data: {'cluster_loss_cooldown_enabled': v});
+                } catch (_) {}
+              },
+            ),
+            const Divider(color: Colors.white12, height: 16),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Counter-Trend Filter (ห้ามเปิดไม้สวนเทรนด์หลัก)',
+                  style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600)),
+              subtitle: const Text(
+                  'กรองห้ามเปิดไม้สวนทางโมเมนตัมภาพใหญ่ H1/4H (เช่น ป้องกันการดัก SHORT ขณะตลาดกำลังกระทิง)',
+                  style: TextStyle(fontSize: 11, color: Colors.white54)),
+              value: settings.counterTrendFilterEnabled,
+              activeThumbColor: AppColors.bullish,
+              onChanged: (v) async {
+                ref
+                    .read(settingsProvider.notifier)
+                    .save(settings.copyWith(counterTrendFilterEnabled: v));
+                try {
+                  await AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'),
+                      data: {'counter_trend_filter_enabled': v});
+                } catch (_) {}
+              },
             ),
           ]),
 

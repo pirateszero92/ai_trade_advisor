@@ -674,7 +674,9 @@ def _candidate(*, side: str, setup_type: str, entry: float, stop: float,
                policy: TriCorePolicy | None = None) -> TriCoreSetup:
     policy = policy or TriCorePolicy()
     risk = abs(entry - stop)
-    min_risk = entry * 0.0035
+    # Give sweep_reversal setups sufficient breathing room (>= 0.65% from entry)
+    # to avoid premature noise/spread stop-outs on 15M bars, while maintaining 0.35% for retests.
+    min_risk = entry * (0.0065 if setup_type == "sweep_reversal" else 0.0035)
     if risk < min_risk:
         stop = (entry - min_risk) if side == "long" else (entry + min_risk)
         risk = abs(entry - stop)
@@ -894,6 +896,13 @@ class TriCoreSetupEngine:
                     if flow_ok:
                         saw_bound_flow = True
                         extreme = float(sweep.get("extreme", 0.0) or 0.0)
+                        # Rejection Confirmation: If candle closed beyond the sweep extreme, it's a breakout/continuation, not a reversal.
+                        if side == "short" and entry >= extreme:
+                            rejected.append(f"Sweep invalidated: price {entry:.4f} closed above sweep extreme {extreme:.4f} (breakout, not reversal)")
+                            continue
+                        if side == "long" and entry <= extreme:
+                            rejected.append(f"Sweep invalidated: price {entry:.4f} closed below sweep extreme {extreme:.4f} (breakdown, not reversal)")
+                            continue
                         stop = extreme - buffer if side == "long" else extreme + buffer
                         event_id = str(sweep.get("event_id") or (
                             f"sweep:{side}:{sweep.get('level_id', '')}:"
