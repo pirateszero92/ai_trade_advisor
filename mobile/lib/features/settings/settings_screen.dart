@@ -2750,6 +2750,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               suffix: '%',
             ),
             _riskSlider(
+              label: 'Min Stop Loss (ระยะ SL ขั้นต่ำ)',
+              subtitle:
+                  'ระยะห่างขั้นต่ำของ Stop Loss จากจุดเข้า (%) เพื่อป้องกันไม่ให้ SL แคบเกินไปจนโดนไส้เทียนสะบัดกิน (แนะนำ 0.8% - 1.2%)',
+              value: settings.defaultSlPct,
+              min: 0.5,
+              max: 3.0,
+              divisions: 25,
+              onChanged: (v) => ref.read(settingsProvider.notifier).save(
+                    settings.copyWith(defaultSlPct: v),
+                  ),
+              suffix: '%',
+            ),
+            _riskSlider(
               label: 'Max Daily Loss',
               subtitle:
                   'ลิมิตขาดทุนรวมสูงสุดต่อวัน (%) หากติดลบถึงเกณฑ์นี้ระบบจะระงับการเปิดไม้ใหม่ทันทีเพื่อรักษาพอร์ต',

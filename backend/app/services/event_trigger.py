@@ -1209,9 +1209,15 @@ class MarketMonitor:
         setup_order_type = str(setup.get("order_type", "market")).lower()
         setup_policy = str(setup.get("entry_policy", "market_eligible"))
 
-        orig_risk = abs(orig_entry - raw_sl) if raw_sl > 0 else (orig_entry * 0.005)
-        if orig_risk < orig_entry * 0.0035:
-            orig_risk = orig_entry * 0.0035
+        # User-configured minimum SL buffer from Settings (default 1.0%)
+        # Guarantees the trade has breathing room and cannot be placed too tight to avoid 1-2 min wick whipsaws.
+        configured_min_sl_ratio = float(r_cfg.get("default_sl_pct", 1.0) or 1.0) / 100.0
+        if configured_min_sl_ratio <= 0:
+            configured_min_sl_ratio = 0.010
+
+        orig_risk = abs(orig_entry - raw_sl) if raw_sl > 0 else (orig_entry * configured_min_sl_ratio)
+        if orig_risk < orig_entry * configured_min_sl_ratio:
+            orig_risk = orig_entry * configured_min_sl_ratio
             raw_sl = (orig_entry - orig_risk) if direction == "long" else (orig_entry + orig_risk)
 
         if direction == "long":
@@ -1238,8 +1244,8 @@ class MarketMonitor:
             order_type = "limit"
             entry_policy = "limit_retest_only"
 
-        if abs(raw_entry - raw_sl) < raw_entry * 0.0035:
-            min_sl_dist = raw_entry * 0.0035
+        if abs(raw_entry - raw_sl) < raw_entry * configured_min_sl_ratio:
+            min_sl_dist = raw_entry * configured_min_sl_ratio
             raw_sl = (raw_entry - min_sl_dist) if direction == "long" else (raw_entry + min_sl_dist)
 
         is_long = direction == "long"
