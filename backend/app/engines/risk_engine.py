@@ -495,11 +495,18 @@ class RiskEngine:
         assessment.minimum_executable_rr = round(effective_min_rr, 4)
         if calculated_rr < effective_min_rr:
             assessment.rr_ok = False
-            assessment.approved = False
-            assessment.rejection_reason = (
-                f"Executable R:R too low ({calculated_rr:.2f} < {effective_min_rr:.2f})"
+            # Only hard-reject when called standalone (no minimum_rr passed in).
+            # In the auto-pilot pipeline, ExecutionRevalidator is the R:R gate owner.
+            if minimum_rr is None:
+                assessment.approved = False
+                assessment.rejection_reason = (
+                    f"R:R too low ({calculated_rr:.2f} < {effective_min_rr})"
+                )
+                return assessment
+            assessment.warnings.append(
+                f"R:R {calculated_rr:.2f} below floor {effective_min_rr:.2f}"
+                " (already validated by ExecutionRevalidator)"
             )
-            return assessment
 
 
         # --- 6. Position sizing ---
