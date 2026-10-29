@@ -1345,7 +1345,9 @@ class MarketMonitor:
             stop_loss=exec_sl,
             take_profit=exec_tp,
         )
-        calculated_risk_pct = float(r_cfg.get("risk_per_trade", cfg.risk_per_trade))
+        calculated_risk_pct = float(
+            r_cfg.get("risk_per_trade", getattr(cfg, "max_risk_per_trade_pct", 2.0)) or 2.0
+        )
         if calculated_risk_pct <= 0:
             calculated_risk_pct = 1.0
 
