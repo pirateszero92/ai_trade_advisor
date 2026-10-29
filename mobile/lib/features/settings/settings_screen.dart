@@ -27,6 +27,7 @@ class SettingsState {
   final double riskPerTrade;
   final double maxDailyLoss;
   final int maxPositions;
+  final double maxLeverage;
   final bool isPaperMode;
   final bool fcmEnabled;
   final String telegramToken;
@@ -65,6 +66,7 @@ class SettingsState {
     this.riskPerTrade = 1.0,
     this.maxDailyLoss = 3.0,
     this.maxPositions = 8,
+    this.maxLeverage = 10.0,
     this.targetRr = 1.0,
     this.defaultSlPct = 1.0,
     this.isPaperMode = true,
@@ -104,6 +106,7 @@ class SettingsState {
     double? riskPerTrade,
     double? maxDailyLoss,
     int? maxPositions,
+    double? maxLeverage,
     double? targetRr,
     double? defaultSlPct,
     bool? isPaperMode,
@@ -142,6 +145,7 @@ class SettingsState {
       riskPerTrade: riskPerTrade ?? this.riskPerTrade,
       maxDailyLoss: maxDailyLoss ?? this.maxDailyLoss,
       maxPositions: maxPositions ?? this.maxPositions,
+      maxLeverage: maxLeverage ?? this.maxLeverage,
       targetRr: targetRr ?? this.targetRr,
       defaultSlPct: defaultSlPct ?? this.defaultSlPct,
       isPaperMode: isPaperMode ?? this.isPaperMode,
@@ -223,6 +227,7 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
       riskPerTrade: prefs.getDouble('risk_per_trade') ?? state.riskPerTrade,
       maxDailyLoss: prefs.getDouble('max_daily_loss') ?? state.maxDailyLoss,
       maxPositions: prefs.getInt('max_positions') ?? state.maxPositions,
+      maxLeverage: prefs.getDouble('max_leverage') ?? state.maxLeverage,
       targetRr: prefs.getDouble('target_rr') ?? state.targetRr,
       defaultSlPct: prefs.getDouble('default_sl_pct') ?? state.defaultSlPct,
       isPaperMode: !AppApi.hasActiveLiveSession,
@@ -290,6 +295,7 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     await prefs.setDouble('risk_per_trade', safeState.riskPerTrade);
     await prefs.setDouble('max_daily_loss', safeState.maxDailyLoss);
     await prefs.setInt('max_positions', safeState.maxPositions);
+    await prefs.setDouble('max_leverage', safeState.maxLeverage);
     await prefs.setDouble('target_rr', safeState.targetRr);
     await prefs.setDouble('default_sl_pct', safeState.defaultSlPct);
     await prefs.remove('is_paper_mode');
@@ -614,6 +620,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             (rData['max_daily_loss'] as num?)?.toDouble() ?? current.maxDailyLoss;
         final newMaxPositions =
             (rData['max_open_positions'] as num?)?.toInt() ?? current.maxPositions;
+        final newMaxLeverage =
+            (rData['max_leverage'] as num?)?.toDouble() ?? current.maxLeverage;
         final newBinanceTradingMode =
             rData['binance_trading_mode']?.toString() ?? current.binanceTradingMode;
         final newEntryMode =
@@ -663,6 +671,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           defaultSlPct: newDefaultSlPct,
           maxDailyLoss: newMaxDailyLoss,
           maxPositions: newMaxPositions,
+          maxLeverage: newMaxLeverage,
           binanceTradingMode: newBinanceTradingMode,
           entryMode: newEntryMode,
           autoSlTp: newAutoSlTp,
@@ -687,6 +696,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         await prefs.setDouble('default_sl_pct', newDefaultSlPct);
         await prefs.setDouble('max_daily_loss', newMaxDailyLoss);
         await prefs.setInt('max_positions', newMaxPositions);
+        await prefs.setDouble('max_leverage', newMaxLeverage);
         await prefs.setString('binance_trading_mode', newBinanceTradingMode);
         await prefs.setString('entry_mode', newEntryMode);
         await prefs.setBool('auto_sl_tp', newAutoSlTp);
@@ -1841,6 +1851,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'risk_per_trade': current.riskPerTrade,
           'max_daily_loss': current.maxDailyLoss,
           'max_open_positions': current.maxPositions,
+          'max_leverage': current.maxLeverage,
           'target_rr': 1.0,
           'default_sl_pct': current.defaultSlPct,
           'auto_trade_enabled': current.autoTradeEnabled,
@@ -2763,6 +2774,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     settings.copyWith(maxPositions: v.toInt()),
                   ),
               suffix: '',
+              isInt: true,
+            ),
+            _riskSlider(
+              label: 'Max Leverage (เพดานเลเวอเรจรวม)',
+              subtitle:
+                  'เพดานเลเวอเรจรวมพอร์ตสำหรับคำนวณ Notional และเฉลี่ยโควต้าต่อไม้ (เช่น 10x แบ่ง 4 ไม้ = ไม้ละไม่เกิน 2.5x)',
+              value: settings.maxLeverage,
+              min: 1.0,
+              max: 25.0,
+              divisions: 24,
+              onChanged: (v) => ref.read(settingsProvider.notifier).save(
+                    settings.copyWith(maxLeverage: v),
+                  ),
+              suffix: 'x',
               isInt: true,
             ),
           ]),

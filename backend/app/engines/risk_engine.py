@@ -537,7 +537,16 @@ class RiskEngine:
         risk_budget = account_balance * (risk_pct / 100)
         
         # Instrument-aware sizing with an aggregate portfolio leverage ceiling.
-        max_notional = account_balance * max_leverage
+        eff_leverage = float(max_leverage) if max_leverage is not None else 10.0
+        try:
+            from app.core.runtime_config import load_runtime_config
+            _rt_lev = load_runtime_config()
+            if "max_leverage" in _rt_lev and float(_rt_lev["max_leverage"]) > 0:
+                eff_leverage = float(_rt_lev["max_leverage"])
+        except Exception:
+            pass
+
+        max_notional = account_balance * eff_leverage
         assessment.current_gross_notional = round(current_gross_notional, 8)
         assessment.max_portfolio_notional = round(max_notional, 8)
         if current_gross_notional >= max_notional - 1e-9:
@@ -548,7 +557,14 @@ class RiskEngine:
             )
             return assessment
         remaining_portfolio_notional = max(max_notional - current_gross_notional, 0.0)
-        max_units = remaining_portfolio_notional / (signal.entry * contract_multiplier)
+
+        # Per-position quota cap: ensures no single position monopolizes the leverage ceiling,
+        # guaranteeing room for all max_open_positions (e.g. $10,000 / 4 = $2,500 cap per trade).
+        max_slots = max(1, eff_max_open_positions)
+        per_position_cap = max_notional / max_slots
+        max_position_notional = min(remaining_portfolio_notional, per_position_cap)
+        max_units = max_position_notional / (signal.entry * contract_multiplier)
+
         raw_size = risk_budget / (all_in_risk_dist * contract_multiplier)
         capped_size = min(raw_size, max_units)
         step_d = Decimal(str(quantity_step))

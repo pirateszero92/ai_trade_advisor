@@ -1355,6 +1355,9 @@ class MarketMonitor:
         if calculated_risk_pct <= 0:
             calculated_risk_pct = 1.0
 
+        configured_leverage = float(
+            r_cfg.get("max_leverage", getattr(cfg, "max_leverage", 10.0)) or 10.0
+        )
         risk_assessment = self.risk.evaluate(
             execution_signal,
             account_balance=equity,
@@ -1362,6 +1365,7 @@ class MarketMonitor:
             daily_pnl_pct=daily_pnl_pct,
             drawdown_pct=drawdown_pct,
             quantity_step=quantity_step,
+            max_leverage=configured_leverage,
             current_gross_notional=current_gross_notional,
             active_positions=active_positions,
             execution_cost_per_unit=execution_cost_per_unit,

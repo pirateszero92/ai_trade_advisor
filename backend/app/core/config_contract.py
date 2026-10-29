@@ -19,6 +19,7 @@ RUNTIME_OWNERSHIP: dict[str, str] = {
     "risk_per_trade": "risk",
     "max_daily_loss": "risk",
     "max_open_positions": "risk",
+    "max_leverage": "risk",
     "btc_anchor_filter_enabled": "risk",
     "btc_anchor_dump_threshold_pct": "risk",
     "cluster_loss_cooldown_enabled": "risk",
@@ -107,6 +108,7 @@ def validate_runtime_config(data: dict[str, Any]) -> dict[str, Any]:
     number("risk_per_trade", 0.01, 5.0)
     number("max_daily_loss", 0.01, 20.0)
     number("max_open_positions", 1, 100)
+    number("max_leverage", 1.0, 50.0)
     number("auto_trade_cooldown_seconds", 0, 3600)
     number("auto_trade_limit_timeout_bars", 1, 20)
     number("btc_anchor_dump_threshold_pct", 0.2, 5.0)

@@ -103,6 +103,7 @@ class Settings(BaseSettings):
     sqz_risk_scaling_enabled: bool = False
     max_daily_loss: float = 3.0
     max_open_positions: int = 5
+    max_leverage: float = Field(default=10.0, ge=1.0, le=50.0)
     btc_anchor_filter_enabled: bool = False
     btc_anchor_dump_threshold_pct: float = Field(default=1.0, ge=0.2, le=5.0)
     cluster_loss_cooldown_enabled: bool = False

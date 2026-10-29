@@ -1447,6 +1447,7 @@ class RiskConfigRequest(BaseModel):
     risk_per_trade: Optional[float] = Field(default=None, gt=0, le=5)
     max_daily_loss: Optional[float] = Field(default=None, gt=0, le=20)
     max_open_positions: Optional[int] = Field(default=None, ge=1, le=100)
+    max_leverage: Optional[float] = Field(default=None, ge=1.0, le=50.0)
     target_rr: Optional[float] = Field(default=None, ge=1, le=20)
     default_sl_pct: Optional[float] = Field(default=None, gt=0, le=20)
     auto_trade_enabled: Optional[bool] = None
@@ -1649,12 +1650,15 @@ async def update_risk_config(
         cfg.max_daily_loss = req.max_daily_loss
     if req.max_open_positions is not None:
         cfg.max_open_positions = req.max_open_positions
+    if req.max_leverage is not None:
+        cfg.max_leverage = req.max_leverage
 
     try:
         updates = {
             "risk_per_trade": cfg.default_risk_per_trade,
             "max_daily_loss": cfg.max_daily_loss,
             "max_open_positions": cfg.max_open_positions,
+            "max_leverage": getattr(cfg, "max_leverage", 10.0),
         }
         if req.entry_mode is not None:
             updates["entry_mode"] = req.entry_mode
@@ -1789,6 +1793,7 @@ class RuntimeSettingsUpdateRequest(BaseModel):
     binance_trading_mode: Optional[Literal["futures", "spot"]] = None
     auto_sl_tp: Optional[bool] = None
     auto_invalidation: Optional[bool] = None
+    max_leverage: Optional[float] = Field(default=None, ge=1.0, le=50.0)
     auto_trade_enabled: Optional[bool] = None
     auto_trade_min_grade: Optional[Literal["S", "A", "B"]] = None
     auto_trade_entry_type: Optional[Literal["momentum_market", "limit_pullback"]] = None
@@ -1822,6 +1827,8 @@ async def update_runtime_settings(
         updates["auto_sl_tp"] = req.auto_sl_tp
     if req.auto_invalidation is not None:
         updates["auto_invalidation"] = req.auto_invalidation
+    if req.max_leverage is not None:
+        updates["max_leverage"] = req.max_leverage
     if req.auto_trade_enabled is not None:
         updates["auto_trade_enabled"] = req.auto_trade_enabled
     if req.auto_trade_min_grade is not None:
