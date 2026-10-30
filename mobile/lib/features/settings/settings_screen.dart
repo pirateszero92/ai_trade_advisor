@@ -50,6 +50,8 @@ class SettingsState {
   final bool lossStreakHaltEnabled;
   final int lossStreakHaltHours;
   final bool counterTrendFilterEnabled;
+  final double minConfluence;
+  final bool multiStageTpEnabled;
   final bool pingPongEnabled;
   final bool mtfHierarchyRequired;
 
@@ -89,6 +91,8 @@ class SettingsState {
     this.lossStreakHaltEnabled = false,
     this.lossStreakHaltHours = 2,
     this.counterTrendFilterEnabled = false,
+    this.minConfluence = 65.0,
+    this.multiStageTpEnabled = true,
     this.pingPongEnabled = true,
     this.mtfHierarchyRequired = false,
   });
@@ -129,6 +133,8 @@ class SettingsState {
     bool? lossStreakHaltEnabled,
     int? lossStreakHaltHours,
     bool? counterTrendFilterEnabled,
+    double? minConfluence,
+    bool? multiStageTpEnabled,
     bool? pingPongEnabled,
     bool? mtfHierarchyRequired,
   }) {
@@ -176,6 +182,8 @@ class SettingsState {
           lossStreakHaltHours ?? this.lossStreakHaltHours,
       counterTrendFilterEnabled:
           counterTrendFilterEnabled ?? this.counterTrendFilterEnabled,
+      minConfluence: minConfluence ?? this.minConfluence,
+      multiStageTpEnabled: multiStageTpEnabled ?? this.multiStageTpEnabled,
       pingPongEnabled: pingPongEnabled ?? this.pingPongEnabled,
       mtfHierarchyRequired: mtfHierarchyRequired ?? this.mtfHierarchyRequired,
     );
@@ -268,6 +276,10 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
       counterTrendFilterEnabled:
           prefs.getBool('counter_trend_filter_enabled') ??
               state.counterTrendFilterEnabled,
+      minConfluence:
+          prefs.getDouble('min_confluence') ?? state.minConfluence,
+      multiStageTpEnabled:
+          prefs.getBool('multi_stage_tp_enabled') ?? state.multiStageTpEnabled,
       pingPongEnabled:
           prefs.getBool('ping_pong_enabled') ??
               state.pingPongEnabled,
@@ -331,6 +343,10 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
         'loss_streak_halt_hours', safeState.lossStreakHaltHours);
     await prefs.setBool(
         'counter_trend_filter_enabled', safeState.counterTrendFilterEnabled);
+    await prefs.setDouble(
+        'min_confluence', safeState.minConfluence);
+    await prefs.setBool(
+        'multi_stage_tp_enabled', safeState.multiStageTpEnabled);
     await prefs.setBool(
         'ping_pong_enabled', safeState.pingPongEnabled);
     await prefs.remove('mtf_hierarchy_required');
@@ -660,6 +676,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         final newCounterTrendFilterEnabled =
             rData['counter_trend_filter_enabled'] as bool? ??
                 current.counterTrendFilterEnabled;
+        final newMinConfluence =
+            (rData['min_confluence'] as num?)?.toDouble() ??
+                current.minConfluence;
+        final newMultiStageTpEnabled =
+            rData['multi_stage_tp_enabled'] as bool? ??
+                current.multiStageTpEnabled;
         final newPingPongEnabled =
             rData['ping_pong_enabled'] as bool? ??
                 current.pingPongEnabled;
@@ -687,6 +709,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           lossStreakHaltEnabled: newLossStreakHaltEnabled,
           lossStreakHaltHours: newLossStreakHaltHours,
           counterTrendFilterEnabled: newCounterTrendFilterEnabled,
+          minConfluence: newMinConfluence,
+          multiStageTpEnabled: newMultiStageTpEnabled,
           pingPongEnabled: newPingPongEnabled,
         );
 
@@ -716,6 +740,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             'cluster_loss_cooldown_minutes', newClusterLossCooldownMinutes);
         await prefs.setBool(
             'counter_trend_filter_enabled', newCounterTrendFilterEnabled);
+        await prefs.setDouble(
+            'min_confluence', newMinConfluence);
+        await prefs.setBool(
+            'multi_stage_tp_enabled', newMultiStageTpEnabled);
         await prefs.setBool(
             'ping_pong_enabled', newPingPongEnabled);
       }
@@ -1865,6 +1893,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'loss_streak_halt_enabled': current.lossStreakHaltEnabled,
           'loss_streak_halt_hours': current.lossStreakHaltHours,
           'counter_trend_filter_enabled': current.counterTrendFilterEnabled,
+          'min_confluence': current.minConfluence,
+          'multi_stage_tp_enabled': current.multiStageTpEnabled,
           'ping_pong_enabled': true,
           'mtf_hierarchy_required': false,
         },
@@ -2736,6 +2766,30 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               },
             ),
             const Divider(color: Colors.white12, height: 16),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text(
+                  'Multi-Stage TP (ปิด 50% ที่ 1R + รันต่อ 50% ด้วย Trailing)',
+                  style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600)),
+              subtitle: const Text(
+                  'เมื่อกำไรถึง 1.0R จะปิดทำกำไร 50% ทันที พร้อมเลื่อน SL มาที่ทุน (Breakeven) และปล่อย 50% ที่เหลือรันตามเทรนด์ด้วย Trailing Stop',
+                  style: TextStyle(fontSize: 11, color: Colors.white54)),
+              value: settings.multiStageTpEnabled,
+              activeThumbColor: AppColors.bullish,
+              onChanged: (v) async {
+                ref
+                    .read(settingsProvider.notifier)
+                    .save(settings.copyWith(multiStageTpEnabled: v));
+                try {
+                  await AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'),
+                      data: {'multi_stage_tp_enabled': v});
+                } catch (_) {}
+              },
+            ),
+            const Divider(color: Colors.white12, height: 16),
             _riskSlider(
               label: 'Risk per Trade',
               subtitle:
@@ -2761,6 +2815,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     settings.copyWith(defaultSlPct: v),
                   ),
               suffix: '%',
+            ),
+            _riskSlider(
+              label: 'Min Confluence (เกณฑ์คะแนนขั้นต่ำ)',
+              subtitle:
+                  'คะแนน Confluence ขั้นต่ำ (0-100) สำหรับอนุมัติเข้าเทรด ยิ่งสูงยิ่งปลอดภัย ยิ่งต่ำยิ่งเข้าไว (แนะนำ 65)',
+              value: settings.minConfluence,
+              min: 55.0,
+              max: 85.0,
+              divisions: 6,
+              onChanged: (v) => ref.read(settingsProvider.notifier).save(
+                    settings.copyWith(minConfluence: v),
+                  ),
+              suffix: '',
+              isInt: true,
             ),
             _riskSlider(
               label: 'Max Daily Loss',

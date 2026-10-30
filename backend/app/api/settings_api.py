@@ -1461,8 +1461,9 @@ class RiskConfigRequest(BaseModel):
     cluster_loss_cooldown_minutes: Optional[int] = Field(default=None, ge=5, le=240)
     loss_streak_halt_enabled: Optional[bool] = None
     loss_streak_halt_hours: Optional[int] = Field(default=None, ge=1, le=24)
-    ping_pong_enabled: Optional[bool] = None
     counter_trend_filter_enabled: Optional[bool] = None
+    min_confluence: Optional[float] = Field(default=None, ge=40.0, le=100.0)
+    multi_stage_tp_enabled: Optional[bool] = None
     ping_pong_enabled: Optional[bool] = None
 
 
@@ -1557,6 +1558,8 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
         counter_trend_filter_enabled = bool(data.get(
             "counter_trend_filter_enabled", True
         ))
+        min_confluence = float(data.get("min_confluence", 65.0))
+        multi_stage_tp_enabled = bool(data.get("multi_stage_tp_enabled", True))
         ping_pong_enabled = bool(data.get(
             "ping_pong_enabled", False
         ))
@@ -1591,6 +1594,8 @@ async def get_risk_config(_key: str = Depends(verify_api_key)):
         "loss_streak_halt_enabled": loss_streak_halt_enabled,
         "loss_streak_halt_hours": loss_streak_halt_hours,
         "counter_trend_filter_enabled": counter_trend_filter_enabled,
+        "min_confluence": min_confluence,
+        "multi_stage_tp_enabled": multi_stage_tp_enabled,
         "ping_pong_enabled": ping_pong_enabled,
         "config_contract": _runtime_contract_metadata(data),
     }
@@ -1713,6 +1718,10 @@ async def update_risk_config(
                 update_strategy_section(STRATEGY_FILE, "tri_core_policy", tcp)
             except Exception as strat_err:
                 logger.warning(f"Could not synchronize tri_core_policy.counter_trend_filter_enabled: {strat_err}")
+        if req.min_confluence is not None:
+            updates["min_confluence"] = float(req.min_confluence)
+        if req.multi_stage_tp_enabled is not None:
+            updates["multi_stage_tp_enabled"] = bool(req.multi_stage_tp_enabled)
         if req.ping_pong_enabled is not None:
             updates["ping_pong_enabled"] = req.ping_pong_enabled
             try:
@@ -1780,6 +1789,8 @@ async def update_risk_config(
             "counter_trend_filter_enabled": saved.get(
                 "counter_trend_filter_enabled", True
             ),
+            "min_confluence": saved.get("min_confluence", 65.0),
+            "multi_stage_tp_enabled": saved.get("multi_stage_tp_enabled", True),
             "ping_pong_enabled": saved.get(
                 "ping_pong_enabled", False
             ),
@@ -1800,6 +1811,8 @@ class RuntimeSettingsUpdateRequest(BaseModel):
     auto_trade_cooldown_seconds: Optional[int] = Field(default=None, ge=30, le=3600)
     loss_streak_halt_enabled: Optional[bool] = None
     loss_streak_halt_hours: Optional[int] = Field(default=None, ge=1, le=24)
+    min_confluence: Optional[float] = Field(default=None, ge=40.0, le=100.0)
+    multi_stage_tp_enabled: Optional[bool] = None
     ping_pong_enabled: Optional[bool] = None
 
 
@@ -1841,6 +1854,10 @@ async def update_runtime_settings(
         updates["loss_streak_halt_enabled"] = req.loss_streak_halt_enabled
     if req.loss_streak_halt_hours is not None:
         updates["loss_streak_halt_hours"] = req.loss_streak_halt_hours
+    if req.min_confluence is not None:
+        updates["min_confluence"] = float(req.min_confluence)
+    if req.multi_stage_tp_enabled is not None:
+        updates["multi_stage_tp_enabled"] = bool(req.multi_stage_tp_enabled)
     if req.ping_pong_enabled is not None:
         updates["ping_pong_enabled"] = req.ping_pong_enabled
         try:

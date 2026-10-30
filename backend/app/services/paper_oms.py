@@ -715,7 +715,7 @@ class PaperOMS:
                     and payload.get("source_payload", {}).get("take_profit_1") is not None
                 ):
                     assigned_tp1 = float(payload.get("source_payload", {}).get("take_profit_1"))
-                elif payload.get("tp1_enabled", cfg.paper_oms_tp1_enabled):
+                elif payload.get("multi_stage_tp_enabled", True) and payload.get("tp1_enabled", cfg.paper_oms_tp1_enabled):
                     risk_dist = abs(entry - stop_loss)
                     tp_dist = abs(take_profit - entry)
                     target_dist = min(

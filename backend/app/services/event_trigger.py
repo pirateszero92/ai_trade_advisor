@@ -570,13 +570,21 @@ class MarketMonitor:
             tri_core_direction = str(tri_core_setup.get("direction", "wait")).lower()
             tri_actionable = tri_core_setup.get("actionable") is True and tri_core_direction in {"long", "short"}
             direction = tri_core_direction if tri_actionable else "wait"
-            if tri_actionable:
+
+            configured_min_confluence = float(r_cfg.get("min_confluence", 65.0) or 65.0)
+            confluence_allowed = confluence >= configured_min_confluence
+            if tri_actionable and not confluence_allowed:
+                strat_res.approved = False
+                strat_res.rejection_reasons.append(
+                    f"Confluence {confluence}/100 ต่ำกว่าเกณฑ์ขั้นต่ำ ({configured_min_confluence:.0f})"
+                )
+            elif tri_actionable:
                 strat_res.approved = True
                 strat_res.direction = direction
                 strat_res.setup_direction = direction
             systemic_risk = dict(execution.systemic_risk or {})
             systemic_allowed = systemic_risk.get("execution_allowed", True) is True
-            execution_allowed = bool(tri_actionable and systemic_allowed)
+            execution_allowed = bool(tri_actionable and systemic_allowed and confluence_allowed)
 
             exit_direction = _confirmed_invalidation_direction(ltf_sig)
 
@@ -1455,9 +1463,10 @@ class MarketMonitor:
         tag = f"#AUTO-{history_key}-{direction.upper()}-{int(now_ts) % 10000}"
         setup_type = str(setup.get("setup_type", ""))
         management_policy = "tp1_1r_50pct_be_then_trail"
+        multi_stage_tp_enabled = bool(r_cfg.get("multi_stage_tp_enabled", True))
         exec_risk = abs(exec_entry - exec_sl)
         one_r_target = (exec_entry + exec_risk) if direction == "long" else (exec_entry - exec_risk)
-        take_profit_1: float | None = rules.price(one_r_target, upward=(direction != "long"))
+        take_profit_1: float | None = rules.price(one_r_target, upward=(direction != "long")) if multi_stage_tp_enabled else None
 
         if setup_type == "range_boundary_ping_pong" and canonical_analysis is not None:
             equilibrium = float(getattr(canonical_analysis.signal, "equilibrium", 0.0) or 0.0)
