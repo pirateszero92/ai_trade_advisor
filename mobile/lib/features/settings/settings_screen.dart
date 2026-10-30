@@ -50,6 +50,7 @@ class SettingsState {
   final bool lossStreakHaltEnabled;
   final int lossStreakHaltHours;
   final bool counterTrendFilterEnabled;
+  final bool oiTrackerEnabled;
   final double minConfluence;
   final bool multiStageTpEnabled;
   final bool pingPongEnabled;
@@ -91,6 +92,7 @@ class SettingsState {
     this.lossStreakHaltEnabled = false,
     this.lossStreakHaltHours = 2,
     this.counterTrendFilterEnabled = false,
+    this.oiTrackerEnabled = true,
     this.minConfluence = 65.0,
     this.multiStageTpEnabled = true,
     this.pingPongEnabled = true,
@@ -133,6 +135,7 @@ class SettingsState {
     bool? lossStreakHaltEnabled,
     int? lossStreakHaltHours,
     bool? counterTrendFilterEnabled,
+    bool? oiTrackerEnabled,
     double? minConfluence,
     bool? multiStageTpEnabled,
     bool? pingPongEnabled,
@@ -182,6 +185,8 @@ class SettingsState {
           lossStreakHaltHours ?? this.lossStreakHaltHours,
       counterTrendFilterEnabled:
           counterTrendFilterEnabled ?? this.counterTrendFilterEnabled,
+      oiTrackerEnabled:
+          oiTrackerEnabled ?? this.oiTrackerEnabled,
       minConfluence: minConfluence ?? this.minConfluence,
       multiStageTpEnabled: multiStageTpEnabled ?? this.multiStageTpEnabled,
       pingPongEnabled: pingPongEnabled ?? this.pingPongEnabled,
@@ -276,6 +281,9 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
       counterTrendFilterEnabled:
           prefs.getBool('counter_trend_filter_enabled') ??
               state.counterTrendFilterEnabled,
+      oiTrackerEnabled:
+          prefs.getBool('oi_tracker_enabled') ??
+              state.oiTrackerEnabled,
       minConfluence:
           prefs.getDouble('min_confluence') ?? state.minConfluence,
       multiStageTpEnabled:
@@ -343,6 +351,8 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
         'loss_streak_halt_hours', safeState.lossStreakHaltHours);
     await prefs.setBool(
         'counter_trend_filter_enabled', safeState.counterTrendFilterEnabled);
+    await prefs.setBool(
+        'oi_tracker_enabled', safeState.oiTrackerEnabled);
     await prefs.setDouble(
         'min_confluence', safeState.minConfluence);
     await prefs.setBool(
@@ -676,6 +686,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         final newCounterTrendFilterEnabled =
             rData['counter_trend_filter_enabled'] as bool? ??
                 current.counterTrendFilterEnabled;
+        final newOiTrackerEnabled =
+            rData['oi_tracker_enabled'] as bool? ??
+                current.oiTrackerEnabled;
         final newMinConfluence =
             (rData['min_confluence'] as num?)?.toDouble() ??
                 current.minConfluence;
@@ -709,6 +722,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           lossStreakHaltEnabled: newLossStreakHaltEnabled,
           lossStreakHaltHours: newLossStreakHaltHours,
           counterTrendFilterEnabled: newCounterTrendFilterEnabled,
+          oiTrackerEnabled: newOiTrackerEnabled,
           minConfluence: newMinConfluence,
           multiStageTpEnabled: newMultiStageTpEnabled,
           pingPongEnabled: newPingPongEnabled,
@@ -740,6 +754,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             'cluster_loss_cooldown_minutes', newClusterLossCooldownMinutes);
         await prefs.setBool(
             'counter_trend_filter_enabled', newCounterTrendFilterEnabled);
+        await prefs.setBool(
+            'oi_tracker_enabled', newOiTrackerEnabled);
         await prefs.setDouble(
             'min_confluence', newMinConfluence);
         await prefs.setBool(
@@ -1893,6 +1909,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'loss_streak_halt_enabled': current.lossStreakHaltEnabled,
           'loss_streak_halt_hours': current.lossStreakHaltHours,
           'counter_trend_filter_enabled': current.counterTrendFilterEnabled,
+          'oi_tracker_enabled': current.oiTrackerEnabled,
           'min_confluence': current.minConfluence,
           'multi_stage_tp_enabled': current.multiStageTpEnabled,
           'ping_pong_enabled': true,
@@ -2914,6 +2931,29 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 try {
                   await AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'),
                       data: {'counter_trend_filter_enabled': v});
+                } catch (_) {}
+              },
+            ),
+            const Divider(color: Colors.white12, height: 16),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('OI Liquidation & Exhaustion Tracker (ดักจังหวะล้างพอร์ต)',
+                  style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600)),
+              subtitle: const Text(
+                  'ตรวจจับการเปลี่ยนแปลง Open Interest (15m/1h) ในตลาดฟิวเจอร์ส เมื่อเกิดการล้างพอร์ต (Liquidation Flush) หรือชะลอตัวของแรงเทขาย/ซื้อ ระบบจะเพิ่มคะแนน Confluence และอนุมัติจังหวะกลับตัวก้นเหว/ยอดดอยทันที',
+                  style: TextStyle(fontSize: 11, color: Colors.white54)),
+              value: settings.oiTrackerEnabled,
+              activeThumbColor: AppColors.bullish,
+              onChanged: (v) async {
+                ref
+                    .read(settingsProvider.notifier)
+                    .save(settings.copyWith(oiTrackerEnabled: v));
+                try {
+                  await AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'),
+                      data: {'oi_tracker_enabled': v});
                 } catch (_) {}
               },
             ),

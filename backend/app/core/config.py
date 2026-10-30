@@ -112,6 +112,7 @@ class Settings(BaseSettings):
     loss_streak_halt_hours: int = Field(default=2, ge=1, le=24)
     min_confluence: float = Field(default=65.0, ge=40.0, le=100.0)
     multi_stage_tp_enabled: bool = True
+    oi_tracker_enabled: bool = True
     binance_trading_mode: str = "futures"
 
 

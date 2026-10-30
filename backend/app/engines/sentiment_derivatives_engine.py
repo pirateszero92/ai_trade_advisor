@@ -35,6 +35,7 @@ class DerivativesSentimentResult:
     open_interest: float = 0.0
     open_interest_value_usd: float = 0.0
     oi_delta_pct_1h: float = 0.0
+    oi_delta_pct_15m: float = 0.0
     funding_rate: float = 0.0
     funding_rate_annualized_pct: float = 0.0
     top_trader_long_ratio: float = 0.50
@@ -53,6 +54,7 @@ class DerivativesSentimentResult:
             "open_interest": round(self.open_interest, 2),
             "open_interest_value_usd": round(self.open_interest_value_usd, 2),
             "oi_delta_pct_1h": round(self.oi_delta_pct_1h, 2),
+            "oi_delta_pct_15m": round(self.oi_delta_pct_15m, 2),
             "funding_rate": round(self.funding_rate, 6),
             "funding_rate_annualized_pct": round(self.funding_rate_annualized_pct, 2),
             "top_trader_long_ratio": round(self.top_trader_long_ratio, 4),
@@ -153,17 +155,19 @@ class SentimentDerivativesEngine:
         async with cls._shared_client() as client:
             try:
                 oi_url = f"https://fapi.binance.com/futures/data/openInterestHist?symbol={clean_symbol}&period=1h&limit=3"
+                oi_15m_url = f"https://fapi.binance.com/futures/data/openInterestHist?symbol={clean_symbol}&period=15m&limit=3"
                 funding_url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={clean_symbol}&limit=1"
                 ratio_url = f"https://fapi.binance.com/futures/data/topLongShortAccountRatio?symbol={clean_symbol}&period=1h&limit=1"
 
-                res_oi, res_funding, res_ratio = await asyncio.gather(
+                res_oi, res_oi_15m, res_funding, res_ratio = await asyncio.gather(
                     client.get(oi_url),
+                    client.get(oi_15m_url),
                     client.get(funding_url),
                     client.get(ratio_url),
                     return_exceptions=True,
                 )
                 parsed_payloads = []
-                for response in (res_oi, res_funding, res_ratio):
+                for response in (res_oi, res_oi_15m, res_funding, res_ratio):
                     if isinstance(response, Exception):
                         raise ValueError("Incomplete derivatives response") from response
                     response.raise_for_status()
@@ -172,13 +176,19 @@ class SentimentDerivativesEngine:
                         raise ValueError("Missing derivatives observations")
                     parsed_payloads.append(payload)
 
-                oi_data, funding_data, ratio_data = parsed_payloads[0], parsed_payloads[1], parsed_payloads[2]
+                oi_data, oi_15m_data, funding_data, ratio_data = (
+                    parsed_payloads[0],
+                    parsed_payloads[1],
+                    parsed_payloads[2],
+                    parsed_payloads[3],
+                )
                 if len(oi_data) < 2:
                     raise ValueError("Insufficient OI history")
 
                 oi_val = 0.0
                 oi_val_usd = 0.0
                 oi_delta_pct = 0.0
+                oi_delta_pct_15m = 0.0
                 if len(oi_data) >= 1:
                     oi_val = float(oi_data[-1].get("sumOpenInterest", 0.0))
                     oi_val_usd = float(oi_data[-1].get("sumOpenInterestValue", 0.0))
@@ -186,6 +196,12 @@ class SentimentDerivativesEngine:
                     prev_oi = float(oi_data[-2].get("sumOpenInterest", 0.0))
                     if prev_oi > 0:
                         oi_delta_pct = ((oi_val - prev_oi) / prev_oi) * 100.0
+
+                if len(oi_15m_data) >= 2:
+                    curr_15m = float(oi_15m_data[-1].get("sumOpenInterest", 0.0))
+                    prev_15m = float(oi_15m_data[-2].get("sumOpenInterest", 0.0))
+                    if prev_15m > 0:
+                        oi_delta_pct_15m = ((curr_15m - prev_15m) / prev_15m) * 100.0
 
                 funding_rate = 0.0
                 if funding_data and len(funding_data) > 0:
@@ -208,6 +224,7 @@ class SentimentDerivativesEngine:
                     open_interest=oi_val,
                     open_interest_value_usd=oi_val_usd,
                     oi_delta_pct_1h=oi_delta_pct,
+                    oi_delta_pct_15m=oi_delta_pct_15m,
                     funding_rate=funding_rate,
                     funding_rate_annualized_pct=annualized_funding,
                     top_trader_long_ratio=top_long,
@@ -230,22 +247,39 @@ class SentimentDerivativesEngine:
         async with cls._shared_client() as client:
             try:
                 oi_url = f"https://api.bybit.com/v5/market/open-interest?category=linear&symbol={clean_symbol}&intervalTime=1h&limit=2"
-                res = await client.get(oi_url)
-                if res.status_code == 200:
-                    data = res.json().get("result", {}).get("list", [])
+                oi_15m_url = f"https://api.bybit.com/v5/market/open-interest?category=linear&symbol={clean_symbol}&intervalTime=15min&limit=2"
+                res_1h, res_15m = await asyncio.gather(
+                    client.get(oi_url),
+                    client.get(oi_15m_url),
+                    return_exceptions=True,
+                )
+                oi_val = 0.0
+                delta_1h = 0.0
+                delta_15m = 0.0
+                if not isinstance(res_1h, Exception) and getattr(res_1h, "status_code", None) == 200:
+                    data = res_1h.json().get("result", {}).get("list", [])
                     if data:
                         oi_val = float(data[0].get("openInterest", 0.0))
                         prev_oi = float(data[1].get("openInterest", oi_val)) if len(data) > 1 else oi_val
-                        delta = ((oi_val - prev_oi) / prev_oi * 100.0) if prev_oi > 0 else 0.0
-                        return DerivativesSentimentResult(
-                            symbol=original_symbol,
-                            market_type="crypto",
-                            exchange="bybit",
-                            open_interest=oi_val,
-                            oi_delta_pct_1h=delta,
-                            status="partial",
-                            details={"available": ["open_interest"], "missing": ["funding", "long_short_ratio"]},
-                        )
+                        delta_1h = ((oi_val - prev_oi) / prev_oi * 100.0) if prev_oi > 0 else 0.0
+
+                if not isinstance(res_15m, Exception) and getattr(res_15m, "status_code", None) == 200:
+                    data_15 = res_15m.json().get("result", {}).get("list", [])
+                    if len(data_15) > 1:
+                        c15 = float(data_15[0].get("openInterest", 0.0))
+                        p15 = float(data_15[1].get("openInterest", c15))
+                        delta_15m = ((c15 - p15) / p15 * 100.0) if p15 > 0 else 0.0
+
+                return DerivativesSentimentResult(
+                    symbol=original_symbol,
+                    market_type="crypto",
+                    exchange="bybit",
+                    open_interest=oi_val,
+                    oi_delta_pct_1h=delta_1h,
+                    oi_delta_pct_15m=delta_15m,
+                    status="partial",
+                    details={"available": ["open_interest"], "missing": ["funding", "long_short_ratio"]},
+                )
             except Exception as exc:
                 logger.debug(f"[SentimentEngine] Bybit fetch failed: {exc}")
 
@@ -276,16 +310,20 @@ class SentimentDerivativesEngine:
         result.crowd_risk_warning = " | ".join(warnings) if warnings else None
 
         oi_delta = result.oi_delta_pct_1h
+        oi_delta_15m = result.oi_delta_pct_15m
         p_delta = price_change_pct_1h
 
-        if p_delta >= 0.3 and oi_delta >= 0.8:
-            result.sentiment_bias = "BULLISH_EXPANSION"
-        elif p_delta >= 0.3 and oi_delta <= -0.8:
-            result.sentiment_bias = "SHORT_SQUEEZE_RISK"
-        elif p_delta <= -0.3 and oi_delta >= 0.8:
-            result.sentiment_bias = "BEARISH_EXPANSION"
-        elif p_delta <= -0.3 and oi_delta <= -0.8:
+        is_long_flush = (p_delta <= -0.3 and oi_delta <= -0.8) or (oi_delta_15m <= -1.2 and p_delta <= 0)
+        is_short_squeeze = (p_delta >= 0.3 and oi_delta <= -0.8) or (oi_delta_15m <= -1.2 and p_delta >= 0)
+
+        if is_long_flush:
             result.sentiment_bias = "LONG_LIQUIDATION_FLUSH"
+        elif is_short_squeeze:
+            result.sentiment_bias = "SHORT_SQUEEZE_RISK"
+        elif p_delta >= 0.3 and (oi_delta >= 0.8 or oi_delta_15m >= 0.8):
+            result.sentiment_bias = "BULLISH_EXPANSION"
+        elif p_delta <= -0.3 and (oi_delta >= 0.8 or oi_delta_15m >= 0.8):
+            result.sentiment_bias = "BEARISH_EXPANSION"
         elif result.funding_rate > 0.0003 or result.long_short_ratio > 2.2:
             result.sentiment_bias = "CROWDED_LONG"
         elif result.funding_rate < -0.0002 or result.long_short_ratio < 0.65:

@@ -656,7 +656,21 @@ def _bound_flow(signal: Any, side: str, sweep: dict[str, Any]) -> tuple[bool, st
     absorption_ok = (bool(getattr(signal, "delta_absorption", False))
                      and absorption == f"{expected}_absorption"
                      and same_absorption_candle and same_absorption_close)
-    return divergence_ok or absorption_ok, divergence if divergence_ok else absorption if absorption_ok else "none", strong_divergence
+
+    # OI Liquidation Exhaustion acts as institutional flow absorption confirmation
+    deriv = getattr(signal, "derivatives_sentiment", {}) or {}
+    d_bias = str(deriv.get("sentiment_bias", ""))
+    oi_flush_ok = False
+    if side == "long" and d_bias == "LONG_LIQUIDATION_FLUSH":
+        oi_flush_ok = True
+    elif side == "short" and d_bias == "SHORT_SQUEEZE_RISK":
+        oi_flush_ok = True
+
+    if divergence_ok or absorption_ok:
+        return True, divergence if divergence_ok else absorption, strong_divergence
+    if oi_flush_ok:
+        return True, f"oi_liquidation_{d_bias.lower()}", True
+    return False, "none", False
 
 
 def _candidate(*, side: str, setup_type: str, entry: float, stop: float,

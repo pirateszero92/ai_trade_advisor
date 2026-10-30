@@ -119,6 +119,7 @@ def analyze_execution_frame(
     macro_bias: str = "neutral",
     macro_obstacles: list[dict[str, Any]] | None = None,
     micro_momentum: dict[str, Any] | None = None,
+    derivatives_sentiment: dict[str, Any] | None = None,
 ) -> tuple[SMCSignal, StrategyResult, str]:
     """Pure closed-candle decision function shared by live and backtest paths."""
     profiles = validate_timeframe_profiles(config_snapshot.get("timeframe_profiles"))
@@ -140,9 +141,45 @@ def analyze_execution_frame(
         intraday_bias=intraday_bias,
         macro_bias=macro_bias,
         macro_obstacles=macro_obstacles,
+        derivatives_sentiment=derivatives_sentiment,
     )
     if micro_momentum:
         signal.micro_momentum = micro_momentum
+
+    oi_tracker_on = bool(config_snapshot.get("oi_tracker_enabled", True))
+    if derivatives_sentiment:
+        signal.derivatives_sentiment = {
+            **derivatives_sentiment,
+            "advisory_only": not oi_tracker_on,
+            "decision_authority": False,
+            "source_timeframe": "15m/1h",
+        }
+        if oi_tracker_on:
+            tri_setup = getattr(signal, "tri_core_setup", {}) or {}
+            setup_dir = str(tri_setup.get("direction", "")).lower()
+            effective_dir = setup_dir if setup_dir in {"long", "short"} else str(getattr(signal, "direction", "")).lower()
+            d_bias = str(derivatives_sentiment.get("sentiment_bias", ""))
+
+            boost = 0
+            reason = ""
+            if d_bias == "LONG_LIQUIDATION_FLUSH" and (effective_dir == "long" or getattr(signal, "in_discount", False)):
+                boost = 12
+                oi_15m = float(derivatives_sentiment.get("oi_delta_pct_15m", 0.0) or 0.0)
+                oi_1h = float(derivatives_sentiment.get("oi_delta_pct_1h", derivatives_sentiment.get("oi_delta_pct", 0.0)) or 0.0)
+                reason = f"OI Liquidation Flush (OI 15m: {oi_15m:+.2f}%, 1h: {oi_1h:+.2f}%)"
+            elif d_bias == "SHORT_SQUEEZE_RISK" and (effective_dir == "short" or getattr(signal, "in_premium", False)):
+                boost = 12
+                oi_15m = float(derivatives_sentiment.get("oi_delta_pct_15m", 0.0) or 0.0)
+                oi_1h = float(derivatives_sentiment.get("oi_delta_pct_1h", derivatives_sentiment.get("oi_delta_pct", 0.0)) or 0.0)
+                reason = f"OI Short Squeeze Exhaustion (OI 15m: {oi_15m:+.2f}%, 1h: {oi_1h:+.2f}%)"
+
+            if boost > 0:
+                signal.confluence = min(100, signal.confluence + boost)
+                if isinstance(getattr(signal, "indicator_decision", None), dict):
+                    signal.indicator_decision["score"] = signal.confluence
+                    reasons_list = signal.indicator_decision.setdefault("reasons", [])
+                    reasons_list.append(f"+{boost} {reason}")
+
     # VPIN Order Flow Toxicity
     try:
         from app.engines.vpin_engine import VPINEngine
@@ -207,6 +244,10 @@ class ExecutionAnalysisService:
             tcp["btc_anchor_gate_enabled"] = bool(runtime.get("btc_anchor_filter_enabled", False))
         tcp["binance_trading_mode"] = str(runtime.get("binance_trading_mode", getattr(cfg, "binance_trading_mode", "futures"))).lower()
         config["tri_core_policy"] = tcp
+        if "oi_tracker_enabled" in runtime:
+            config["oi_tracker_enabled"] = bool(runtime.get("oi_tracker_enabled", True))
+        else:
+            config["oi_tracker_enabled"] = bool(getattr(cfg, "oi_tracker_enabled", True))
         return config
 
     def clear(self) -> None:
@@ -663,23 +704,7 @@ class ExecutionAnalysisService:
                 except Exception:
                     pass
 
-            signal, strategy, res_timeframe = await asyncio.to_thread(
-                analyze_execution_frame,
-                frame=frame,
-                symbol=symbol,
-                entry_mode=entry_mode,
-                config_snapshot=config,
-                timeframe=effective_tf,
-                htf_bias=calculated_htf_bias,
-                intraday_bias=calculated_intraday_bias,
-                macro_bias=calculated_macro_bias,
-                macro_obstacles=calculated_macro_obstacles,
-                micro_momentum=calculated_micro_momentum,
-            )
-
-            # Hourly OI/funding is research context only.  It may be attached
-            # to a 15M snapshot for display/ablation, but it never causes a
-            # Strategy re-evaluation and never changes snapshot identity.
+            calculated_deriv_dict: dict[str, Any] | None = None
             if market_type.lower() == "crypto":
                 try:
                     from app.engines.sentiment_derivatives_engine import SentimentDerivativesEngine
@@ -693,14 +718,25 @@ class ExecutionAnalysisService:
                     deriv_res = await SentimentDerivativesEngine.get_sentiment(
                         symbol, market_type, exchange, price_change_pct_1h=p_change
                     )
-                    signal.derivatives_sentiment = {
-                        **deriv_res.to_dict(),
-                        "advisory_only": True,
-                        "decision_authority": False,
-                        "source_timeframe": "1h",
-                    }
+                    if deriv_res is not None:
+                        calculated_deriv_dict = deriv_res.to_dict()
                 except Exception as exc:
-                    logger.debug(f"[ExecutionAnalysis] Derivatives sentiment fetch skipped: {exc}")
+                    logger.debug(f"[ExecutionAnalysis] Derivatives sentiment fetch error: {exc}")
+
+            signal, strategy, res_timeframe = await asyncio.to_thread(
+                analyze_execution_frame,
+                frame=frame,
+                symbol=symbol,
+                entry_mode=entry_mode,
+                config_snapshot=config,
+                timeframe=effective_tf,
+                htf_bias=calculated_htf_bias,
+                intraday_bias=calculated_intraday_bias,
+                macro_bias=calculated_macro_bias,
+                macro_obstacles=calculated_macro_obstacles,
+                micro_momentum=calculated_micro_momentum,
+                derivatives_sentiment=calculated_deriv_dict,
+            )
 
             # Cross-asset BTC context is a downstream systemic-risk fact.  It
             # never mutates Tri-Core direction/grade, but it is bound into this

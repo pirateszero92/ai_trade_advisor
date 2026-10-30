@@ -27,6 +27,7 @@ RUNTIME_OWNERSHIP: dict[str, str] = {
     "loss_streak_halt_enabled": "risk",
     "loss_streak_halt_hours": "risk",
     "counter_trend_filter_enabled": "risk",
+    "oi_tracker_enabled": "strategy",
     "min_confluence": "strategy",
     "multi_stage_tp_enabled": "execution",
     "ping_pong_enabled": "strategy",
@@ -120,6 +121,8 @@ def validate_runtime_config(data: dict[str, Any]) -> dict[str, Any]:
 
     if "multi_stage_tp_enabled" in clean and not isinstance(clean["multi_stage_tp_enabled"], bool):
         raise ValueError("multi_stage_tp_enabled must be boolean")
+    if "oi_tracker_enabled" in clean and not isinstance(clean["oi_tracker_enabled"], bool):
+        raise ValueError("oi_tracker_enabled must be boolean")
 
     if "entry_mode" in clean and clean["entry_mode"] not in {"limit", "market"}:
         raise ValueError("entry_mode must be limit or market")

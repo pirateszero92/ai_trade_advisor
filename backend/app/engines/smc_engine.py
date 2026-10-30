@@ -413,6 +413,7 @@ class SMCEngine:
         intraday_bias: Literal["bullish", "bearish", "neutral"] = "neutral",
         macro_bias: Literal["bullish", "bearish", "neutral"] = "neutral",
         macro_obstacles: list[dict[str, Any]] | None = None,
+        derivatives_sentiment: dict[str, Any] | None = None,
     ) -> SMCSignal:
         """
         Run full LuxAlgo SMC analysis pipeline on the given OHLCV DataFrame.
@@ -638,6 +639,8 @@ class SMCEngine:
             self._compute_trade_setup(legacy_shadow, entry_mode=entry_mode, df=df)
 
             # 7. Tri-Core is the only entry-direction authority.
+            if derivatives_sentiment:
+                signal.derivatives_sentiment = derivatives_sentiment
             tri_core = TriCoreSetupEngine.evaluate(signal, df, tri_core_policy)
             signal.tri_core_setup = tri_core.to_dict()
             if tri_core.actionable:
