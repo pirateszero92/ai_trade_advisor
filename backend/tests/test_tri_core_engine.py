@@ -1029,4 +1029,22 @@ def test_counter_trend_long_rejected_in_volatile_bearish_regime():
     assert not setup.actionable
     assert any("Counter-trend LONG rejected: Market regime is volatile bearish" in r for r in setup.rejection_reasons)
 
+def test_adaptive_momentum_entry_expands_market_ceiling_for_strong_flow():
+    signal = _signal()
+    signal.liquidity_sweep["candle_index"] = 18
+    signal.liquidity_sweep["reclaim_close"] = 99.0
+    signal.cvd_divergence_evidence["reclaim_close_price"] = 99.0
+    signal.delta_ratio = 0.20
+    setup_strong = TriCoreSetupEngine.evaluate(signal, _frame())
+    assert setup_strong.actionable is True
+    assert setup_strong.entry_policy == "market_eligible"
+
+    signal.delta_ratio = 0.05
+    signal.cvd_divergence_evidence["price_excursion_atr"] = 0.10
+    signal.order_blocks = [
+        Zone(kind="ob", direction="bullish", top=99.2, bottom=98.5, index=18, confirmed_index=19, source="swing")
+    ]
+    setup_weak = TriCoreSetupEngine.evaluate(signal, _frame())
+    assert setup_weak.actionable is True
+    assert setup_weak.entry_policy == "limit_retest_only"
 

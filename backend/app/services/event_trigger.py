@@ -572,7 +572,9 @@ class MarketMonitor:
             direction = tri_core_direction if tri_actionable else "wait"
 
             configured_min_confluence = float(r_cfg.get("min_confluence", 65.0) or 65.0)
-            confluence_allowed = confluence >= configured_min_confluence
+            tri_grade = str(tri_core_setup.get("grade", "WAIT")).upper()
+            is_high_conviction = tri_grade in {"S", "A"}
+            confluence_allowed = (confluence >= configured_min_confluence) or is_high_conviction
             if tri_actionable and not confluence_allowed:
                 strat_res.approved = False
                 strat_res.rejection_reasons.append(
@@ -582,6 +584,8 @@ class MarketMonitor:
                 strat_res.approved = True
                 strat_res.direction = direction
                 strat_res.setup_direction = direction
+                if is_high_conviction and confluence < configured_min_confluence:
+                    strat_res.notes = f"Grade {tri_grade} Causal Setup: Fast-Pass granted over secondary confluence ({confluence:.0f}/{configured_min_confluence:.0f})"
             systemic_risk = dict(execution.systemic_risk or {})
             systemic_allowed = systemic_risk.get("execution_allowed", True) is True
             execution_allowed = bool(tri_actionable and systemic_allowed and confluence_allowed)

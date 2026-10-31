@@ -946,6 +946,7 @@ class TriCoreSetupEngine:
                                 continue
 
             expected_sweep = "low" if side == "long" else "high"
+            pressure = float(getattr(signal, "delta_ratio", 0.0))
             in_prem = getattr(signal, "in_premium", False)
             in_disc = getattr(signal, "in_discount", False)
             if side == "long" and in_prem:
@@ -989,12 +990,17 @@ class TriCoreSetupEngine:
                         limit_zone_id = str(causal_zone.zone_id) if causal_zone is not None else ""
                         candidate_entry = entry
 
-                        # Anti-Chase: If candle spiked > 0.50 ATR from reclaim, do not buy top;
+                        # Anti-Chase / Adaptive Momentum Entry:
+                        eff_market_extension = policy.market_entry_max_extension_atr
+                        if strong or (side == "long" and pressure >= 0.15) or (side == "short" and pressure <= -0.15):
+                            eff_market_extension = max(eff_market_extension, 0.85)
+
+                        # If candle spiked > eff_market_extension from reclaim, do not buy top;
                         # place 2-bar Limit at the front edge of the causal FVG/OB instead.
-                        if extension_atr > policy.market_entry_max_extension_atr:
+                        if extension_atr > eff_market_extension:
                             if causal_zone is None:
                                 rejected.append(
-                                    f"Price extended {extension_atr:.2f} ATR (> {policy.market_entry_max_extension_atr:.2f} ATR) without FVG/OB retest zone — do not chase"
+                                    f"Price extended {extension_atr:.2f} ATR (> {eff_market_extension:.2f} ATR) without FVG/OB retest zone — do not chase"
                                 )
                                 continue
                             entry_policy = "limit_retest_only"
@@ -1113,7 +1119,10 @@ class TriCoreSetupEngine:
 
                     zone_edge = float(zone.top if side == "long" else zone.bottom)
                     dist_from_edge = (entry - zone_edge) if side == "long" else (zone_edge - entry)
-                    if atr > 0 and dist_from_edge > policy.market_entry_max_extension_atr * atr:
+                    eff_market_extension = policy.market_entry_max_extension_atr
+                    if is_unicorn or (side == "long" and pressure >= 0.15) or (side == "short" and pressure <= -0.15):
+                        eff_market_extension = max(eff_market_extension, 0.85)
+                    if atr > 0 and dist_from_edge > eff_market_extension * atr:
                         disp_entry = zone_edge
                         disp_entry_policy: Literal["market_eligible", "limit_retest_only"] = "limit_retest_only"
                     else:
