@@ -222,7 +222,8 @@ adb install -r ../web_dist/app-release.apk
 | **Max Leverage Cap** | Enforces gross portfolio notional ceiling ($10\text{x}$ balance) with fair per-position quota division. |
 | **Cluster Cooldown** | Prevents rapid consecutive losses by cooling down correlated pairs (e.g., L1 Crypto). |
 | **Location Gate** | Unconditionally blocks buying at Premium ($\ge 50\%$ swing) or shorting at Discount ($\le 50\%$). |
-| **Min Confluence Gate** | Enforces mathematical consensus threshold (default: 55–65) across SMC, CVD, and Squeeze before authorizing trades. |
+| **Min Confluence Gate** | Enforces mathematical consensus threshold (default: 55–65) across SMC, CVD, and Squeeze. Grade S/A causal setups receive Fast-Pass bypass. |
+| **Adaptive Momentum Entry** | Expands market execution tolerance up to $0.85\text{ ATR}$ on strong CVD delta ($\ge \pm 15\%$) to eliminate missed zero-pullback breakouts. |
 | **Counter-Trend Filter** | Blocks trades counter to macro H1/4H structural bias unless explicitly toggled off. |
 | **Ranging Ping-Pong Mode** | Allows entering Grade B swing trades at Sideway boundaries (Demand/Supply Zone) targeting opposing range boundaries. Controlled via on/off toggle in Settings. |
 | **OI Liquidation Cascade Guard** | Tracks rapid derivatives flushes to prevent buying falling knives and identify true seller/buyer exhaustion bottoms. |
@@ -242,6 +243,8 @@ adb install -r ../web_dist/app-release.apk
 - **Restored MTF Obstacle Checks & Counter-Trend Invariants**: Reinstated 4H macro obstacle buffer checks (Scenarios B & C) and ensured 47/47 passing tests in `test_tri_core_engine.py`.
 - **Calibration Status Reset**: Reset `calibration_status` to `"draft_unvalidated"` pending out-of-sample walk-forward run logs.
 - **Pytest Suite Collection Fix**: Fixed deleted module imports in `test_phase25_structured_ai_decision.py`.
+- **Grade S/A High-Conviction Fast-Pass (`event_trigger.py`)**: High-conviction Causal setups (SMC Sweep + CVD Absorption or Unicorn Displacement) bypass secondary lagging confluence score thresholds, ensuring viable institutional setups are executed without being blocked by minor score fluctuations.
+- **Adaptive Momentum Market Entry (`tri_core_engine.py`)**: Dynamically expands the `market_eligible` execution ceiling from `0.50 ATR` up to `0.85 ATR` when institutional aggressor delta ratio is strongly aligned ($\ge +15\%$ for Long, $\le -15\%$ for Short) or on Grade S setups, preventing adverse selection and missed breakout trades.
 
 ## 📜 License & Compliance
 This software is built for institutional-grade automated trading research, paper trade simulation, and rule-based advisory execution. Live execution with real capital must comply with exchange terms and local financial regulations.
