@@ -101,8 +101,22 @@ sequenceDiagram
   2. **Breakeven Shield Exit 🛡️**: As soon as TP1 fills, Stop Loss is instantaneously trailed to entry price plus transaction costs, guaranteeing a risk-free trade.
   3. **Dynamic Trailing Stop 📈**: The remaining 50% runner dynamically trails favorable price extremes (`protection_stage: trailing_dynamic`) to capture extended trends.
 
-### 5. 📱 Cross-Platform UI (Flutter Web & Mobile)
+### 5. 🎯 Open Interest (OI) & Liquidation Cascade Tracker (v1.0.32+)
+* **Dual-Timeframe OI Intelligence (15M / 1H)**: Continuously monitors Open Interest and OI Delta % from crypto derivatives exchanges (Binance Futures & Bybit) alongside Funding Rates and Long/Short ratios.
+  * **Rapid 15M Flush Detection**: Detects violent cascading liquidation spikes (e.g., $\Delta\text{OI}_{15\text{m}} \le -1.2\%$) at the exact candle where price sweeps an SMC zone.
+  * **1H Structural Context**: Analyzes broader capital expansion and squeeze risk.
+* **Causal Flow Exhaustion Engine**:
+  * **`LONG_LIQUIDATION_FLUSH` (Bottom Sniper Reversal)**: Rapid price drop coupled with steep OI decline signals retail forced liquidations (seller exhaustion). Tri-Core treats this as institutional absorption and approves reversal entries even when raw CVD delta is negative.
+  * **`SHORT_SQUEEZE_RISK` (Top Exhaustion Short)**: Rapid price pump with sharp OI decline signals forced short covering and buyer exhaustion.
+* **Automatic Confluence Boost (+12 Points)**: When liquidation exhaustion aligns with the SMC setup direction, the system awards $+12$ bonus confluence points to clear execution gates safely.
+* **Runtime Toggle**: Configurable directly from Mobile/Web Settings (`oi_tracker_enabled`) with immediate zero-restart persistence.
+
+### 6. 📱 Cross-Platform UI (Flutter Web & Mobile - v1.0.32 Build 51)
 * **High-Performance Canvas Chart**: Custom rendering of Order Blocks, FVGs, Equilibrium 50% line, Volume Moving Average 20, and live ticker badges.
+* **Real-Time Risk & Strategy Controls**:
+  * **Min Confluence Slider**: Fine-tunes execution selectivity (default range: 55–85).
+  * **Counter-Trend Filter Toggle**: Enforces strict alignment with H1/4H macro momentum.
+  * **OI Liquidation & Exhaustion Switch**: Toggle derivatives liquidation tracking on/off.
 * **Two-Way Synchronization**: Settings adjusted in the Flutter client immediately update the backend runtime store (`backend/config/runtime_settings.json`), ensuring seamless alignment between UI and execution bots.
 
 ---
@@ -208,6 +222,9 @@ adb install -r ../web_dist/app-release.apk
 | **Max Leverage Cap** | Enforces gross portfolio notional ceiling ($10\text{x}$ balance) with fair per-position quota division. |
 | **Cluster Cooldown** | Prevents rapid consecutive losses by cooling down correlated pairs (e.g., L1 Crypto). |
 | **Location Gate** | Unconditionally blocks buying at Premium ($\ge 50\%$ swing) or shorting at Discount ($\le 50\%$). |
+| **Min Confluence Gate** | Enforces mathematical consensus threshold (default: 55–65) across SMC, CVD, and Squeeze before authorizing trades. |
+| **Counter-Trend Filter** | Blocks trades counter to macro H1/4H structural bias unless explicitly toggled off. |
+| **OI Liquidation Cascade Guard** | Tracks rapid derivatives flushes to prevent buying falling knives and identify true seller/buyer exhaustion bottoms. |
 | **Auto-Breakeven Shield** | Locks initial profit at $+1.0\text{R}$ / TP1 to guarantee zero downside on runners. |
 | **Dynamic Trailing Stop** | Automatically secures trailing profits when prices extend into extreme favorable targets. |
 
