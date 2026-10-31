@@ -31,7 +31,7 @@ class TriCorePolicy:
     no_chase_max_extension_atr: float = 1.00
     zone_approach_distance_atr: float = ZONE_APPROACH_DISTANCE_ATR
     minimum_rr: float = 1.2
-    ping_pong_enabled: bool = True
+    ping_pong_enabled: bool = False
     target_anchor_mode: str = "opposing_boundary"
     counter_trend_filter_enabled: bool = True
     candidate_selection_mode: Literal["rr_then_grade", "grade_then_rr"] = "rr_then_grade"
@@ -961,6 +961,9 @@ class TriCoreSetupEngine:
             # -----------------------------------------------------------------
             if (getattr(signal, "liquidity_swept", False)
                     and getattr(signal, "sweep_direction", "none") == expected_sweep):
+                if regime_label == "volatile":
+                    rejected.append("Sweep reversal suspended in Volatile market regime (high momentum continuation risk)")
+                    continue
                 saw_sweep = True
                 sweep_age = len(frame) - 1 - _index(sweep.get("candle_index"))
                 window_ok, extension_atr, window_reason = _extended_sweep_is_valid(

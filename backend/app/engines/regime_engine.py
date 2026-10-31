@@ -420,7 +420,10 @@ class MarketRegimeEngine:
             rc = load_runtime_config()
             cfg_min_conf = rc.get("min_confluence")
             if cfg_min_conf is not None and float(cfg_min_conf) > 0:
-                policy["min_confluence"] = float(cfg_min_conf)
+                if regime == "volatile":
+                    policy["min_confluence"] = max(82.0, float(cfg_min_conf))
+                else:
+                    policy["min_confluence"] = float(cfg_min_conf)
         except Exception:
             pass
         return {
