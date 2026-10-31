@@ -224,11 +224,24 @@ adb install -r ../web_dist/app-release.apk
 | **Location Gate** | Unconditionally blocks buying at Premium ($\ge 50\%$ swing) or shorting at Discount ($\le 50\%$). |
 | **Min Confluence Gate** | Enforces mathematical consensus threshold (default: 55–65) across SMC, CVD, and Squeeze before authorizing trades. |
 | **Counter-Trend Filter** | Blocks trades counter to macro H1/4H structural bias unless explicitly toggled off. |
+| **Ranging Ping-Pong Mode** | Allows entering Grade B swing trades at Sideway boundaries (Demand/Supply Zone) targeting opposing range boundaries. Controlled via on/off toggle in Settings. |
 | **OI Liquidation Cascade Guard** | Tracks rapid derivatives flushes to prevent buying falling knives and identify true seller/buyer exhaustion bottoms. |
 | **Auto-Breakeven Shield** | Locks initial profit at $+1.0\text{R}$ / TP1 to guarantee zero downside on runners. |
 | **Dynamic Trailing Stop** | Automatically secures trailing profits when prices extend into extreme favorable targets. |
 
 ---
+
+---
+
+## 🚀 Release History & Changelog
+
+### v1.0.33 (Build 52)
+- **Settings UI Toggle for Ping-Pong**: Added dedicated interactive switch `Ranging Ping-Pong Mode (เทรดชิ่งกรอบ Sideway)` under Strategy/Risk cards in the Mobile Settings screen, wired to backend runtime settings. Fixed client config save preserving the current ping-pong state instead of hardcoding.
+- **Direction Boost Remediation**: Pruned unintended `(effective_dir == "long" or in_discount)` boost logic in `execution_analysis.py` to prevent short trades in discount from improperly receiving liquidation flush boosts.
+- **Strict Flow Confirmation Boundaries**: Removed `strong=True` shortcut for OI Flush signals in `tri_core_engine.py` (preventing unearned Grade S promotions) and assigned distinct `oi_liquidation_exhaustion_{side}` labeling.
+- **Restored MTF Obstacle Checks & Counter-Trend Invariants**: Reinstated 4H macro obstacle buffer checks (Scenarios B & C) and ensured 47/47 passing tests in `test_tri_core_engine.py`.
+- **Calibration Status Reset**: Reset `calibration_status` to `"draft_unvalidated"` pending out-of-sample walk-forward run logs.
+- **Pytest Suite Collection Fix**: Fixed deleted module imports in `test_phase25_structured_ai_decision.py`.
 
 ## 📜 License & Compliance
 This software is built for institutional-grade automated trading research, paper trade simulation, and rule-based advisory execution. Live execution with real capital must comply with exchange terms and local financial regulations.

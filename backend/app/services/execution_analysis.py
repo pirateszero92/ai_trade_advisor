@@ -162,12 +162,12 @@ def analyze_execution_frame(
 
             boost = 0
             reason = ""
-            if d_bias == "LONG_LIQUIDATION_FLUSH" and (effective_dir == "long" or getattr(signal, "in_discount", False)):
+            if d_bias == "LONG_LIQUIDATION_FLUSH" and effective_dir == "long":
                 boost = 12
                 oi_15m = float(derivatives_sentiment.get("oi_delta_pct_15m", 0.0) or 0.0)
                 oi_1h = float(derivatives_sentiment.get("oi_delta_pct_1h", derivatives_sentiment.get("oi_delta_pct", 0.0)) or 0.0)
                 reason = f"OI Liquidation Flush (OI 15m: {oi_15m:+.2f}%, 1h: {oi_1h:+.2f}%)"
-            elif d_bias == "SHORT_SQUEEZE_RISK" and (effective_dir == "short" or getattr(signal, "in_premium", False)):
+            elif d_bias == "SHORT_SQUEEZE_RISK" and effective_dir == "short":
                 boost = 12
                 oi_15m = float(derivatives_sentiment.get("oi_delta_pct_15m", 0.0) or 0.0)
                 oi_1h = float(derivatives_sentiment.get("oi_delta_pct_1h", derivatives_sentiment.get("oi_delta_pct", 0.0)) or 0.0)

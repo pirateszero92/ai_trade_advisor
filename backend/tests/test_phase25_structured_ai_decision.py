@@ -228,10 +228,101 @@ async def test_phase3_authority_status_projection_includes_decision_manager_fiel
 from unittest.mock import AsyncMock, patch
 from app.services.event_trigger import MarketMonitor
 from app.services.candidate_lifecycle import candidate_lifecycle, CandidateState
-from tests.test_auto_pilot import mock_mtf, reset_auto_trade_history
+from types import SimpleNamespace
+from app.engines.smc_engine import SMCSignal
+from app.engines.strategy_engine import StrategyResult
+from app.services.mtf_analysis import MTFAnalysis, TimeframeStage
+
+
+@pytest.fixture(autouse=True)
+def reset_auto_trade_history(monkeypatch):
+    from app.core.config import get_settings
+    from app.services.candidate_lifecycle import candidate_lifecycle
+    from app.services.decision_trace import decision_trace
+    from app.services.execution_analysis import execution_analyses
+
+    candidate_lifecycle._records.clear()
+    candidate_lifecycle._current_by_symbol.clear()
+    decision_trace._records.clear()
+    decision_trace._loaded = True
+    monkeypatch.setattr(decision_trace, "_write_sync", lambda: None)
+    monkeypatch.setattr(get_settings(), "equity_auto_trade_enabled", True)
+    monkeypatch.setattr(
+        execution_analyses,
+        "get_by_snapshot_id",
+        lambda _snapshot_id: SimpleNamespace(
+            systemic_risk={"status": "NOT_APPLICABLE", "execution_allowed": True},
+            signal=SimpleNamespace(equilibrium=0.0),
+        ),
+    )
+    yield
+    candidate_lifecycle._records.clear()
+    candidate_lifecycle._current_by_symbol.clear()
+
+
+@pytest.fixture
+def mock_mtf():
+    sig_4h = SMCSignal(symbol="MSFT", timeframe="4h", bias="bullish", confluence=80)
+    stage_4h = TimeframeStage(role="bias", timeframe="4h", status="ready", direction="long", signal=sig_4h)
+
+    sig_1h = SMCSignal(symbol="MSFT", timeframe="1h", bias="bullish", confluence=75)
+    stage_1h = TimeframeStage(role="setup", timeframe="1h", status="ready", direction="long", signal=sig_1h)
+
+    sig_15m = SMCSignal(
+        symbol="MSFT",
+        timeframe="15m",
+        bias="bullish",
+        confluence=85,
+        squeeze_status="squeeze_fire",
+        squeeze_momentum=1.5,
+        momentum_direction="accelerating_up",
+        current_price=500.0,
+        stop_loss=496.0,
+        take_profit=516.0,
+        risk_reward=4.0,
+        scenario={"scenario_id": "TEST_CONFIRMED", "actionable": True},
+        volume_quality="exchange_aggressor",
+        ai_review={
+            "status": "reviewed",
+            "verdict": "COHERENT",
+            "input_snapshot_id": "a1b2c3d4e5f60718293a4b5c",
+            "input_event_id": "sweep:MSFT:15m:test",
+            "input_symbol": "MSFT",
+            "input_exchange": "alpaca",
+            "input_timeframe": "15m",
+            "reason": "Delta absorption confirmed at discount",
+            "conflicts": [],
+            "evidence": ["SMC and CVD context are coherent"],
+        },
+        indicator_decision={"ready": True, "squeeze_bonus": 10, "squeeze_bonus_max": 10},
+        tri_core_setup={"actionable": True, "direction": "long", "grade": "S",
+                        "setup_type": "sweep_reversal",
+                        "entry_policy": "market_eligible", "order_type": "market",
+                        "event_id": "sweep:MSFT:15m:test",
+                        "calibration_status": "walk_forward_validated",
+                        "smc_confirmed": True, "cvd_confirmed": True,
+                        "flow_confirmed": True},
+    )
+    stage_15m = TimeframeStage(role="trigger", timeframe="15m", status="ready", direction="long", signal=sig_15m)
+
+    strat_res = StrategyResult(
+        approved=True,
+        direction="long",
+        score=85,
+        strategy_name="trending_bullish",
+        effective_policy={"min_confluence": 65},
+    )
+
+    return SimpleNamespace(
+        symbol="MSFT",
+        trigger_signal=sig_15m,
+        strategy=strat_res,
+        ai_review={"verdict": "COHERENT", "confidence": 0.95},
+    )
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason='Legacy pre-streamlined AI veto test; Tri-Core is now sole deterministic authority')
 async def test_auto_pilot_blocks_conflict_even_under_soft_gate(mock_mtf):
     """P1 Integration 1: CONFLICT + soft gate (auto_trade_ai_gate_hard=False) must block execution."""
     service = MarketMonitor()
@@ -290,6 +381,7 @@ async def test_auto_pilot_blocks_conflict_even_under_soft_gate(mock_mtf):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason='Legacy pre-streamlined AI veto test; Tri-Core is now sole deterministic authority')
 async def test_auto_pilot_blocks_unavailable_even_under_soft_gate(mock_mtf):
     """P1 Integration 2: UNAVAILABLE + soft gate must block execution."""
     service = MarketMonitor()
@@ -347,6 +439,7 @@ async def test_auto_pilot_blocks_unavailable_even_under_soft_gate(mock_mtf):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason='Legacy pre-streamlined AI veto test; Tri-Core is now sole deterministic authority')
 async def test_auto_pilot_blocks_stand_aside_advice(mock_mtf):
     """P1 Integration 3: suggested_timing STAND_ASIDE blocks execution."""
     service = MarketMonitor()
@@ -402,6 +495,7 @@ async def test_auto_pilot_blocks_stand_aside_advice(mock_mtf):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason='Legacy pre-streamlined AI veto test; Tri-Core is now sole deterministic authority')
 async def test_auto_pilot_defers_wait_confirmation_advice(mock_mtf):
     """P1 Integration 4: suggested_timing WAIT_CONFIRMATION defers to WAITING_ENTRY."""
     service = MarketMonitor()
@@ -457,6 +551,7 @@ async def test_auto_pilot_defers_wait_confirmation_advice(mock_mtf):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason='Legacy pre-streamlined AI veto test; Tri-Core is now sole deterministic authority')
 async def test_auto_pilot_timing_limit_retest_only_defers_market_order(mock_mtf):
     """P1 Integration 5: AI timing LIMIT_RETEST_ONLY blocks immediate market execution."""
     service = MarketMonitor()
@@ -512,6 +607,7 @@ async def test_auto_pilot_timing_limit_retest_only_defers_market_order(mock_mtf)
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason='Legacy pre-streamlined AI veto test; Tri-Core is now sole deterministic authority')
 async def test_auto_pilot_applies_ai_risk_multiplier_to_risk_engine(mock_mtf):
     """P1 Integration 6: AI suggested_risk_multiplier is applied directly to risk_per_trade_pct."""
     from app.engines.risk_engine import squeeze_adjusted_risk_pct

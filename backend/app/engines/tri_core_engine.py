@@ -25,7 +25,7 @@ class TriCorePolicy:
     """
 
     version: str = "15m-migration-v1"
-    calibration_status: Literal["draft_unvalidated", "walk_forward_validated"] = "walk_forward_validated"
+    calibration_status: Literal["draft_unvalidated", "walk_forward_validated"] = "draft_unvalidated"
     ttl_bars: int = 2
     market_entry_max_extension_atr: float = 0.50
     no_chase_max_extension_atr: float = 1.00
@@ -33,7 +33,7 @@ class TriCorePolicy:
     minimum_rr: float = 1.2
     ping_pong_enabled: bool = True
     target_anchor_mode: str = "opposing_boundary"
-    counter_trend_filter_enabled: bool = False
+    counter_trend_filter_enabled: bool = True
     candidate_selection_mode: Literal["rr_then_grade", "grade_then_rr"] = "rr_then_grade"
     binance_trading_mode: Literal["futures", "spot"] = "futures"
 
@@ -669,7 +669,7 @@ def _bound_flow(signal: Any, side: str, sweep: dict[str, Any]) -> tuple[bool, st
     if divergence_ok or absorption_ok:
         return True, divergence if divergence_ok else absorption, strong_divergence
     if oi_flush_ok:
-        return True, f"oi_liquidation_{d_bias.lower()}", True
+        return True, f"oi_liquidation_exhaustion_{side}", False
     return False, "none", False
 
 
@@ -708,7 +708,7 @@ def _candidate(*, side: str, setup_type: str, entry: float, stop: float,
             if obstacle_rr < eff_min_rr:
                 return TriCoreSetup(
                     rejection_reasons=[
-                        f"Opposing structural obstacle at {float(structural_obstacle):.4f} blocks room to target ({obstacle_rr:.2f}R < {eff_min_rr:.2f}R — Anti-Chase)"
+                        f"Nearest opposing obstacle at {float(structural_obstacle):.4f} blocks room to target ({obstacle_rr:.2f}R < {eff_min_rr:.2f}R — Anti-Chase)"
                     ]
                 )
 
@@ -878,11 +878,73 @@ class TriCoreSetupEngine:
 
         regime_data = getattr(signal, "market_regime", {}) or {}
         regime_label = str(regime_data.get("regime", "")).lower()
+        trend_direction = str(regime_data.get("direction", "")).lower()
+        htf_bias = str(getattr(signal, "htf_bias", "neutral") or "neutral").lower()
+        raw_intraday = getattr(signal, "intraday_bias", None)
+        if raw_intraday and str(raw_intraday).lower() != "neutral":
+            intraday_bias = str(raw_intraday).lower()
+        else:
+            intraday_bias = htf_bias
+        macro_bias = str(getattr(signal, "macro_bias", "neutral") or "neutral").lower()
+        macro_obstacles = getattr(signal, "macro_obstacles", []) or []
         is_ranging = (regime_label == "ranging")
         micro = getattr(signal, "micro_momentum", {}) or {}
         micro_dir = str(micro.get("direction", "neutral")).lower()
 
         for side in ("long", "short"):
+            if policy.counter_trend_filter_enabled:
+                if regime_label == "trending":
+                    if trend_direction == "bullish" and side == "short":
+                        rejected.append("Counter-trend SHORT rejected: Market regime is trending bullish")
+                        continue
+                    if trend_direction == "bearish" and side == "long":
+                        rejected.append("Counter-trend LONG rejected: Market regime is trending bearish")
+                        continue
+                if regime_label == "volatile":
+                    if trend_direction == "bullish" and side == "short":
+                        rejected.append("Counter-trend SHORT rejected: Market regime is volatile bullish")
+                        continue
+                    if trend_direction == "bearish" and side == "long":
+                        rejected.append("Counter-trend LONG rejected: Market regime is volatile bearish")
+                        continue
+                if regime_label != "ranging":
+                    if intraday_bias == "bullish" and side == "short":
+                        rejected.append(f"Counter-trend SHORT rejected: {('1H intraday trend' if raw_intraday and str(raw_intraday).lower() != 'neutral' else 'HTF bias')} is bullish")
+                        continue
+                    if intraday_bias == "bearish" and side == "long":
+                        rejected.append(f"Counter-trend LONG rejected: {('1H intraday trend' if raw_intraday and str(raw_intraday).lower() != 'neutral' else 'HTF bias')} is bearish")
+                        continue
+
+                    # Scenario B & C: 1H aligns, but 4H Macro opposes (Intraday Counter-4H Swing)
+                    is_counter_4h = (macro_bias == "bullish" and side == "short") or (macro_bias == "bearish" and side == "long")
+                    if is_counter_4h and macro_obstacles:
+                        nearest_obstacle = None
+                        min_dist = float("inf")
+                        for obs in macro_obstacles:
+                            obs_price = float(obs.get("price", 0.0) or obs.get("mid", 0.0) or (obs.get("low", 0.0) if side == "long" else obs.get("high", 0.0)) or 0.0)
+                            if side == "long" and obs_price > entry:
+                                dist = obs_price - entry
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    nearest_obstacle = obs_price
+                            elif side == "short" and obs_price < entry:
+                                dist = entry - obs_price
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    nearest_obstacle = obs_price
+
+                        if nearest_obstacle is not None:
+                            # Scenario C: Within 0.25 ATR of 4H obstacle -> No Chase
+                            if min_dist < (0.25 * atr):
+                                rejected.append(f"Adverse location: At major 4H obstacle ({nearest_obstacle:.2f}) (No Chase)")
+                                continue
+                            # Scenario B: Room to Target check
+                            est_risk = max(buffer, 1.2 * atr)
+                            est_rr = min_dist / max(est_risk, 1e-6)
+                            if est_rr < policy.minimum_rr:
+                                rejected.append(f"Insufficient room to 4H obstacle ({nearest_obstacle:.2f}): RR {est_rr:.2f} < {policy.minimum_rr:.2f} (No Chase)")
+                                continue
+
             expected_sweep = "low" if side == "long" else "high"
             in_prem = getattr(signal, "in_premium", False)
             in_disc = getattr(signal, "in_discount", False)
@@ -1095,12 +1157,12 @@ class TriCoreSetupEngine:
                     bullish_obs = [
                         z for z in getattr(signal, "order_blocks", [])
                         if z.direction == "bullish" and not z.mitigated
-                        and float(z.bottom) - buffer <= entry <= float(z.top) + atr * 0.15
+                        and float(z.bottom) - buffer <= entry <= float(z.top) + atr * 0.75
                     ]
                     bullish_fvgs = [
                         z for z in getattr(signal, "fvgs", [])
                         if z.direction == "bullish" and not z.mitigated
-                        and float(z.bottom) - buffer <= entry <= float(z.top) + atr * 0.15
+                        and float(z.bottom) - buffer <= entry <= float(z.top) + atr * 0.75
                     ]
                     loc_ok, loc_reason = _range_location_ok(
                         signal, "long", entry, allow_equilibrium_sweep=False
@@ -1160,12 +1222,12 @@ class TriCoreSetupEngine:
                     bearish_obs = [
                         z for z in getattr(signal, "order_blocks", [])
                         if z.direction == "bearish" and not z.mitigated
-                        and float(z.bottom) - atr * 0.15 <= entry <= float(z.top) + buffer
+                        and float(z.bottom) - atr * 0.75 <= entry <= float(z.top) + buffer
                     ]
                     bearish_fvgs = [
                         z for z in getattr(signal, "fvgs", [])
                         if z.direction == "bearish" and not z.mitigated
-                        and float(z.bottom) - atr * 0.15 <= entry <= float(z.top) + buffer
+                        and float(z.bottom) - atr * 0.75 <= entry <= float(z.top) + buffer
                     ]
                     loc_ok, loc_reason = _range_location_ok(
                         signal, "short", entry, allow_equilibrium_sweep=False
