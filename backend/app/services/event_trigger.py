@@ -1213,7 +1213,7 @@ class MarketMonitor:
             reason_code="EXECUTION_REVALIDATION_START",
         )
 
-        # Smart Entry Resolution (Stage 2: Market if R:R >= 1.2 & not over-extended;
+        # Smart Entry Resolution (Stage 2: Market if R:R >= target_rr & not over-extended;
         # otherwise 2-Bar Anti-Chase Limit at FVG/OB edge)
         raw_sl = float(setup.get("stop_loss") or getattr(ltf_sig, "stop_loss", 0.0) or 0.0)
         raw_tp = float(setup.get("take_profit") or getattr(ltf_sig, "take_profit", 0.0) or 0.0)
@@ -1221,53 +1221,59 @@ class MarketMonitor:
         setup_order_type = str(setup.get("order_type", "market")).lower()
         setup_policy = str(setup.get("entry_policy", "market_eligible"))
 
-        # User-configured minimum SL buffer from Settings (default 1.0%)
-        # Guarantees the trade has breathing room and cannot be placed too tight to avoid 1-2 min wick whipsaws.
-        configured_min_sl_ratio = float(r_cfg.get("default_sl_pct", 1.0) or 1.0) / 100.0
-        if configured_min_sl_ratio <= 0:
-            configured_min_sl_ratio = 0.010
+        # Target R:R from Settings (default 1.20, minimum floor 1.0)
+        configured_target_rr = max(1.0, float(r_cfg.get("target_rr", 1.2) or 1.2))
 
-        orig_risk = abs(orig_entry - raw_sl) if raw_sl > 0 else (orig_entry * configured_min_sl_ratio)
-        if orig_risk < orig_entry * configured_min_sl_ratio:
-            orig_risk = orig_entry * configured_min_sl_ratio
+        # Fallback SL buffer: only applied if raw_sl is missing or mathematically microscopic (< 0.05%)
+        # Preserves tight institutional SMC stops at sweep wicks/OB edges (Principle 2: Asymmetric R:R)
+        configured_fallback_sl_ratio = float(r_cfg.get("default_sl_pct", 1.0) or 1.0) / 100.0
+        if configured_fallback_sl_ratio <= 0:
+            configured_fallback_sl_ratio = 0.010
+
+        min_hardware_risk = orig_entry * 0.0005  # 5 bps floor to prevent zero-division
+        orig_risk = abs(orig_entry - raw_sl) if raw_sl > 0 else (orig_entry * configured_fallback_sl_ratio)
+        if orig_risk < min_hardware_risk or raw_sl <= 0:
+            orig_risk = max(orig_risk, orig_entry * configured_fallback_sl_ratio)
             raw_sl = (orig_entry - orig_risk) if direction == "long" else (orig_entry + orig_risk)
 
         if direction == "long":
             if raw_tp <= orig_entry:
-                raw_tp = orig_entry + (orig_risk * 2.0)
+                raw_tp = orig_entry + (orig_risk * configured_target_rr)
+            elif (raw_tp - orig_entry) < (orig_risk * configured_target_rr):
+                raw_tp = orig_entry + (orig_risk * configured_target_rr)
             live_valid = raw_sl < live_price < raw_tp
             live_rr = (raw_tp - live_price) / max(live_price - raw_sl, 1e-6) if live_valid else 0.0
             already_pulled_back = live_price <= orig_entry
         else:
             if raw_tp <= 0 or raw_tp >= orig_entry:
-                raw_tp = orig_entry - (orig_risk * 2.0)
+                raw_tp = orig_entry - (orig_risk * configured_target_rr)
+            elif (orig_entry - raw_tp) < (orig_risk * configured_target_rr):
+                raw_tp = orig_entry - (orig_risk * configured_target_rr)
             live_valid = raw_tp < live_price < raw_sl
             live_rr = (live_price - raw_tp) / max(raw_sl - live_price, 1e-6) if live_valid else 0.0
             already_pulled_back = live_price >= orig_entry
 
-        if (setup_order_type == "market" or already_pulled_back) and live_valid and live_rr >= 1.2:
+        acceptable_market_rr = max(0.95, configured_target_rr - 0.05)
+        if (setup_order_type == "market" or already_pulled_back) and live_valid and live_rr >= acceptable_market_rr:
             raw_entry = float(live_price)
             order_type = "market"
             entry_policy = "market_eligible"
         else:
-            # Anti-Chase: Do not Market-buy top of spike where R:R < 1.2;
+            # Anti-Chase: Do not Market-buy top of spike where live_rr < acceptable_market_rr;
             # place 2-bar Limit order at the FVG/OB edge (orig_entry) instead.
             raw_entry = float(orig_entry)
             order_type = "limit"
             entry_policy = "limit_retest_only"
-
-        if abs(raw_entry - raw_sl) < raw_entry * configured_min_sl_ratio:
-            min_sl_dist = raw_entry * configured_min_sl_ratio
-            raw_sl = (raw_entry - min_sl_dist) if direction == "long" else (raw_entry + min_sl_dist)
 
         is_long = direction == "long"
         exec_entry = rules.price(raw_entry, upward=(is_long if order_type == "market" else not is_long))
         exec_sl = rules.price(raw_sl, upward=(not is_long))
         exec_tp = rules.price(raw_tp, upward=(not is_long))
         exec_rr = round(abs(exec_tp - exec_entry) / max(abs(exec_entry - exec_sl), 1e-6), 2)
-        if exec_rr < 1.15:
+        min_allowed_rr = max(0.95, configured_target_rr - 0.05)
+        if exec_rr < min_allowed_rr:
             logger.info(
-                f"[Auto-Pilot] Anti-Chase blocked {symbol} {direction}: executable R:R {exec_rr:.2f} < 1.20"
+                f"[Auto-Pilot] Anti-Chase blocked {symbol} {direction}: executable R:R {exec_rr:.2f} < {min_allowed_rr:.2f}"
             )
             await candidate_lifecycle.transition(
                 symbol=symbol,
@@ -1275,7 +1281,7 @@ class MarketMonitor:
                 event_id=event_id,
                 new_state=CandidateState.EXECUTION_REJECTED,
                 reason_code="ANTI_CHASE_LOW_RR",
-                reason=f"Executable R:R {exec_rr:.2f} < 1.20",
+                reason=f"Executable R:R {exec_rr:.2f} < {min_allowed_rr:.2f}",
             )
             return None
 
@@ -1388,7 +1394,7 @@ class MarketMonitor:
             active_positions=active_positions,
             execution_cost_per_unit=execution_cost_per_unit,
             risk_per_trade_pct=calculated_risk_pct,
-            minimum_rr=1.2,
+            minimum_rr=configured_target_rr,
             max_stop_distance_pct=20.0,
             min_stop_distance_pct=0.05,
             atr_pct=None,

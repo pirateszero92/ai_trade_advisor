@@ -270,3 +270,32 @@ async def test_limit_armed_can_transition_to_risk_rejected():
     assert rec["reason_code"] == "RISK_REJECTED"
 
 
+@pytest.mark.anyio
+async def test_anti_chase_low_rr_transition():
+    service = CandidateLifecycleService()
+    await service.register(
+        symbol="NEAR/USDT",
+        snapshot_id="snap-chase",
+        event_id="event-chase",
+        ready=True,
+    )
+    await service.transition(
+        symbol="NEAR/USDT",
+        snapshot_id="snap-chase",
+        event_id="event-chase",
+        new_state=CandidateState.EXECUTION_VALIDATING,
+    )
+    assert await service.transition(
+        symbol="NEAR/USDT",
+        snapshot_id="snap-chase",
+        event_id="event-chase",
+        new_state=CandidateState.EXECUTION_REJECTED,
+        reason_code="ANTI_CHASE_LOW_RR",
+        reason="Executable R:R 0.90 < 1.00",
+    ) is True
+    rec = await service.get(snapshot_id="snap-chase", event_id="event-chase")
+    assert rec["state"] == "EXECUTION_REJECTED"
+    assert rec["reason_code"] == "ANTI_CHASE_LOW_RR"
+
+
+
