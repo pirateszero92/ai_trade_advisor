@@ -798,3 +798,33 @@ async def test_authority_status_uniform_not_run_representation():
     assert view["decision_summary"]["reason_code"] == "NOT_RUN"
 
 
+
+
+@pytest.mark.anyio
+async def test_funnel_diagnostics_endpoint():
+    from app.api.authority_api import get_funnel_diagnostics
+
+    # Record a test snapshot with rejection_codes
+    await decision_trace.record(
+        snapshot_id="snap-funnel-1",
+        event_id="event-funnel-1",
+        symbol="SOL/USDT",
+        stage="SNAPSHOT",
+        facts={
+            "trigger_state": "sweep_detected",
+            "rejection_codes": ["SWEEP_WAITING_FLOW", "CVD_NOT_BOUND_TO_SWEEP"],
+            "rejection_reasons": ["CVD evidence is not bound to the same swept swing/reclaim"],
+            "market_regime": "ranging",
+            "grade": "WAIT",
+            "direction": "wait",
+            "timeframe": "15m",
+        },
+    )
+    await decision_trace.flush()
+
+    res = await get_funnel_diagnostics(since="24h", symbol="SOL/USDT", _key="mock")
+    assert res["status"] == "ok"
+    assert res["total_candidates_analyzed"] >= 1
+    assert "sweep_detected" in res["funnel_stages"]
+    assert "CVD_NOT_BOUND_TO_SWEEP" in res["rejection_codes"]
+    assert "ranging" in res["regime_distribution"]

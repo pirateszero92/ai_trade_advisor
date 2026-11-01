@@ -69,6 +69,8 @@ class DecisionTraceService:
         async with self._lock:
             if not self._dirty:
                 return
+            if len(self._records) > self.hot_record_limit:
+                await self._trim_hot_store_locked()
             self._dirty = False
             await asyncio.to_thread(self._write_sync)
 

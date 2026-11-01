@@ -56,6 +56,7 @@ async def test_decision_trace_survives_restart(tmp_path):
         stage="RISK",
         facts={"approved": True, "risk_amount": 100.0, "position_size": 2.0},
     )
+    await first.flush()
 
     second = DecisionTraceService(path)
     record = await second.get(snapshot_id="snap-1", event_id="event-1")
@@ -96,6 +97,7 @@ async def test_decision_trace_disk_payload_contains_candidate_identity(tmp_path)
         stage="EXECUTION_REVALIDATION",
         facts={"passed": True, "executable_rr": 2.4},
     )
+    await service.flush()
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     record = payload["snap-abc:event-xyz"]
@@ -125,6 +127,7 @@ async def test_hrd04_decision_trace_hot_store_is_bounded_and_archives_old_record
             facts={"index": index},
             occurred_at=f"2026-09-22T00:00:0{index}+00:00",
         )
+    await service.flush()
 
     hot_payload = json.loads(path.read_text(encoding="utf-8"))
     assert len(hot_payload) == 2
@@ -189,6 +192,7 @@ async def test_hrd04_archived_candidate_can_receive_late_append_without_losing_h
         "AI_REVIEW",
     ]
     assert service.verify(updated) == []
+    await service.flush()
 
     restarted = DecisionTraceService(
         path,

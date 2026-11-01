@@ -114,6 +114,7 @@ class TriCoreSetup:
     extension_atr: float | None = None
     evidence: list[str] = field(default_factory=list)
     rejection_reasons: list[str] = field(default_factory=list)
+    rejection_codes: list[str] = field(default_factory=list)
     policy_version: str = "15m-migration-v1"
     calibration_status: str = "draft_unvalidated"
     contract_mode: Literal["spot", "futures"] = "futures"
@@ -136,11 +137,57 @@ def _resolve_contract_mode(signal: Any, policy: TriCorePolicy) -> Literal["spot"
     return "futures"
 
 
+
+def map_rejection_codes(reasons: list[str], trigger_state: str = "") -> list[str]:
+    codes = []
+    for r in reasons:
+        r_low = r.lower()
+        if "data unavailable" in r_low or "closed-candle" in r_low:
+            codes.append("DATA_UNAVAILABLE")
+        elif "market is closed" in r_low or "session is closed" in r_low:
+            codes.append("MARKET_CLOSED")
+        elif "trusted exchange-derived" in r_low or "cvd is unavailable" in r_low:
+            codes.append("CVD_UNAVAILABLE")
+        elif "blocks room to target" in r_low or "obstacle" in r_low:
+            codes.append("OBSTACLE_BLOCKS_TARGET")
+        elif "insufficient room" in r_low or "r:r" in r_low:
+            codes.append("RR_BELOW_MINIMUM")
+        elif "volatile" in r_low and "sweep" in r_low:
+            codes.append("VOLATILE_SWEEP_SUSPENDED")
+        elif "counter-trend" in r_low:
+            codes.append("COUNTER_TREND_BLOCKED")
+        elif "not bound" in r_low:
+            codes.append("CVD_NOT_BOUND_TO_SWEEP")
+        elif "spot mode" in r_low:
+            codes.append("SHORT_IN_SPOT_MODE")
+        elif "expired" in r_low:
+            codes.append("SETUP_EXPIRED")
+        elif "no_chase" in r_low or "do not chase" in r_low or "extension" in r_low:
+            codes.append("NO_CHASE_OVEREXTENDED")
+        elif "invalidated" in r_low or "reversed" in r_low:
+            codes.append("STRUCTURE_INVALIDATED")
+        else:
+            codes.append("OTHER_FILTER_BLOCKED")
+    if not codes:
+        if trigger_state == "armed":
+            codes.append("ARMED_WAITING_TRIGGER")
+        elif trigger_state == "zone_approach":
+            codes.append("APPROACHING_ZONE")
+        elif trigger_state == "sweep_detected":
+            codes.append("SWEEP_WAITING_FLOW")
+        elif trigger_state == "wait":
+            codes.append("NO_SMC_STRUCTURE")
+    return list(dict.fromkeys(codes))
+
 def _stamp_contract_metadata(
     setup: TriCoreSetup,
     contract_mode: Literal["spot", "futures"],
     spot_exit_detected: bool = False,
 ) -> TriCoreSetup:
+    if not setup.rejection_codes and setup.rejection_reasons:
+        setup.rejection_codes = map_rejection_codes(setup.rejection_reasons, setup.trigger_state)
+    elif not setup.rejection_codes and not setup.actionable:
+        setup.rejection_codes = map_rejection_codes([], setup.trigger_state)
     setup.contract_mode = contract_mode
     if spot_exit_detected and not setup.actionable:
         setup.spot_exit_signal = True

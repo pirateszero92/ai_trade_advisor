@@ -836,7 +836,11 @@ class ExecutionAnalysisService:
             self._cache[key] = analysis
             self._by_id[analysis.snapshot_id] = analysis
 
+            bar_time_str = str(frame.index[-1]) if len(frame) > 0 else now.isoformat()
             event_id = str(setup.get("event_id", ""))
+            if not event_id:
+                event_id = f"bar:{symbol}:{res_timeframe}:{bar_time_str}"
+
             if event_id:
                 record = await candidate_lifecycle.register(
                     symbol=symbol,
@@ -874,6 +878,19 @@ class ExecutionAnalysisService:
                         "take_profit": signal.take_profit,
                         "structural_rr": signal.risk_reward,
                         "grade": setup.get("grade"),
+                        "trigger_state": setup.get("trigger_state", "wait"),
+                        "state_reason": setup.get("state_reason", ""),
+                        "rejection_reasons": list(setup.get("rejection_reasons") or []),
+                        "rejection_codes": list(setup.get("rejection_codes") or []),
+                        "market_regime": (
+                            getattr(signal, "market_regime", {}).get("label", "unknown")
+                            if isinstance(getattr(signal, "market_regime", None), dict)
+                            else str(getattr(signal, "market_regime", "unknown"))
+                        ),
+                        "htf_bias": str(getattr(signal, "htf_bias", "neutral") or "neutral"),
+                        "in_discount": bool(getattr(signal, "in_discount", False)),
+                        "in_premium": bool(getattr(signal, "in_premium", False)),
+                        "signal_bar_time": bar_time_str,
                     },
                 )
                 await decision_trace.record(

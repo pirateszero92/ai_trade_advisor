@@ -220,6 +220,35 @@ class MarketMonitor:
             except Exception as e:
                 logger.error(f"Error in proactive scan loop: {e}")
 
+            # Hourly Funnel Summary Log for Forensic Observability
+            try:
+                now_loop_ts = asyncio.get_event_loop().time()
+                if now_loop_ts - getattr(self, "_last_funnel_log_time", 0.0) >= 3600.0:
+                    self._last_funnel_log_time = now_loop_ts
+                    from collections import Counter
+                    records = await decision_trace.list_records()
+                    cutoff_hour = datetime.now(timezone.utc) - timedelta(hours=1)
+                    recent_hr = []
+                    for r in records:
+                        up_at = r.get("updated_at") or r.get("created_at")
+                        if up_at:
+                            try:
+                                if datetime.fromisoformat(str(up_at).replace("Z", "+00:00")) >= cutoff_hour:
+                                    recent_hr.append(r)
+                            except ValueError:
+                                pass
+                    states = Counter()
+                    rejection_codes = Counter()
+                    for r in recent_hr:
+                        snap_facts = next((ev.get("facts", {}) for ev in r.get("events", []) if ev.get("stage") == "SNAPSHOT"), {})
+                        states[snap_facts.get("trigger_state", "wait")] += 1
+                        for c in snap_facts.get("rejection_codes", []):
+                            rejection_codes[c] += 1
+                    top_codes = ", ".join(f"{k}:{v}" for k, v in rejection_codes.most_common(3)) or "none"
+                    logger.info(f"📊 [Hourly Funnel] Monitored: {len(recent_hr)} candidates | Stages: {dict(states)} | Top block reasons: {top_codes}")
+            except Exception as f_err:
+                logger.debug(f"[Funnel] Hourly log skipped: {f_err}")
+
             # Smart candle-close alignment:
             # Regularly poll every interval (45s), but if the next 15m candle close
             # (+2s buffer for exchange data finalization: :00:02, :15:02, :30:02, :45:02)
@@ -1583,7 +1612,7 @@ class MarketMonitor:
             "oi_bias": str(getattr(ltf_sig, "sentiment_bias", "neutral") or "neutral"),
             "oi_boost_applied": bool(getattr(ltf_sig, "oi_boost_applied", False)),
             "htf_bias": str(getattr(ltf_sig, "htf_bias", "neutral") or "neutral"),
-            "signal_bar_time": str(getattr(ltf_sig, "timestamp", "") or (datetime.now(timezone.utc).isoformat())),
+            "signal_bar_time": str(ltf_df.index[-1]) if len(ltf_df) > 0 else (datetime.now(timezone.utc).isoformat()),
             "valid_until": limit_valid_until,
             "limit_timeout_bars": 2 if order_type == "limit" else 0,
             "limit_zone_id": str(setup.get("limit_zone_id", "")),
