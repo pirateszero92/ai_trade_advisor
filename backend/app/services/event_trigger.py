@@ -226,8 +226,8 @@ class MarketMonitor:
                 if now_loop_ts - getattr(self, "_last_funnel_log_time", 0.0) >= 3600.0:
                     self._last_funnel_log_time = now_loop_ts
                     from collections import Counter
-                    records = await decision_trace.list_records()
                     cutoff_hour = datetime.now(timezone.utc) - timedelta(hours=1)
+                    records = await decision_trace.list_records(since=cutoff_hour)
                     recent_hr = []
                     for r in records:
                         up_at = r.get("updated_at") or r.get("created_at")

@@ -318,6 +318,15 @@ class MarketRegimeEngine:
         volatility_percentile = float(
             (volatility_window <= current_normalized_atr).mean() * 100.0
         )
+        # 3-bar smoothed percentile to prevent boundary fluttering
+        if len(normalized_atr) >= 3 and len(volatility_window) > 0:
+            recent_pcts = [
+                float((volatility_window <= val).mean() * 100.0)
+                for val in normalized_atr.tail(3)
+            ]
+            smoothed_percentile = float(np.mean(recent_pcts))
+        else:
+            smoothed_percentile = volatility_percentile
 
         efficiency_lookback = int(params["efficiency_lookback"])
         path = close.tail(efficiency_lookback + 1)
@@ -350,7 +359,7 @@ class MarketRegimeEngine:
         is_compression = atr_ratio <= 0.80 and volatility_percentile <= 30.0
         is_volatile = (
             atr_ratio >= float(params["volatile_atr_ratio"])
-            or volatility_percentile >= float(params["volatile_percentile"])
+            or (smoothed_percentile >= float(params["volatile_percentile"]) and atr_ratio >= 1.25)
         )
         is_trending = (
             efficiency >= float(params["trend_efficiency_min"])

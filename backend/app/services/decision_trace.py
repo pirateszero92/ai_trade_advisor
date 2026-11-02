@@ -143,17 +143,35 @@ class DecisionTraceService:
             archived = await asyncio.to_thread(self._read_archived_sync, cid)
             return deepcopy(archived) if archived else None
 
-    async def list_records(self) -> list[dict[str, Any]]:
-        """Return all known records; archive expansion is transient, not cached."""
+    async def list_records(
+        self,
+        *,
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return audit records.
+        
+        Archive reading is bounded by 'since' and performed outside self._lock
+        to avoid latency contention on live execution threads.
+        """
         await self._ensure_loaded()
         await self.flush()
+
         async with self._lock:
-            archived = await asyncio.to_thread(self._read_all_archived_sync)
-            archived.update(self._records)
-            return [
-                deepcopy(record)
-                for _, record in sorted(archived.items())
+            hot_snapshot = {cid: deepcopy(rec) for cid, rec in self._records.items()}
+
+        archived = await asyncio.to_thread(self._read_archived_since_sync, since)
+        archived.update(hot_snapshot)
+
+        if since is not None:
+            since_iso = since.isoformat()
+            filtered = [
+                rec for rec in archived.values()
+                if str(rec.get("updated_at") or rec.get("created_at") or "") >= since_iso
             ]
+            filtered.sort(key=lambda r: str(r.get("created_at") or r.get("updated_at") or ""))
+            return filtered
+
+        return [rec for _, rec in sorted(archived.items())]
 
     async def reset(self) -> None:
         async with self._lock:
@@ -381,11 +399,23 @@ class DecisionTraceService:
                     return record
         return None
 
-    def _read_all_archived_sync(self) -> dict[str, dict[str, Any]]:
+    def _read_archived_since_sync(
+        self, since: datetime | None = None
+    ) -> dict[str, dict[str, Any]]:
         records: dict[str, dict[str, Any]] = {}
         if not self.archive_dir.exists():
             return records
-        for archive_path in sorted(self.archive_dir.glob("decision-traces-*.ndjson")):
+        since_date = since.date() if since is not None else None
+        archive_files = sorted(self.archive_dir.glob("decision-traces-*.ndjson"))
+        for archive_path in archive_files:
+            if since_date is not None:
+                stamp = archive_path.stem.replace("decision-traces-", "")
+                try:
+                    archive_date = datetime.fromisoformat(stamp).date()
+                    if archive_date < since_date:
+                        continue
+                except ValueError:
+                    pass
             try:
                 lines = archive_path.read_text(encoding="utf-8").splitlines()
             except (OSError, UnicodeError):
@@ -399,6 +429,9 @@ class DecisionTraceService:
                 if record is not None:
                     records[str(record.get("candidate_id") or "")] = record
         return records
+
+    def _read_all_archived_sync(self) -> dict[str, dict[str, Any]]:
+        return self._read_archived_since_sync(since=None)
 
 
 decision_trace = DecisionTraceService()

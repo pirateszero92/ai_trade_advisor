@@ -144,10 +144,18 @@ def map_rejection_codes(reasons: list[str], trigger_state: str = "") -> list[str
         r_low = r.lower()
         if "data unavailable" in r_low or "closed-candle" in r_low:
             codes.append("DATA_UNAVAILABLE")
+        elif "us regular" in r_low or "trading session is closed" in r_low:
+            codes.append("US_SESSION_CLOSED")
         elif "market is closed" in r_low or "session is closed" in r_low:
             codes.append("MARKET_CLOSED")
-        elif "trusted exchange-derived" in r_low or "cvd is unavailable" in r_low:
+        elif "trusted exchange-derived" in r_low or "cvd is unavailable" in r_low or "cvd continuation is unavailable" in r_low:
             codes.append("CVD_UNAVAILABLE")
+        elif "cannot long in premium" in r_low or "cannot long above equilibrium" in r_low:
+            codes.append("LOCATION_LONG_IN_PREMIUM")
+        elif "cannot short in discount" in r_low or "cannot short below equilibrium" in r_low:
+            codes.append("LOCATION_SHORT_IN_DISCOUNT")
+        elif "middle equilibrium" in r_low or "mid-range location" in r_low:
+            codes.append("LOCATION_MID_RANGE_EQUILIBRIUM")
         elif "blocks room to target" in r_low or "obstacle" in r_low:
             codes.append("OBSTACLE_BLOCKS_TARGET")
         elif "insufficient room" in r_low or "r:r" in r_low:
@@ -158,14 +166,16 @@ def map_rejection_codes(reasons: list[str], trigger_state: str = "") -> list[str
             codes.append("COUNTER_TREND_BLOCKED")
         elif "not bound" in r_low:
             codes.append("CVD_NOT_BOUND_TO_SWEEP")
-        elif "spot mode" in r_low:
+        elif "spot mode" in r_low or "short entry disabled" in r_low:
             codes.append("SHORT_IN_SPOT_MODE")
         elif "expired" in r_low:
             codes.append("SETUP_EXPIRED")
-        elif "no_chase" in r_low or "do not chase" in r_low or "extension" in r_low:
+        elif "no_chase" in r_low or "do not chase" in r_low or "extension" in r_low or "without fvg/ob retest zone" in r_low:
             codes.append("NO_CHASE_OVEREXTENDED")
-        elif "invalidated" in r_low or "reversed" in r_low:
+        elif "invalidated" in r_low or "reversed" in r_low or "breakout, not reversal" in r_low or "breakdown, not reversal" in r_low or "opposing structure break" in r_low:
             codes.append("STRUCTURE_INVALIDATED")
+        elif "no causal" in r_low or "no setup" in r_low:
+            codes.append("NO_SETUP_FOUND")
         else:
             codes.append("OTHER_FILTER_BLOCKED")
     if not codes:
@@ -176,7 +186,7 @@ def map_rejection_codes(reasons: list[str], trigger_state: str = "") -> list[str
         elif trigger_state == "sweep_detected":
             codes.append("SWEEP_WAITING_FLOW")
         elif trigger_state == "wait":
-            codes.append("NO_SMC_STRUCTURE")
+            codes.append("NO_SETUP_FOUND")
     return list(dict.fromkeys(codes))
 
 def _stamp_contract_metadata(
@@ -756,7 +766,8 @@ def _candidate(*, side: str, setup_type: str, entry: float, stop: float,
                 return TriCoreSetup(
                     rejection_reasons=[
                         f"Nearest opposing obstacle at {float(structural_obstacle):.4f} blocks room to target ({obstacle_rr:.2f}R < {eff_min_rr:.2f}R — Anti-Chase)"
-                    ]
+                    ],
+                    rejection_codes=["OBSTACLE_BLOCKS_TARGET"],
                 )
 
     if target is None or not (
@@ -803,6 +814,7 @@ def _candidate(*, side: str, setup_type: str, entry: float, stop: float,
         rejection_reasons=[] if is_actionable else [
             f"Insufficient room to target: R:R {rr:.2f} < {eff_min_rr:.2f} (Anti-Chase)"
         ],
+        rejection_codes=[] if is_actionable else ["RR_BELOW_MINIMUM"],
         expires_after_bars=policy.ttl_bars,
         policy_version=policy.version,
         calibration_status=policy.calibration_status,
@@ -902,19 +914,48 @@ class TriCoreSetupEngine:
     ) -> TriCoreSetup:
         policy = TriCorePolicy.from_mapping(policy_config)
         if frame is None or frame.empty:
-            return TriCoreSetup(rejection_reasons=["Closed-candle data unavailable"])
+            return _stamp_contract_metadata(
+                TriCoreSetup(
+                    trigger_state="wait",
+                    state_reason="Closed-candle data unavailable",
+                    rejection_reasons=["Closed-candle data unavailable"],
+                    rejection_codes=["DATA_UNAVAILABLE"],
+                ),
+                contract_mode="futures",
+            )
         market_status = getattr(frame, "attrs", {}).get("market_data_status", {})
         if isinstance(market_status, dict) and market_status.get("market") == "US_EQUITY":
             if not market_status.get("regular_session_open", True):
-                return TriCoreSetup(rejection_reasons=["US regular trading session is closed"])
+                return _stamp_contract_metadata(
+                    TriCoreSetup(
+                        trigger_state="wait",
+                        state_reason="US regular trading session is closed",
+                        rejection_reasons=["US regular trading session is closed"],
+                        rejection_codes=["US_SESSION_CLOSED"],
+                    ),
+                    contract_mode="futures",
+                )
 
         if getattr(signal, "volume_quality", "unavailable") != "exchange_aggressor":
-            return TriCoreSetup(rejection_reasons=[
-                "Trusted exchange-derived aggressor CVD is unavailable"
-            ])
+            return _stamp_contract_metadata(
+                TriCoreSetup(
+                    trigger_state="wait",
+                    state_reason="Trusted exchange-derived aggressor CVD is unavailable",
+                    rejection_reasons=[
+                        "Trusted exchange-derived aggressor CVD is unavailable"
+                    ],
+                    rejection_codes=["CVD_UNAVAILABLE"],
+                ),
+                contract_mode=_resolve_contract_mode(signal, policy),
+            )
 
         candidates: list[TriCoreSetup] = []
         rejected: list[str] = []
+        rejected_codes: list[str] = []
+
+        def _add_rejection(reason: str, code: str) -> None:
+            rejected.append(reason)
+            rejected_codes.append(code)
         entry = float(frame["close"].iloc[-1])
         atr = _atr(frame)
         buffer = max(entry * 0.0005, atr * 0.10)
@@ -997,10 +1038,10 @@ class TriCoreSetupEngine:
             in_prem = getattr(signal, "in_premium", False)
             in_disc = getattr(signal, "in_discount", False)
             if side == "long" and in_prem:
-                rejected.append("Adverse location: Cannot LONG in Premium")
+                _add_rejection("Adverse location: Cannot LONG in Premium", "LOCATION_LONG_IN_PREMIUM")
                 continue
             if side == "short" and in_disc:
-                rejected.append("Adverse location: Cannot SHORT in Discount")
+                _add_rejection("Adverse location: Cannot SHORT in Discount", "LOCATION_SHORT_IN_DISCOUNT")
                 continue
 
             # -----------------------------------------------------------------
@@ -1009,7 +1050,7 @@ class TriCoreSetupEngine:
             if (getattr(signal, "liquidity_swept", False)
                     and getattr(signal, "sweep_direction", "none") == expected_sweep):
                 if regime_label == "volatile":
-                    rejected.append("Sweep reversal suspended in Volatile market regime (high momentum continuation risk)")
+                    _add_rejection("Sweep reversal suspended in Volatile market regime (high momentum continuation risk)", "VOLATILE_SWEEP_SUSPENDED")
                     continue
                 saw_sweep = True
                 sweep_age = len(frame) - 1 - _index(sweep.get("candle_index"))
@@ -1017,7 +1058,13 @@ class TriCoreSetupEngine:
                     signal, frame, side, sweep, atr=atr, policy=policy
                 )
                 if not window_ok:
-                    rejected.append(window_reason)
+                    w_code = (
+                        "NO_CHASE_OVEREXTENDED" if ("do not chase" in window_reason.lower() or "extended" in window_reason.lower())
+                        else "SETUP_EXPIRED" if "expired" in window_reason.lower()
+                        else "CVD_UNAVAILABLE" if "cvd" in window_reason.lower()
+                        else "STRUCTURE_INVALIDATED"
+                    )
+                    _add_rejection(window_reason, w_code)
                 else:
                     flow_ok, flow_label, strong = _bound_flow(signal, side, sweep)
                     if flow_ok:
@@ -1025,10 +1072,10 @@ class TriCoreSetupEngine:
                         extreme = float(sweep.get("extreme", 0.0) or 0.0)
                         # Rejection Confirmation: If candle closed beyond the sweep extreme, it's a breakout/continuation, not a reversal.
                         if side == "short" and entry >= extreme:
-                            rejected.append(f"Sweep invalidated: price {entry:.4f} closed above sweep extreme {extreme:.4f} (breakout, not reversal)")
+                            _add_rejection(f"Sweep invalidated: price {entry:.4f} closed above sweep extreme {extreme:.4f} (breakout, not reversal)", "STRUCTURE_INVALIDATED")
                             continue
                         if side == "long" and entry <= extreme:
-                            rejected.append(f"Sweep invalidated: price {entry:.4f} closed below sweep extreme {extreme:.4f} (breakdown, not reversal)")
+                            _add_rejection(f"Sweep invalidated: price {entry:.4f} closed below sweep extreme {extreme:.4f} (breakdown, not reversal)", "STRUCTURE_INVALIDATED")
                             continue
                         stop = extreme - buffer if side == "long" else extreme + buffer
                         event_id = str(sweep.get("event_id") or (
@@ -1049,8 +1096,9 @@ class TriCoreSetupEngine:
                         # place 2-bar Limit at the front edge of the causal FVG/OB instead.
                         if extension_atr > eff_market_extension:
                             if causal_zone is None:
-                                rejected.append(
-                                    f"Price extended {extension_atr:.2f} ATR (> {eff_market_extension:.2f} ATR) without FVG/OB retest zone — do not chase"
+                                _add_rejection(
+                                    f"Price extended {extension_atr:.2f} ATR (> {eff_market_extension:.2f} ATR) without FVG/OB retest zone — do not chase",
+                                    "NO_CHASE_OVEREXTENDED",
                                 )
                                 continue
                             entry_policy = "limit_retest_only"
@@ -1062,7 +1110,12 @@ class TriCoreSetupEngine:
                             signal, side, candidate_entry, allow_equilibrium_sweep=True
                         )
                         if not loc_ok:
-                            rejected.append(loc_reason)
+                            loc_code = (
+                                "LOCATION_LONG_IN_PREMIUM" if (side == "long" and "equilibrium 50%" in loc_reason.lower())
+                                else "LOCATION_SHORT_IN_DISCOUNT" if (side == "short" and "equilibrium 50%" in loc_reason.lower())
+                                else "LOCATION_MID_RANGE_EQUILIBRIUM"
+                            )
+                            _add_rejection(loc_reason, loc_code)
                             continue
                         target_val = (
                             _range_opposing_target(signal, side, candidate_entry)
@@ -1099,8 +1152,10 @@ class TriCoreSetupEngine:
                         )
                         candidates.append(result)
                         rejected.extend(result.rejection_reasons)
+                        if result.rejection_codes:
+                            rejected_codes.extend(result.rejection_codes)
                     else:
-                        rejected.append("CVD evidence is not bound to the same swept swing/reclaim")
+                        _add_rejection("CVD evidence is not bound to the same swept swing/reclaim", "CVD_NOT_BOUND_TO_SWEEP")
 
             # -----------------------------------------------------------------
             # SETUP B: BOS/CHoCH + Order Block / FVG / Breaker Retest
@@ -1183,7 +1238,12 @@ class TriCoreSetupEngine:
                         signal, side, disp_entry, allow_equilibrium_sweep=False
                     )
                     if not loc_ok:
-                        rejected.append(loc_reason)
+                        loc_code = (
+                            "LOCATION_LONG_IN_PREMIUM" if (side == "long" and "equilibrium 50%" in loc_reason.lower())
+                            else "LOCATION_SHORT_IN_DISCOUNT" if (side == "short" and "equilibrium 50%" in loc_reason.lower())
+                            else "LOCATION_MID_RANGE_EQUILIBRIUM"
+                        )
+                        _add_rejection(loc_reason, loc_code)
                         continue
 
                     disp_target = (
@@ -1207,6 +1267,8 @@ class TriCoreSetupEngine:
                     )
                     candidates.append(result)
                     rejected.extend(result.rejection_reasons)
+                    if result.rejection_codes:
+                        rejected_codes.extend(result.rejection_codes)
 
             # -----------------------------------------------------------------
             # SETUP C: Ranging Boundary OB/FVG (Protected against Falling Knives)
@@ -1365,10 +1427,14 @@ class TriCoreSetupEngine:
             reasons = list(dict.fromkeys(rejected)) or [
                 "No causal sweep+CVD reversal or first displacement-retest+CVD continuation"
             ]
+            codes = list(dict.fromkeys(rejected_codes)) or [
+                "NO_SETUP_FOUND"
+            ]
             if candidates:
                 candidates.sort(key=lambda candidate: candidate.risk_reward, reverse=True)
                 armed = candidates[0]
                 armed.rejection_reasons = reasons
+                armed.rejection_codes = codes or map_rejection_codes(reasons, armed.trigger_state)
                 return _stamp_contract_metadata(armed, contract_mode, spot_exit_detected)
             state: Literal[
                 "wait", "zone_approach", "armed", "sweep_detected",
@@ -1408,6 +1474,7 @@ class TriCoreSetupEngine:
                     state_reason=state_reason,
                     entry_policy="no_chase" if state == "no_chase" else "none",
                     rejection_reasons=reasons,
+                    rejection_codes=codes or map_rejection_codes(reasons, state),
                     expires_after_bars=policy.ttl_bars,
                     policy_version=policy.version,
                     calibration_status=policy.calibration_status,

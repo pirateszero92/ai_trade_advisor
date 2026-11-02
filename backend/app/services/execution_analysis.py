@@ -805,8 +805,13 @@ class ExecutionAnalysisService:
             digest = hashlib.sha256()
             digest.update("|".join(key).encode("utf-8"))
             digest.update(_frame_digest(frame))
+            risk_semantic = {
+                "status": systemic_risk.get("status"),
+                "execution_allowed": systemic_risk.get("execution_allowed"),
+                "reason_code": systemic_risk.get("reason_code"),
+            }
             digest.update(
-                json.dumps(systemic_risk, sort_keys=True, default=str).encode("utf-8")
+                json.dumps(risk_semantic, sort_keys=True, default=str).encode("utf-8")
             )
             own_valid_until = _next_refresh_at(frame.index[-1], res_timeframe)
             btc_valid_until_raw = systemic_risk.get("valid_until")
@@ -861,7 +866,9 @@ class ExecutionAnalysisService:
                     occurred_at=now.isoformat(),
                     facts={
                         "decision_authority": "tri_core_setup_engine",
+                        "market_type": analysis.market_type,
                         "timeframe": analysis.timeframe,
+                        "signal_bar_time": bar_time_str,
                         "generated_at": analysis.generated_at.isoformat(),
                         "valid_until": analysis.valid_until.isoformat(),
                         "candle_digest": hashlib.sha256(_frame_digest(frame)).hexdigest()[:24],

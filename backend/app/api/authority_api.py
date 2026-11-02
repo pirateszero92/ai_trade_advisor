@@ -76,12 +76,16 @@ async def get_candidate_trace(
 async def get_funnel_diagnostics(
     since: Optional[str] = Query("24h", description="Lookback window, e.g. '24h', '8h', '1h' or ISO timestamp"),
     symbol: Optional[str] = Query(None, description="Optional symbol filter, e.g. BTC/USDT"),
+    market_type: Optional[str] = Query("crypto", description="Optional asset class filter: 'crypto', 'forex', 'stock', or 'all'"),
     _key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """
     Diagnostic endpoint providing Funnel metrics and rejection breakdowns for candidate setups.
     Tracks conversion from Candle Scan -> Zone -> Armed -> Sweep -> Flow -> Actionable.
     """
+    raw_mt = market_type.default if hasattr(market_type, "default") else market_type
+    effective_market_type = str(raw_mt).lower() if (raw_mt and str(raw_mt).lower() not in {"none", "query(crypto)"}) else "crypto"
+
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=24)
     if since:
@@ -104,7 +108,7 @@ async def get_funnel_diagnostics(
             except ValueError:
                 pass
 
-    all_records = await decision_trace.list_records()
+    all_records = await decision_trace.list_records(since=cutoff)
 
     funnel_states: Counter[str] = Counter()
     rejection_codes_counter: Counter[str] = Counter()
@@ -132,6 +136,18 @@ async def get_funnel_diagnostics(
             if ev.get("stage") == "SNAPSHOT":
                 snapshot_fact = ev.get("facts", {})
                 break
+
+        if effective_market_type and effective_market_type != "all":
+            rec_market = str(snapshot_fact.get("market_type") or "").lower()
+            if not rec_market:
+                if "/" in rec_sym or rec_sym.endswith("USDT"):
+                    rec_market = "crypto"
+                elif rec_sym in {"XAUUSD", "EURUSD", "GBPUSD"}:
+                    rec_market = "forex"
+                else:
+                    rec_market = "stock"
+            if rec_market != effective_market_type:
+                continue
 
         trigger_state = snapshot_fact.get("trigger_state", "wait")
         funnel_states[trigger_state] += 1
@@ -164,6 +180,7 @@ async def get_funnel_diagnostics(
     return {
         "status": "ok",
         "since": cutoff.isoformat(),
+        "market_type_filter": effective_market_type,
         "total_candidates_analyzed": total_candidates,
         "funnel_stages": dict(funnel_states),
         "rejection_codes": dict(rejection_codes_counter.most_common(20)),
