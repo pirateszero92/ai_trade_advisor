@@ -975,6 +975,7 @@ class MarketMonitor:
                         entry_mode=entry_mode,
                         decision_snapshot_id=execution.snapshot_id,
                         setup_timeframe=execution.timeframe,
+                        ltf_df=ltf_df,
                     )
                     signal_payload["ai_review"] = getattr(ltf_sig, "ai_review", signal_payload.get("ai_review"))
                     await broadcast({"type": "signal", "data": signal_payload})
@@ -1083,6 +1084,7 @@ class MarketMonitor:
         entry_mode: str,
         decision_snapshot_id: str,
         setup_timeframe: str,
+        ltf_df: pd.DataFrame | None = None,
     ) -> Optional[dict]:
         """3-Step Direct Execution Pipeline:
         Step 1: SMC Zone + CVD Confirmed (Tri-Core actionable)
@@ -1612,7 +1614,15 @@ class MarketMonitor:
             "oi_bias": str(getattr(ltf_sig, "sentiment_bias", "neutral") or "neutral"),
             "oi_boost_applied": bool(getattr(ltf_sig, "oi_boost_applied", False)),
             "htf_bias": str(getattr(ltf_sig, "htf_bias", "neutral") or "neutral"),
-            "signal_bar_time": str(ltf_df.index[-1]) if len(ltf_df) > 0 else (datetime.now(timezone.utc).isoformat()),
+            "signal_bar_time": (
+                str(ltf_df.index[-1])
+                if ltf_df is not None and len(ltf_df) > 0
+                else (
+                    str(canonical_analysis.frame.index[-1])
+                    if canonical_analysis is not None and len(canonical_analysis.frame) > 0
+                    else str(getattr(ltf_sig, "timestamp", "") or datetime.now(timezone.utc).isoformat())
+                )
+            ),
             "valid_until": limit_valid_until,
             "limit_timeout_bars": 2 if order_type == "limit" else 0,
             "limit_zone_id": str(setup.get("limit_zone_id", "")),
