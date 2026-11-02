@@ -24,3 +24,17 @@
    - Differentiate between a healthy momentum breakout and an overextended climax.
    - Avoid adverse selection where passive limit orders only fill on failing, knife-dropping structures.
    - Support adaptive market entry when institutional flow and volume delta strongly support continuation.
+
+---
+
+## 🛡️ Critical Engineering Protocols & Anti-Regression Lessons (บทเรียนทางวิศวกรรมและข้อห้ามพลาด)
+
+1. **End-to-End Execution Verification (ทดสอบให้ทะลุถึงจุดยิงออเดอร์เสมอ)**:
+   - Unit tests แยกส่วนสามารถผ่าน 100% ได้แม้มี runtime `NameError` แอบแฝงอยู่ในบรรทัดประกอบ `order_payload` ของ Step 3
+   - ทุกครั้งที่มีการแก้โค้ดใน `_evaluate_and_execute_auto_pilot` หรือการส่งคำสั่งเข้า OMS ใน [`event_trigger.py`](file:///c:/Users/arthit.n/git/ai_trade_advisor/backend/app/services/event_trigger.py) ต้องมี End-to-End Integration Test จำลองสัญญาณ Grade S/A วิ่งทะลุจนถึง `paper_oms.place_order` เสมอ
+   - ห้ามประมาทว่า Unit test ของโมดูลย่อยผ่านแล้วระบบจะยิงออเดอร์ได้จริง
+
+2. **Strict Variable Scope Integrity (ตรวจสอบขอบเขตตัวแปรอย่างเคร่งครัด)**:
+   - ห้ามอ้างอิงตัวแปรจาก outer function/enclosing scope (เช่น `ltf_df`) โดยไม่ได้ประกาศรับใน parameter หรือดึงผ่าน object ส่วนกลาง (`canonical_analysis.frame`)
+   - ป้องกันปัญหา Runtime Late-Binding ของ Python โดยการตรวจสอบ Scope และ Data Flow ทุกครั้งก่อนส่งมอบงาน
+
