@@ -90,7 +90,13 @@ async def get_funnel_diagnostics(
     cutoff = now - timedelta(hours=24)
     if since:
         since_str = since.strip().lower()
-        if since_str.endswith("h"):
+        if since_str.endswith("m"):
+            try:
+                minutes = float(since_str[:-1])
+                cutoff = now - timedelta(minutes=minutes)
+            except ValueError:
+                pass
+        elif since_str.endswith("h"):
             try:
                 hours = float(since_str[:-1])
                 cutoff = now - timedelta(hours=hours)
@@ -117,7 +123,7 @@ async def get_funnel_diagnostics(
     symbols_counter: Counter[str] = Counter()
     recent_candidates = []
 
-    for record in all_records:
+    for record in reversed(all_records):
         rec_sym = record.get("symbol", "")
         if symbol and rec_sym != symbol:
             continue
