@@ -1,0 +1,228 @@
+{
+  "_comment": "Institutional Baseline Configuration Snapshot v1.0.34 (Build 53) - Validated Nov 4, 2026",
+  "local_endpoint": "http://100.77.94.169:8080/v1",
+  "local_model": "gemma-4-12b-it-qat",
+  "gemini_model": "gemini-2.0-flash",
+  "openrouter_model": "anthropic/claude-3.5-sonnet",
+  "entry_mode": "market",
+  "auto_sl_tp": true,
+  "auto_invalidation": false,
+  "target_rr": 1.5,
+  "default_sl_pct": 1.5,
+  "risk_per_trade": 2.0,
+  "max_daily_loss": 5.0,
+  "max_open_positions": 4,
+  "max_leverage": 10.0,
+  "auto_trade_enabled": true,
+  "auto_trade_require_ai_approval": false,
+  "auto_trade_ai_policy": "advisory",
+  "scanner_ai_mode": "off",
+  "auto_trade_min_grade": "A",
+  "auto_trade_entry_type": "momentum_market",
+  "auto_trade_entry_policy": "adaptive",
+  "auto_trade_limit_timeout_bars": 2,
+  "execution_shadow_compare_enabled": false,
+  "auto_trade_cooldown_seconds": 30,
+  "mtf_hierarchy_required": false,
+  "watchlist": [
+    {
+      "symbol": "BTC/USDT",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "ETH/USDT",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "SOL/USDT",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "BNB/USDT",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "XRP/USDT",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "ADA/USDT",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "AVAX/USDT",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "LINK/USDT",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "NEAR/USDT",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "DOT/USDT",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "SUI/USDT",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "crypto",
+      "exchange": "binance"
+    },
+    {
+      "symbol": "XAUUSD",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "forex",
+      "exchange": "mt5"
+    },
+    {
+      "symbol": "EURUSD",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "forex",
+      "exchange": "mt5"
+    },
+    {
+      "symbol": "AAPL",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "TSLA",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "NVDA",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "MSFT",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "AMZN",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "GOOGL",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "AMD",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "META",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "PLTR",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "COIN",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "MSTR",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "SPY",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    },
+    {
+      "symbol": "QQQ",
+      "timeframe": "15m",
+      "htf_timeframe": "1h",
+      "market_type": "stock",
+      "exchange": "alpaca"
+    }
+  ],
+  "provider": "local",
+  "disabled_brokers": [],
+  "btc_anchor_filter_enabled": false,
+  "btc_anchor_dump_threshold_pct": 1.0,
+  "cluster_loss_cooldown_enabled": true,
+  "cluster_loss_cooldown_minutes": 30,
+  "counter_trend_filter_enabled": false,
+  "ping_pong_enabled": false,
+  "loss_streak_halt_enabled": false,
+  "loss_streak_halt_hours": 4,
+  "binance_trading_mode": "futures",
+  "telegram_token": "",
+  "telegram_chat_id": "",
+  "line_token": "",
+  "min_confluence": 85.0,
+  "multi_stage_tp_enabled": true,
+  "oi_tracker_enabled": true
+}

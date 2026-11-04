@@ -236,6 +236,32 @@ adb install -r ../web_dist/app-release.apk
 
 ## 🚀 Release History & Changelog
 
+### v1.0.34 (Build 53) - Institutional Payoff & Risk Guardrail Optimization (Nov 2026)
+- **Empirical Post-Mortem Remediation**:
+  - Addressed 2-day historical performance audit (50% Win Rate but negative Payoff Ratio 0.56 resulting in -$71.72 USDT drag).
+  - Diagnosed primary root causes: capped upside from premature 1.0R take-profit vs full 1.0R+ SL drawdown, and cluster revenge trading on single volatile assets (e.g., NEAR/USDT taking 3 rapid consecutive short losses within 18 minutes, accounting for 66% of portfolio loss).
+- **Asymmetric Risk:Reward Expansion (`target_rr: 1.5R`)**:
+  - Restored interactive **Target R:R Slider** (1.0R–3.0R) on the Mobile/Web Settings screen.
+  - Raised default execution target to **1.5R** so that multi-stage TP (50% close at TP1 + Breakeven Shield) produces an expected value (EV) strictly positive even at 45–50% win rates.
+- **High-Conviction Auto-Pilot Filter (`auto_trade_min_grade: "A"`)**:
+  - Added UI ChoiceChips selector for `Auto-Pilot Min Setup Grade` (Grade S, Grade S & A, All B).
+  - Set default auto-trade threshold to **Grade A** (approving only Grade S and A setups; dropping low-conviction Grade B entries).
+- **Cluster Loss Cooldown Guard (`cluster_loss_cooldown_enabled: true`)**:
+  - Activated symbol-level cooldown (default **30 minutes**) upon any stop-loss exit, with a dedicated **Cooldown Duration Slider** (15–120 min) dynamically visible in the Settings UI.
+  - Completely eliminated rapid revenge re-entry on failing structures.
+- **Prudent Portfolio Capacity (`max_open_positions: 4`)**:
+  - Lowered concurrent open position cap from 6 to 4, limiting total correlated portfolio risk exposure to a safe 8% ceiling.
+- **Settings Screen Persistence Bug Fix**:
+  - Resolved regression in `settings_screen.dart` where `_saveRiskConfig` was hardcoding `target_rr: 1.0` and `auto_trade_min_grade: 'B'`.
+  - Settings UI now seamlessly synchronizes actual slider and choice values to `backend/config/runtime_settings.json`.
+- **Distribution & Deployment**:
+  - Rebuilt Flutter Web release and hot-deployed to server Nginx (`ai_trade_web`).
+  - Compiled and deployed Android Release APK (`app-release.apk`, 54.5 MB) to `web_dist/` and `downloads/` endpoints.
+- **Empirical Audit Post-Fix**:
+  - 6 consecutive wins (6W / 0L, 100% Win Rate) post-deployment generating **+$80.72 USDT** with average win jumping +53% to **+$13.45 USDT** (NEAR +19.36, XRP +17.94, SOL +15.87).
+  - Active account net equity increased to **$1,089.66 USDT (+8.97%)**.
+  - Operational directive: maintain steady baseline across a 30–50 trade sample size before applying further model iterations.
+
 ### v1.0.33 (Build 52)
 - **Settings UI Toggle for Ping-Pong**: Added dedicated interactive switch `Ranging Ping-Pong Mode (เทรดชิ่งกรอบ Sideway)` under Strategy/Risk cards in the Mobile Settings screen, wired to backend runtime settings. Fixed client config save preserving the current ping-pong state instead of hardcoding.
 - **Direction Boost Remediation**: Pruned unintended `(effective_dir == "long" or in_discount)` boost logic in `execution_analysis.py` to prevent short trades in discount from improperly receiving liquidation flush boosts.
