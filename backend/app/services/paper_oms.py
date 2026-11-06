@@ -796,6 +796,11 @@ class PaperOMS:
                         "realized_entry_timing": str(payload.get("realized_entry_timing") or order_type).upper()[:20],
                         "execution_wait_reason": str(payload.get("execution_wait_reason", "none"))[:40],
                         "entry_timing": str(payload.get("realized_entry_timing") or payload.get("entry_timing") or order_type).upper()[:30],
+                        "htf_bias": str(payload.get("htf_bias", "neutral") or "neutral"),
+                        "oi_bias": str(payload.get("oi_bias", "neutral") or "neutral"),
+                        "oi_boost_applied": bool(payload.get("oi_boost_applied", False)),
+                        "adverse_extreme": None,
+                        "mae_r_multiple": 0.0,
                     },
                 )
                 session.add(position)
@@ -1514,6 +1519,48 @@ class PaperOMS:
                         continue
                     bid = _decimal(quote.get("bid", price))
                     ask = _decimal(quote.get("ask", price))
+
+                    # Continuous MFE and MAE tracking on EVERY tick
+                    entry = _decimal(position.average_entry_price or position.requested_entry_price)
+                    initial_stop = _decimal(position.initial_stop_loss)
+                    risk = abs(entry - initial_stop)
+                    executable_price = bid if position.direction == "long" else ask
+
+                    if entry > ZERO and risk > EPSILON:
+                        prev_favorable = _decimal(position.favorable_extreme or entry)
+                        prev_max_r = _decimal(position.max_r_multiple or ZERO)
+
+                        sp = dict(position.source_payload or {})
+                        prev_adverse = _decimal(sp.get("adverse_extreme") or entry)
+                        prev_mae_r = _decimal(sp.get("mae_r_multiple") or ZERO)
+
+                        if position.direction == "long":
+                            curr_favorable = max(prev_favorable, executable_price)
+                            curr_max_r = max(ZERO, (curr_favorable - entry) / risk)
+                            curr_adverse = min(prev_adverse, executable_price)
+                            curr_mae_r = max(ZERO, (entry - curr_adverse) / risk)
+                        else:
+                            curr_favorable = min(prev_favorable, executable_price)
+                            curr_max_r = max(ZERO, (entry - curr_favorable) / risk)
+                            curr_adverse = max(prev_adverse, executable_price)
+                            curr_mae_r = max(ZERO, (curr_adverse - entry) / risk)
+
+                        extremes_changed = False
+                        if curr_favorable != prev_favorable or curr_max_r > prev_max_r:
+                            position.favorable_extreme = curr_favorable
+                            position.max_r_multiple = max(prev_max_r, curr_max_r)
+                            extremes_changed = True
+
+                        if curr_adverse != prev_adverse or curr_mae_r > prev_mae_r:
+                            sp["adverse_extreme"] = _float(curr_adverse)
+                            sp["mae_r_multiple"] = _float(curr_mae_r)
+                            position.source_payload = sp
+                            extremes_changed = True
+
+                        if extremes_changed:
+                            position.updated_at = _utcnow()
+                            changed_ids.add(position.id)
+
                     take_profit = _decimal(position.take_profit)
                     reason: str | None = None
                     trigger_price: Decimal | None = None
@@ -1983,6 +2030,14 @@ class PaperOMS:
             position.remaining_quantity = new_opened - _decimal(position.closed_quantity)
             position.status = "open"
             position.opened_at = position.opened_at or now
+            if position.favorable_extreme is None:
+                position.favorable_extreme = position.average_entry_price
+                position.max_r_multiple = ZERO
+                sp = dict(position.source_payload or {})
+                if "adverse_extreme" not in sp or sp["adverse_extreme"] is None:
+                    sp["adverse_extreme"] = _float(position.average_entry_price)
+                    sp["mae_r_multiple"] = 0.0
+                    position.source_payload = sp
         else:
             available = _decimal(position.remaining_quantity)
             if quantity > available + EPSILON:
@@ -2222,6 +2277,7 @@ class PaperOMS:
         initial_distance = abs(entry - _float(position.initial_stop_loss))
         pnl = _float(position.realized_pnl_net)
         denominator = _float(position.average_entry_price or position.requested_entry_price) * max(opened, EPSILON.__float__())
+        source_payload = dict(position.source_payload or {})
         result = {
             "id": position.id,
             "mode": "paper",
@@ -2269,12 +2325,15 @@ class PaperOMS:
             "be_triggered": str(position.protection_stage or "initial") != "initial",
             "favorable_extreme": _float(position.favorable_extreme) if position.favorable_extreme else None,
             "max_r_multiple": round(_float(position.max_r_multiple), 4),
+            "adverse_extreme": _float(source_payload.get("adverse_extreme")) if source_payload.get("adverse_extreme") is not None else None,
+            "mae_r_multiple": round(_float(source_payload.get("mae_r_multiple", 0.0)), 4),
+            "htf_bias": str(source_payload.get("htf_bias") or "neutral"),
+            "oi_bias": str(source_payload.get("oi_bias") or "neutral"),
             "protection_stage": position.protection_stage,
             "protection_updated_at": _iso(position.protection_updated_at),
             "oms_authority": "postgresql",
             "oms_version": position.version,
         }
-        source_payload = dict(position.source_payload or {})
         result.update({
             "setup_grade": source_payload.get("setup_grade"),
             "setup_type": source_payload.get("setup_type"),

@@ -5962,6 +5962,56 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             const Divider(color: Colors.white12, height: 16),
 
             SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Loss Streak Circuit Breaker (พักเทรดเมื่อแพ้ติดกัน)',
+                  style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600)),
+              subtitle: const Text(
+                  'เมื่อแพ้ติดกัน 2 ไม้ในระดับพอร์ต จะหยุดเปิดออเดอร์ใหม่ชั่วคราวเพื่อระงับ Drawdown',
+                  style: TextStyle(fontSize: 11, color: Colors.white54)),
+              value: settings.lossStreakHaltEnabled,
+              activeThumbColor: AppColors.bullish,
+              onChanged: (v) async {
+                ref
+                    .read(settingsProvider.notifier)
+                    .save(settings.copyWith(lossStreakHaltEnabled: v));
+                try {
+                  await AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'),
+                      data: {'loss_streak_halt_enabled': v});
+                } catch (_) {}
+              },
+            ),
+
+            if (settings.lossStreakHaltEnabled) ...[
+              Padding(
+                padding: const EdgeInsets.only(top: 8, bottom: 4),
+                child: _riskSlider(
+                  label: 'Halt Duration (ระยะเวลาหยุดพักพอร์ต)',
+                  subtitle:
+                      'ระยะเวลาหยุดพักการเข้าซื้อขายทั้งหมดเมื่อแตะเงื่อนไขแพ้ติดกัน 2 ไม้',
+                  value: settings.lossStreakHaltHours.toDouble(),
+                  min: 1,
+                  max: 12,
+                  divisions: 11,
+                  onChanged: (v) {
+                    final val = v.toInt();
+                    ref.read(settingsProvider.notifier).save(
+                          settings.copyWith(lossStreakHaltHours: val),
+                        );
+                    AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'),
+                        data: {'loss_streak_halt_hours': val}).catchError((_) {});
+                  },
+                  suffix: ' ชม.',
+                  isInt: true,
+                ),
+              ),
+            ],
+
+            const Divider(color: Colors.white12, height: 16),
+
+            SwitchListTile(
 
               contentPadding: EdgeInsets.zero,
 

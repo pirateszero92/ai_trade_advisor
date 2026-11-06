@@ -280,7 +280,7 @@ def test_risk_engine_drawdown_constants_and_min_rr():
     # Invalid minimum_rr out of bounds -> rejected directly
     res_bad_rr = engine.evaluate(sig, minimum_rr=25.0)
     assert res_bad_rr.approved is False
-    assert "Minimum R:R must be between 1 and 20" in (res_bad_rr.rejection_reason or "")
+    assert "Minimum R:R must be between 0.5 and 20" in (res_bad_rr.rejection_reason or "")
 
 
 def test_risk_engine_separates_structural_and_executable_rr():

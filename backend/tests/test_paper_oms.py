@@ -709,6 +709,80 @@ async def test_auto_be_and_multi_tier_trailing_advance_on_same_tick_and_persist(
 
 
 @pytest.mark.anyio
+async def test_continuous_mfe_and_mae_tracking_on_every_tick(tmp_path):
+    """Verify MFE and MAE are tracked on every tick even if trade ends in a loss."""
+    oms, factory, engine, projection, config = await _make_oms(tmp_path)
+    symbol = f"P6MFEMAE{uuid.uuid4().hex[:4]}/USDT"
+    payload = _order_payload(direction="long", symbol=symbol)
+    payload.update({
+        "entry": 100.0,
+        "stop_loss": 90.0,
+        "take_profit": 120.0,
+        "auto_be": True,
+        "trailing_stop": True,
+        "htf_bias": "bullish",
+        "oi_bias": "accumulating",
+    })
+    opened = await oms.place_order(payload)
+    pos_id = opened["id"]
+    entry = opened["entry"]
+    risk = abs(entry - opened["initial_stop_loss"])  # 10.0
+    assert opened["htf_bias"] == "bullish"
+    assert opened["oi_bias"] == "accumulating"
+
+    # 1. Tick up to +0.6R (106.0) - below 1.0R Auto-BE trigger
+    ticks1 = await oms.process_market_tick({
+        "symbol": symbol,
+        "price": 106.0,
+        "bid": 106.0,
+        "ask": 106.01,
+        "sequence": 501,
+        "received_timestamp": 1_787_776_000.0,
+    })
+    assert len(ticks1) == 1
+    pos1 = await oms.get_position(pos_id)
+    assert pos1["protection_stage"] == "initial"  # NOT triggered Auto-BE yet
+    assert pos1["max_r_multiple"] == pytest.approx(0.6, abs=0.01)
+    assert pos1["favorable_extreme"] == pytest.approx(106.0)
+
+    # 2. Tick down to adverse excursion 96.0 (-0.4R)
+    ticks2 = await oms.process_market_tick({
+        "symbol": symbol,
+        "price": 96.0,
+        "bid": 96.0,
+        "ask": 96.01,
+        "sequence": 502,
+        "received_timestamp": 1_787_776_001.0,
+    })
+    assert len(ticks2) == 1
+    pos2 = await oms.get_position(pos_id)
+    assert pos2["max_r_multiple"] == pytest.approx(0.6, abs=0.01)  # MFE preserved!
+    assert pos2["mae_r_multiple"] == pytest.approx(0.4, abs=0.01)
+    assert pos2["adverse_extreme"] == pytest.approx(96.0)
+
+    # 3. Tick drops into SL (89.50)
+    ticks3 = await oms.process_market_tick({
+        "symbol": symbol,
+        "price": 89.50,
+        "bid": 89.50,
+        "ask": 89.51,
+        "sequence": 503,
+        "received_timestamp": 1_787_776_002.0,
+    })
+    assert len(ticks3) == 1
+    pos3 = await oms.get_position(pos_id)
+    assert pos3["status"] == "closed"
+    assert "Stop Loss" in (pos3["close_reason"] or "")
+    # Crucial assertion: MFE and MAE are preserved on closed loser!
+    assert pos3["max_r_multiple"] == pytest.approx(0.6, abs=0.01)
+    assert pos3["favorable_extreme"] == pytest.approx(106.0)
+    assert pos3["mae_r_multiple"] >= 1.0
+
+    await oms.stop()
+    await engine.dispose()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("direction", ["long", "short"])
 async def test_auto_be_exit_covers_modeled_fee_and_slippage(tmp_path, direction):
     oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)

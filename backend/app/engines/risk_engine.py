@@ -368,7 +368,7 @@ class RiskEngine:
                 and p.get("status") in ("open", "pending")
                 and (not signal.direction or p.get("direction") == signal.direction)
             ]
-            max_cluster_allowed = max(self.MAX_CLUSTER_POSITIONS, eff_max_open_positions)
+            max_cluster_allowed = min(self.MAX_CLUSTER_POSITIONS, eff_max_open_positions)
             if len(same_cluster_pos) >= max_cluster_allowed:
                 assessment.cluster_exposure_ok = False
                 assessment.approved = False
@@ -376,6 +376,11 @@ class RiskEngine:
                     f"Cluster exposure limit reached (max {max_cluster_allowed} positions in '{cluster}' cluster)"
                 )
                 return assessment
+            if len(same_cluster_pos) >= 1:
+                cluster_multiplier = 0.50
+                assessment.warnings.append(
+                    f"Cluster concentration: {len(same_cluster_pos)} existing '{cluster}' position; scaled risk to 50%"
+                )
         assessment.cluster_risk_multiplier = cluster_multiplier
 
         # --- 4. Entry / SL validity ---
