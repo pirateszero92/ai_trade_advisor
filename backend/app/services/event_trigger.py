@@ -83,6 +83,23 @@ def _compact_symbol(s: str) -> str:
     return str(s or "").strip().upper().replace("-", "").replace("/", "").replace("_", "")
 
 
+def _parse_iso_to_epoch(ts_val: Any) -> float:
+    """Convert ISO datetime string, datetime object, or epoch number to float epoch seconds."""
+    if not ts_val:
+        return 0.0
+    if isinstance(ts_val, (int, float)):
+        return float(ts_val)
+    if isinstance(ts_val, datetime):
+        return ts_val.astimezone(timezone.utc).timestamp() if ts_val.tzinfo else ts_val.replace(tzinfo=timezone.utc).timestamp()
+    if isinstance(ts_val, str):
+        try:
+            clean = ts_val.replace("Z", "+00:00")
+            return datetime.fromisoformat(clean).timestamp()
+        except Exception:
+            return 0.0
+    return 0.0
+
+
 def _clean_message_text(raw: str) -> str:
     if not raw:
         return ""
@@ -1189,6 +1206,117 @@ class MarketMonitor:
             return None
 
         cfg = get_settings()
+
+        # =====================================================================
+        # CLUSTER LOSS COOLDOWN: Block rapid revenge re-entry on recently stopped-out symbol
+        # =====================================================================
+        cluster_cooldown_enabled = bool(
+            r_cfg.get("cluster_loss_cooldown_enabled", getattr(cfg, "cluster_loss_cooldown_enabled", False))
+        )
+        if auto_trade_enabled and cluster_cooldown_enabled:
+            cooldown_minutes = int(
+                r_cfg.get("cluster_loss_cooldown_minutes", getattr(cfg, "cluster_loss_cooldown_minutes", 30)) or 30
+            )
+            closed_sym_positions = [
+                p for p in all_positions
+                if _compact_symbol(p.get("symbol", "")) == _compact_symbol(symbol)
+                and str(p.get("status", "")).lower() == "closed"
+            ]
+            if closed_sym_positions:
+                closed_sym_positions.sort(
+                    key=lambda p: _parse_iso_to_epoch(p.get("closed_at") or p.get("updated_at")),
+                    reverse=True,
+                )
+                last_closed = closed_sym_positions[0]
+                try:
+                    last_pnl = float(last_closed.get("realized_pnl_net") or last_closed.get("realized_pnl") or 0.0)
+                except (ValueError, TypeError):
+                    last_pnl = 0.0
+                last_reason = str(last_closed.get("close_reason") or "")
+                is_loss = (last_pnl < 0 or "Stop Loss" in last_reason or "SL Hit" in last_reason)
+
+                if is_loss:
+                    last_closed_ts = _parse_iso_to_epoch(last_closed.get("closed_at") or last_closed.get("updated_at"))
+                    if last_closed_ts > 0:
+                        now_epoch = datetime.now(timezone.utc).timestamp()
+                        elapsed_minutes = (now_epoch - last_closed_ts) / 60.0
+                        if 0 <= elapsed_minutes < cooldown_minutes:
+                            remaining = cooldown_minutes - elapsed_minutes
+                            logger.info(
+                                f"[Auto-Pilot] Cluster Cooldown active for {symbol}: "
+                                f"recently closed with loss ({last_pnl:+.2f} USDT) {elapsed_minutes:.1f}m ago. "
+                                f"Remaining cooldown: {remaining:.1f}m (limit: {cooldown_minutes}m)"
+                            )
+                            await decision_trace.record(
+                                snapshot_id=decision_snapshot_id,
+                                event_id=event_id,
+                                symbol=symbol,
+                                stage="OMS_CAPACITY",
+                                facts={
+                                    "passed": False,
+                                    "reason_code": "CLUSTER_LOSS_COOLDOWN",
+                                    "symbol": symbol,
+                                    "last_loss_pnl": last_pnl,
+                                    "elapsed_minutes": round(elapsed_minutes, 1),
+                                    "cooldown_minutes": cooldown_minutes,
+                                },
+                            )
+                            return None
+
+        # =====================================================================
+        # LOSS STREAK CIRCUIT BREAKER: Halt portfolio if consecutive losses reach threshold
+        # =====================================================================
+        loss_streak_enabled = bool(
+            r_cfg.get("loss_streak_halt_enabled", getattr(cfg, "loss_streak_halt_enabled", False))
+        )
+        if auto_trade_enabled and loss_streak_enabled:
+            halt_hours = int(
+                r_cfg.get("loss_streak_halt_hours", getattr(cfg, "loss_streak_halt_hours", 2)) or 2
+            )
+            all_closed = [
+                p for p in all_positions
+                if str(p.get("status", "")).lower() == "closed"
+            ]
+            all_closed.sort(
+                key=lambda p: _parse_iso_to_epoch(p.get("closed_at") or p.get("updated_at")),
+                reverse=True,
+            )
+            streak = 0
+            for p in all_closed:
+                try:
+                    pnl = float(p.get("realized_pnl_net") or p.get("realized_pnl") or 0.0)
+                except (ValueError, TypeError):
+                    pnl = 0.0
+                reason = str(p.get("close_reason") or "")
+                if pnl < 0 or "Stop Loss" in reason or "SL Hit" in reason:
+                    streak += 1
+                else:
+                    break
+            if streak >= 3 and all_closed:
+                last_closed_ts = _parse_iso_to_epoch(all_closed[0].get("closed_at") or all_closed[0].get("updated_at"))
+                if last_closed_ts > 0:
+                    now_epoch = datetime.now(timezone.utc).timestamp()
+                    elapsed_hours = (now_epoch - last_closed_ts) / 3600.0
+                    if 0 <= elapsed_hours < halt_hours:
+                        remaining_h = halt_hours - elapsed_hours
+                        logger.warning(
+                            f"[Auto-Pilot] Loss Streak Circuit Breaker active: {streak} consecutive losses across portfolio. "
+                            f"Halted for {halt_hours}h ({elapsed_hours:.1f}h elapsed, {remaining_h:.1f}h remaining)"
+                        )
+                        await decision_trace.record(
+                            snapshot_id=decision_snapshot_id,
+                            event_id=event_id,
+                            symbol=symbol,
+                            stage="OMS_CAPACITY",
+                            facts={
+                                "passed": False,
+                                "reason_code": "LOSS_STREAK_HALT",
+                                "consecutive_losses": streak,
+                                "elapsed_hours": round(elapsed_hours, 1),
+                                "halt_hours": halt_hours,
+                            },
+                        )
+                        return None
         max_positions = int(r_cfg.get("max_open_positions", cfg.max_open_positions))
         if auto_trade_enabled and len(active_positions) >= max_positions:
             logger.warning(f"[Auto-Pilot] Position capacity limit reached ({len(active_positions)}/{max_positions})")
