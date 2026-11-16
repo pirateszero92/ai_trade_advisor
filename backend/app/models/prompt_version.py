@@ -1,6 +1,6 @@
 """Prompt Version ORM Model."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 from sqlalchemy import (
     Boolean,
@@ -14,12 +14,16 @@ from sqlalchemy.dialects.postgresql import UUID
 from app.models.base import Base
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class PromptVersion(Base):
     __tablename__ = "prompt_versions"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     version = Column(String(50), unique=True, nullable=False)
     content = Column(Text, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
     is_active = Column(Boolean, default=False)
     notes = Column(Text, nullable=True)

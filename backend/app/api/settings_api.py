@@ -195,9 +195,9 @@ def _validate_llm_endpoint(endpoint: str) -> str:
     current_host = urlparse(cfg.local_llm_endpoint).hostname
     if current_host:
         allowed.add(current_host.lower())
-    ep_host = urlparse(endpoint).hostname
-    if ep_host and ("ollama.com" in ep_host.lower() or "openai.com" in ep_host.lower()):
-        allowed.add(ep_host.lower())
+    ep_host = (urlparse(endpoint).hostname or "").lower()
+    if ep_host and any(ep_host == d or ep_host.endswith(f".{d}") for d in ("ollama.com", "openai.com")):
+        allowed.add(ep_host)
     return validate_service_url(endpoint, allowed_hosts=allowed, allow_private_ip=True)
 
 
@@ -1884,6 +1884,16 @@ async def update_runtime_settings(
 
     if updates:
         saved = update_runtime_config(updates)
+        cfg = get_settings()
+        if "max_leverage" in updates and updates["max_leverage"] is not None:
+            cfg.max_leverage = float(updates["max_leverage"])
+        if "binance_trading_mode" in updates and updates["binance_trading_mode"] in ("futures", "spot"):
+            cfg.binance_trading_mode = updates["binance_trading_mode"]
+        try:
+            from app.services.execution_analysis import execution_analyses
+            execution_analyses.clear()
+        except Exception:
+            pass
         from app.services.event_trigger import invalidate_runtime_settings_cache
         invalidate_runtime_settings_cache()
         return {

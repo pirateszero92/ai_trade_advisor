@@ -152,6 +152,26 @@ async def _get_usd_thb_rate_cached() -> float:
     return rate or 34.0
 
 
+def _get_usd_thb_rate_cached_sync() -> float:
+    """Synchronous USD/THB rate reader for thread-pool executors."""
+    global _USD_THB_CACHE
+    import time
+    now = time.time()
+    last_time, rate = _USD_THB_CACHE
+    if now - last_time < 3600.0 and rate > 0:
+        return rate
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker("THB=X")
+        new_rate = float(ticker.fast_info.last_price)
+        if 20.0 < new_rate < 50.0:
+            _USD_THB_CACHE = (now, new_rate)
+            return new_rate
+    except Exception as exc:
+        logger.debug(f"[MarketData] Sync USD/THB fetch failed, using fallback: {exc}")
+    return rate or 34.0
+
+
 def normalize_yfinance_symbol(symbol: str, market_type: str) -> str:
     """Normalize any symbol format to Yahoo Finance ticker."""
     s = symbol.upper().replace("/", "").replace("-", "")
@@ -764,7 +784,7 @@ class MarketDataEngine:
                 if last_p > 0.0:
                     chg = ((last_p - prev_c) / prev_c) * 100 if prev_c > 0 else 0.0
                     if is_thb:
-                        rate = _get_usd_thb_rate_cached()
+                        rate = _get_usd_thb_rate_cached_sync()
                         last_p = round(last_p * rate, 4 if last_p * rate < 100 else 2)
                         day_h = round(day_h * rate, 4 if day_h * rate < 100 else 2)
                         day_l = round(day_l * rate, 4 if day_l * rate < 100 else 2)
@@ -999,7 +1019,7 @@ class MarketDataEngine:
             res_df["flow_source"] = "yahoo_ohlcv_volume"
 
         if is_thb and not res_df.empty:
-            rate = _get_usd_thb_rate_cached()
+            rate = _get_usd_thb_rate_cached_sync()
             for col in ["open", "high", "low", "close"]:
                 res_df[col] = res_df[col] * rate
             last_c = res_df["close"].iloc[-1]

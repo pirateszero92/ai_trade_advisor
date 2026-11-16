@@ -662,10 +662,11 @@ class PaperOMS:
                 )
             sl_dist = abs(m_price - stop_loss)
             sl_pct = sl_dist / m_price if m_price > ZERO else ZERO
-            if sl_pct < Decimal("0.0025") and not payload.get("manual_override"):
+            min_cushion = Decimal("0.0005") if source == "auto_pilot" else Decimal("0.0025")
+            if sl_pct < min_cushion and not payload.get("manual_override"):
                 raise PaperOMSValidation(
                     f"Market price {m_price} is dangerously close to Stop Loss {stop_loss} "
-                    f"({float(sl_pct)*100:.3f}% < 0.25% min cushion). Wait for pullback or use a Limit order."
+                    f"({float(sl_pct)*100:.3f}% < {float(min_cushion)*100:.3f}% min cushion). Wait for pullback or use a Limit order."
                 )
 
         cfg = get_settings()
@@ -884,6 +885,7 @@ class PaperOMS:
                 order.completed_at = now
                 order.updated_at = now
                 order.close_reason = reason[:200]
+                order.remaining_quantity = ZERO
                 order.version += 1
                 if _decimal(position.opened_quantity) <= ZERO:
                     position.status = "cancelled"
@@ -949,6 +951,17 @@ class PaperOMS:
                             pos.closed_at = now
                             pos.updated_at = now
                             pos.version += 1
+                            self._add_event(
+                                session,
+                                account_id=account.id,
+                                position_id=pos.id,
+                                order_id=order.id if order else None,
+                                event_key=f"position:{pos.id}:expired:{pos.version}",
+                                event_type="order_cancelled",
+                                previous_status="pending",
+                                new_status="cancelled",
+                                payload={"reason": pos.close_reason},
+                            )
                             cancelled_ids.append(str(pos.id))
                     except Exception:
                         pass
@@ -1331,20 +1344,20 @@ class PaperOMS:
         initial = _decimal(account.initial_capital)
         cash = initial + realized_gross - fees
         net_worth = cash + unrealized
-        today = _utcnow().date()
+        today_start_utc = datetime.combine(_utcnow().date(), datetime.min.time(), tzinfo=timezone.utc)
+        def _is_today_utc(dt: datetime | None) -> bool:
+            if dt is None:
+                return False
+            utc_dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+            return utc_dt >= today_start_utc
+
         daily_realized_net = sum(
             (
                 _decimal(p.realized_pnl_net)
                 for p in positions
                 if (
                     p.closed_at is not None
-                    and p.closed_at.astimezone(timezone.utc).date() == today
-                )
-                or (
-                    p.status == "open"
-                    and _decimal(p.closed_quantity) > ZERO
-                    and p.updated_at is not None
-                    and p.updated_at.astimezone(timezone.utc).date() == today
+                    and _is_today_utc(p.closed_at)
                 )
             ),
             ZERO,

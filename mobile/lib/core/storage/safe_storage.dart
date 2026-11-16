@@ -15,16 +15,28 @@ class SafeStorage {
   static const String _prefix = 'sec_';
 
   static Future<void> write({required String key, required String value}) async {
+    bool secureSuccess = false;
     try {
       await _secure.write(key: key, value: value);
+      secureSuccess = true;
     } catch (e) {
       debugPrint('[SafeStorage] SecureStorage.write failed ($key): $e');
     }
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('$_prefix$key', value);
-    } catch (e) {
-      debugPrint('[SafeStorage] SharedPreferences.setString failed ($key): $e');
+
+    if (secureSuccess) {
+      // Remove any legacy unencrypted plaintext fallback if secure write succeeded
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove('$_prefix$key');
+        await prefs.remove(key);
+      } catch (_) {}
+    } else {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('$_prefix$key', value);
+      } catch (e) {
+        debugPrint('[SafeStorage] SharedPreferences.setString failed ($key): $e');
+      }
     }
   }
 

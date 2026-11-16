@@ -79,20 +79,24 @@ class PriceHub:
         clean_input = str(symbol).strip().upper()
         if not clean_input:
             return
-        before = len(self._active_symbols)
-        self._active_symbols.add(clean_input)
-        if len(self._active_symbols) != before and self._stream_client:
+        with self._lock:
+            before = len(self._active_symbols)
+            self._active_symbols.add(clean_input)
+            has_changed = len(self._active_symbols) != before
+        if has_changed and self._stream_client:
             self._stream_client.refresh_subscriptions()
 
     def subscribe(self, callback: Callable[[dict], object]) -> None:
-        if callback not in self._subscribers:
-            self._subscribers.append(callback)
+        with self._lock:
+            if callback not in self._subscribers:
+                self._subscribers.append(callback)
 
     def unsubscribe(self, callback: Callable[[dict], object]) -> None:
-        try:
-            self._subscribers.remove(callback)
-        except ValueError:
-            pass
+        with self._lock:
+            try:
+                self._subscribers.remove(callback)
+            except ValueError:
+                pass
 
     @property
     def is_running(self) -> bool:
@@ -123,38 +127,44 @@ class PriceHub:
         return price if price > 0 else None
 
     def get_ticker(self, symbol: str) -> Optional[dict]:
-        entry = self._prices.get(self._normalize(symbol))
+        with self._lock:
+            entry = self._prices.get(self._normalize(symbol))
         return self._with_freshness(entry) if entry else None
 
     def get_all_prices(self) -> dict[str, dict]:
         now = time.time()
-        return {symbol: self._with_freshness(entry, now=now) for symbol, entry in self._prices.items()}
+        with self._lock:
+            items = list(self._prices.items())
+        return {symbol: self._with_freshness(entry, now=now) for symbol, entry in items}
 
     def get_order_flow(self, symbol: str) -> dict:
         clean = self._normalize(symbol)
-        flow = self._order_flow.get(clean)
-        if not flow:
-            return {
-                "symbol": symbol,
-                "norm_symbol": clean,
-                "buy_volume": 0.0,
-                "sell_volume": 0.0,
-                "volume_delta": 0.0,
-                "delta_ratio": 0.0,
-                "cvd": 0.0,
-                "trade_count": 0,
-                "source": "unavailable",
-            }
-        return dict(flow)
+        with self._lock:
+            flow = self._order_flow.get(clean)
+            if not flow:
+                return {
+                    "symbol": symbol,
+                    "norm_symbol": clean,
+                    "buy_volume": 0.0,
+                    "sell_volume": 0.0,
+                    "volume_delta": 0.0,
+                    "delta_ratio": 0.0,
+                    "cvd": 0.0,
+                    "trade_count": 0,
+                    "source": "unavailable",
+                }
+            return dict(flow)
 
     def get_closed_candles(self, symbol: str, timeframe: str, *, limit: int = 300) -> list[dict]:
         if not 1 <= limit <= self._max_closed_candles:
             raise ValueError(f"limit must be between 1 and {self._max_closed_candles}")
         key = (self._normalize(symbol), timeframe)
-        candles = self._closed_candles.get(key)
-        if not candles:
-            return []
-        return [dict(value) for value in list(candles.values())[-limit:]]
+        with self._lock:
+            candles = self._closed_candles.get(key)
+            if not candles:
+                return []
+            items = list(candles.values())[-limit:]
+        return [dict(value) for value in items]
 
     def update_price(
         self,

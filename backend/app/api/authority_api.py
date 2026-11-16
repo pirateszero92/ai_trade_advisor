@@ -88,8 +88,9 @@ async def get_funnel_diagnostics(
 
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=24)
-    if since:
-        since_str = since.strip().lower()
+    raw_since = since.default if hasattr(since, "default") else since
+    if raw_since and str(raw_since).lower() not in {"none", "query(24h)"}:
+        since_str = str(raw_since).strip().lower()
         if since_str.endswith("m"):
             try:
                 minutes = float(since_str[:-1])
@@ -110,7 +111,8 @@ async def get_funnel_diagnostics(
                 pass
         else:
             try:
-                cutoff = datetime.fromisoformat(since.replace("Z", "+00:00"))
+                parsed_c = datetime.fromisoformat(str(raw_since).replace("Z", "+00:00"))
+                cutoff = parsed_c if parsed_c.tzinfo is not None else parsed_c.replace(tzinfo=timezone.utc)
             except ValueError:
                 pass
 

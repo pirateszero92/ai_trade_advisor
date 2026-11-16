@@ -1,12 +1,12 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from app.api import backtest_api, signals, trades, chart, settings_api, journal_api, briefing_api, evidence_api, live_api, market_data_api, paper_api, authority_api
 from app.api import chat_history_api
 from app.api.ws import router as ws_router
 from app.core.config import get_settings
-from app.core.security import is_securely_configured
+from app.core.security import is_securely_configured, verify_api_key
 from app.engines.price_hub import price_hub
 
 
@@ -123,7 +123,7 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "ok", "version": app.version}
 
-    @app.get("/metrics", include_in_schema=False)
+    @app.get("/metrics", include_in_schema=False, dependencies=[Depends(verify_api_key)])
     async def metrics():
         from fastapi.responses import PlainTextResponse
         from app.services.observability import observability

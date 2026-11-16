@@ -320,21 +320,23 @@ class CounterfactualReplayEngine:
 
             symbol = str(candidate.get("symbol") or "UNKNOWN")
             tf = str(candidate.get("timeframe") or "15m")
-            pending_by_symbol_tf[(symbol, tf)].append(candidate)
+            m_type = str(candidate.get("market_type") or "crypto")
+            ex = str(candidate.get("exchange") or "binance")
+            pending_by_symbol_tf[(symbol, tf, m_type, ex)].append(candidate)
 
         if not pending_by_symbol_tf:
             return results
 
-        # Group and fetch candles once per (symbol, timeframe)
-        for (symbol, tf), c_list in pending_by_symbol_tf.items():
+        # Group and fetch candles once per (symbol, timeframe, market_type, exchange)
+        for (symbol, tf, m_type, ex), c_list in pending_by_symbol_tf.items():
             bars: pd.DataFrame = pd.DataFrame()
             if candle_provider_sync is not None:
                 bars = candle_provider_sync(symbol, tf)
             elif market_data_engine is not None:
                 try:
-                    bars = await market_data_engine.get_ohlcv(symbol, tf, limit=1500)
+                    bars = await market_data_engine.get_ohlcv(symbol, tf, market_type=m_type, exchange=ex, limit=1500)
                 except Exception as exc:
-                    logger.warning(f"[ReplayEngine] Market data fetch failed for {symbol} {tf}: {exc}")
+                    logger.warning(f"[ReplayEngine] Market data fetch failed for {symbol} {tf} ({m_type}/{ex}): {exc}")
 
             for candidate in c_list:
                 cid = str(candidate.get("candidate_id") or f"{candidate.get('snapshot_id')}:{candidate.get('event_id')}")

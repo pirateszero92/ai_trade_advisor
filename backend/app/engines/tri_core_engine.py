@@ -438,11 +438,19 @@ def _range_location_ok(
     return True, ""
 
 
-def _candle_tests_zone(row: pd.Series, zone: Any, side: str, atr: float = 0.0) -> tuple[bool, bool]:
+def _candle_tests_zone(
+    row: pd.Series,
+    zone: Any,
+    side: str,
+    atr: float = 0.0,
+    *,
+    allow_shallow_front_run: bool = False,
+) -> tuple[bool, bool]:
     """Check if a candle retests a zone deeply enough (into the zone pocket/mid).
 
-    Disables shallow front-run entries outside the zone so entries only trigger
-    when price genuinely tests the Order Block, FVG, or Breaker pocket.
+    Supports a 0.15 ATR shallow front-run buffer on Breaker Blocks and (when
+    allow_shallow_front_run is enabled in trending/HTF-aligned conditions) on
+    FVG and Order Block zones so strong waterfall trends do not miss near-retests.
     """
     low = float(row["low"])
     high = float(row["high"])
@@ -450,12 +458,12 @@ def _candle_tests_zone(row: pd.Series, zone: Any, side: str, atr: float = 0.0) -
     top = float(zone.top)
     bottom = float(zone.bottom)
     mid = float(zone.mid)
+    buffer = 0.15 * atr if atr > 0 else 0.0
 
     overlaps = low <= top and high >= bottom
 
     # 1. Breaker Block
     if getattr(zone, "kind", "") == "breaker":
-        buffer = 0.15 * atr if atr > 0 else 0.0
         if side == "long":
             if overlaps and close >= bottom:
                 return True, False
@@ -474,16 +482,28 @@ def _candle_tests_zone(row: pd.Series, zone: Any, side: str, atr: float = 0.0) -
             if overlaps and close >= bottom:
                 is_shallow = low > mid and close >= mid
                 return True, is_shallow
+            if allow_shallow_front_run and buffer > 0 and top < low <= (top + buffer) and close >= top:
+                return True, True
         elif side == "short":
             if overlaps and close <= top:
                 is_shallow = high < mid and close <= mid
                 return True, is_shallow
+            if allow_shallow_front_run and buffer > 0 and (bottom - buffer) <= high < bottom and close <= bottom:
+                return True, True
         return False, False
 
-    # 3. Order Block or other zones
+    # 3. Order Block or other zones — require candle close not to break through the zone
     else:
-        if overlaps:
-            return True, False
+        if side == "long":
+            if overlaps and close >= bottom:
+                return True, False
+            if allow_shallow_front_run and buffer > 0 and top < low <= (top + buffer) and close >= top:
+                return True, True
+        elif side == "short":
+            if overlaps and close <= top:
+                return True, False
+            if allow_shallow_front_run and buffer > 0 and (bottom - buffer) <= high < bottom and close <= bottom:
+                return True, True
         return False, False
 
 
@@ -500,19 +520,24 @@ def _first_lineage_retest(
     side: str,
     displacement: dict[str, Any],
     atr: float = 0.0,
+    *,
+    allow_shallow_front_run: bool = False,
+    allow_extended_lineage: bool = False,
 ) -> tuple[Any | None, bool]:
     """Find the first retest of the exact zone created by a structure break.
 
     Returns (zone, is_shallow).
     """
     expected = "bullish" if side == "long" else "bearish"
-    displacement_index = _index(displacement.get("index"))
-    break_index = _index(displacement.get("structure_break_index"))
-    break_id = str(displacement.get("structure_break_id") or "")
+    displacement_index = _index(displacement.get("index", displacement.get("candle_index", -1)))
+    break_index = _index(displacement.get("structure_break_index", displacement_index))
+    break_id = str(displacement.get("structure_break_id") or displacement.get("event_id") or "")
     current_index = len(frame) - 1
+    max_lineage_gap = 6 if allow_extended_lineage else 2
+    max_ob_gap = 6 if allow_extended_lineage else 1
     if not break_id or displacement_index >= current_index:
         return None, False
-    if break_index < 0 or abs(break_index - displacement_index) > 2:
+    if break_index < 0 or abs(break_index - displacement_index) > max_lineage_gap:
         return None, False
     candidates: list[tuple[Any, bool]] = []
     zone_pool = [*signal.order_blocks, *signal.fvgs, *getattr(signal, "breaker_blocks", [])]
@@ -522,21 +547,35 @@ def _first_lineage_retest(
         origin = _index(getattr(zone, "index", -1))
         confirmed = _index(getattr(zone, "confirmed_index", -1))
         if zone.kind == "ob":
-            related = (confirmed == displacement_index or confirmed == break_index or abs(confirmed - break_index) <= 1)
+            related = (
+                confirmed == displacement_index
+                or confirmed == break_index
+                or abs(confirmed - break_index) <= max_ob_gap
+            )
         elif zone.kind == "breaker":
-            related = (confirmed == displacement_index or confirmed == break_index or abs(confirmed - displacement_index) <= 2)
+            related = (
+                confirmed == displacement_index
+                or confirmed == break_index
+                or abs(confirmed - displacement_index) <= max_lineage_gap
+            )
         else:  # fvg
             related = (
                 (origin == displacement_index and confirmed == displacement_index + 1)
-                or (abs(confirmed - break_index) <= 2)
+                or (abs(confirmed - break_index) <= max_lineage_gap)
                 or (confirmed == displacement_index)
             )
         if not related or confirmed >= current_index:
             continue
-        tests_current, is_shallow = _candle_tests_zone(frame.iloc[-1], zone, side, atr=atr)
+        tests_current, is_shallow = _candle_tests_zone(
+            frame.iloc[-1],
+            zone,
+            side,
+            atr=atr,
+            allow_shallow_front_run=allow_shallow_front_run,
+        )
         if not tests_current:
             continue
-        if any(_candle_tests_zone(frame.iloc[index], zone, side, atr=atr)[0]
+        if any(_candle_tests_zone(frame.iloc[index], zone, side, atr=atr, allow_shallow_front_run=False)[0]
                for index in range(confirmed + 1, current_index)):
             continue
         candidates.append((zone, is_shallow))
@@ -550,14 +589,69 @@ def _first_lineage_retest(
     return chosen_zone, chosen_is_shallow
 
 
+def _fresh_displacement_zone(
+    signal: Any,
+    frame: pd.DataFrame,
+    side: str,
+    displacement: dict[str, Any],
+) -> Any | None:
+    """Locate a newly created unmitigated FVG/Breaker/OB from a fresh Swing BOS (0-2 bars old)
+    before price has pulled back to retest it, enabling Proactive Limit & Momentum Continuation.
+    """
+    expected = "bullish" if side == "long" else "bearish"
+    current_index = len(frame) - 1
+    displacement_index = _index(displacement.get("index", displacement.get("candle_index", -1)))
+    break_index = _index(displacement.get("structure_break_index", displacement_index))
+    break_id = str(displacement.get("structure_break_id") or displacement.get("event_id") or "")
+    if not break_id or break_id.startswith("internal:"):
+        return None
+    if displacement_index < 0 or not (0 <= (current_index - displacement_index) <= 2):
+        return None
+    if break_index < 0 or abs(break_index - displacement_index) > 2:
+        return None
+
+    close_now = float(frame["close"].iloc[-1])
+    candidates: list[Any] = []
+    zone_pool = [*signal.fvgs, *getattr(signal, "breaker_blocks", []), *signal.order_blocks]
+    for zone in zone_pool:
+        if zone.direction != expected or zone.mitigated:
+            continue
+        if str(getattr(zone, "source", "swing")) == "internal":
+            continue
+        origin = _index(getattr(zone, "index", -1))
+        confirmed = _index(getattr(zone, "confirmed_index", -1))
+        related = (
+            confirmed == displacement_index
+            or confirmed == break_index
+            or abs(confirmed - displacement_index) <= 2
+            or abs(origin - displacement_index) <= 2
+        )
+        if not related or confirmed > current_index:
+            continue
+        if side == "long" and close_now < float(zone.bottom):
+            continue
+        if side == "short" and close_now > float(zone.top):
+            continue
+        if confirmed < current_index and any(
+            _candle_tests_zone(frame.iloc[idx], zone, side, atr=0.0, allow_shallow_front_run=False)[0]
+            for idx in range(confirmed + 1, current_index + 1)
+        ):
+            continue
+        candidates.append(zone)
+
+    if not candidates:
+        return None
+    return min(candidates, key=lambda z: abs(float(z.mid) - close_now))
+
+
 def _is_session_judas_sweep(frame: pd.DataFrame, sweep: dict[str, Any]) -> bool:
     """Return True when a sweep raids Asian Session liquidity during the London/NY Killzone."""
     if bool(sweep.get("session_sweep", False)):
         return True
     if not isinstance(frame.index, pd.DatetimeIndex):
         return False
-    ref_idx = _index(sweep.get("reference_swing_index", -1))
-    sweep_idx = _index(sweep.get("index", len(frame) - 1))
+    ref_idx = _index(sweep.get("reference_index", sweep.get("reference_swing_index", -1)))
+    sweep_idx = _index(sweep.get("candle_index", sweep.get("index", len(frame) - 1)))
     if not (0 <= ref_idx < sweep_idx < len(frame)):
         return False
     try:
@@ -745,9 +839,10 @@ def _candidate(*, side: str, setup_type: str, entry: float, stop: float,
                policy: TriCorePolicy | None = None) -> TriCoreSetup:
     policy = policy or TriCorePolicy()
     risk = abs(entry - stop)
-    # Give sweep_reversal setups sufficient breathing room (>= 0.65% from entry)
-    # to avoid premature noise/spread stop-outs on 15M bars, while maintaining 0.35% for retests.
-    min_risk = entry * (0.0065 if setup_type == "sweep_reversal" else 0.0035)
+    # Ensure sufficient breathing room to avoid premature noise/spread stop-outs on 15M bars.
+    # Market entries and sweep reversals require >= 0.65% breathing room, while limit retests require >= 0.40%.
+    min_breathing_ratio = 0.0065 if (setup_type == "sweep_reversal" or entry_policy == "market_eligible") else 0.0040
+    min_risk = entry * min_breathing_ratio
     if risk < min_risk:
         stop = (entry - min_risk) if side == "long" else (entry + min_risk)
         risk = abs(entry - stop)
@@ -887,9 +982,18 @@ def _extended_sweep_is_valid(
         return False, 0.0, "CVD reversed before the armed sweep could execute"
 
     reclaim = float(sweep.get("reclaim_close", 0.0) or 0.0)
+    swept_level = float(sweep.get("level_price", 0.0) or sweep.get("level", 0.0) or 0.0)
     entry = float(current["close"])
     if reclaim <= 0 or atr <= 0:
         return True, 0.0, ""
+    if side == "long" and (entry < reclaim or (swept_level > 0 and entry < swept_level)):
+        return False, 0.0, (
+            f"Sweep invalidated: follow-through candle closed at {entry:.4f} below reclaim {reclaim:.4f}"
+        )
+    if side == "short" and (entry > reclaim or (swept_level > 0 and entry > swept_level)):
+        return False, 0.0, (
+            f"Sweep invalidated: follow-through candle closed at {entry:.4f} above reclaim {reclaim:.4f}"
+        )
     directional_extension = (
         max(0.0, entry - reclaim) if side == "long"
         else max(0.0, reclaim - entry)
@@ -980,22 +1084,27 @@ class TriCoreSetupEngine:
         micro_dir = str(micro.get("direction", "neutral")).lower()
 
         for side in ("long", "short"):
+            expected_bias = "bullish" if side == "long" else "bearish"
+            htf_aligned = (intraday_bias == expected_bias)
             if policy.counter_trend_filter_enabled:
-                if regime_label == "trending":
+                # When 1H/HTF trend is explicitly aligned with `side`, a 15m bounce/dip in the
+                # opposite `trend_direction` is a pullback into the HTF trend, not a counter-trend trade.
+                if regime_label == "trending" and not htf_aligned:
                     if trend_direction == "bullish" and side == "short":
                         rejected.append("Counter-trend SHORT rejected: Market regime is trending bullish")
                         continue
                     if trend_direction == "bearish" and side == "long":
                         rejected.append("Counter-trend LONG rejected: Market regime is trending bearish")
                         continue
-                if regime_label == "volatile":
+                if regime_label == "volatile" and not htf_aligned:
                     if trend_direction == "bullish" and side == "short":
                         rejected.append("Counter-trend SHORT rejected: Market regime is volatile bullish")
                         continue
                     if trend_direction == "bearish" and side == "long":
                         rejected.append("Counter-trend LONG rejected: Market regime is volatile bearish")
                         continue
-                if regime_label != "ranging":
+                # Unless ping-pong is explicitly enabled in a ranging market, NEVER trade against the 1H intraday/HTF trend
+                if not (is_ranging and policy.ping_pong_enabled):
                     if intraday_bias == "bullish" and side == "short":
                         rejected.append(f"Counter-trend SHORT rejected: {('1H intraday trend' if raw_intraday and str(raw_intraday).lower() != 'neutral' else 'HTF bias')} is bullish")
                         continue
@@ -1009,7 +1118,19 @@ class TriCoreSetupEngine:
                         nearest_obstacle = None
                         min_dist = float("inf")
                         for obs in macro_obstacles:
-                            obs_price = float(obs.get("price", 0.0) or obs.get("mid", 0.0) or (obs.get("low", 0.0) if side == "long" else obs.get("high", 0.0)) or 0.0)
+                            obs_type = str(obs.get("type", "")).lower()
+                            obs_side = str(obs.get("side", "")).lower()
+                            if obs_type == "order_block":
+                                if side == "long" and obs_side not in {"bearish", "short", ""}:
+                                    continue
+                                if side == "short" and obs_side not in {"bullish", "long", ""}:
+                                    continue
+                            obs_price = float(
+                                obs.get("price", 0.0)
+                                or (obs.get("low", 0.0) if side == "long" else obs.get("high", 0.0))
+                                or obs.get("mid", 0.0)
+                                or 0.0
+                            )
                             if side == "long" and obs_price > entry:
                                 dist = obs_price - entry
                                 if dist < min_dist:
@@ -1037,10 +1158,11 @@ class TriCoreSetupEngine:
             pressure = float(getattr(signal, "delta_ratio", 0.0))
             in_prem = getattr(signal, "in_premium", False)
             in_disc = getattr(signal, "in_discount", False)
-            if side == "long" and in_prem:
+            is_trend_continuation = (regime_label == "trending" and htf_aligned)
+            if side == "long" and in_prem and not is_trend_continuation:
                 _add_rejection("Adverse location: Cannot LONG in Premium", "LOCATION_LONG_IN_PREMIUM")
                 continue
-            if side == "short" and in_disc:
+            if side == "short" and in_disc and not is_trend_continuation:
                 _add_rejection("Adverse location: Cannot SHORT in Discount", "LOCATION_SHORT_IN_DISCOUNT")
                 continue
 
@@ -1048,8 +1170,10 @@ class TriCoreSetupEngine:
             # SETUP A: Sniper Reversal (Liquidity Sweep + CVD Absorption/Div)
             # -----------------------------------------------------------------
             if (getattr(signal, "liquidity_swept", False)
-                    and getattr(signal, "sweep_direction", "none") == expected_sweep):
-                if regime_label == "volatile":
+                    and getattr(signal, "sweep_direction", "none") == expected_sweep
+                    and not (side == "long" and in_prem)
+                    and not (side == "short" and in_disc)):
+                if regime_label == "volatile" and not htf_aligned:
                     _add_rejection("Sweep reversal suspended in Volatile market regime (high momentum continuation risk)", "VOLATILE_SWEEP_SUSPENDED")
                     continue
                 saw_sweep = True
@@ -1105,6 +1229,20 @@ class TriCoreSetupEngine:
                             candidate_entry = float(
                                 causal_zone.top if side == "long" else causal_zone.bottom
                             )
+                        elif regime_label == "volatile" or sweep.get("event_type") == "multi_bar_reclaim":
+                            # In volatile regime or multi-bar reclaim sweeps (where close may be far from extreme
+                            # and prone to a retest wick), require a Limit retest at the causal zone edge or
+                            # 50% sweep wick mitigation instead of a blind Market order.
+                            entry_policy = "limit_retest_only"
+                            if causal_zone is not None:
+                                candidate_entry = float(
+                                    causal_zone.top if side == "long" else causal_zone.bottom
+                                )
+                            else:
+                                wick_mid = (extreme + entry) / 2.0
+                                candidate_entry = float(
+                                    min(entry, wick_mid) if side == "long" else max(entry, wick_mid)
+                                )
 
                         loc_ok, loc_reason = _range_location_ok(
                             signal, side, candidate_entry, allow_equilibrium_sweep=True
@@ -1173,8 +1311,23 @@ class TriCoreSetupEngine:
                 or (side == "short" and micro_dir == "bullish" and pressure > 0.15)
             )
 
-            if displacement.get("direction") == side and (flow_aligned or non_opposing_flow) and not falling_knife_against:
-                zone, is_shallow = _first_lineage_retest(signal, frame, side, displacement, atr=atr)
+            disp_dir = displacement.get("direction") or displacement.get("side")
+            if disp_dir == side and (flow_aligned or non_opposing_flow) and not falling_knife_against:
+                zone, is_shallow = _first_lineage_retest(
+                    signal,
+                    frame,
+                    side,
+                    displacement,
+                    atr=atr,
+                    allow_shallow_front_run=(regime_label == "trending" or htf_aligned),
+                    allow_extended_lineage=(regime_label == "trending" or htf_aligned),
+                )
+                is_proactive_continuation = False
+                if zone is None and is_trend_continuation:
+                    zone = _fresh_displacement_zone(signal, frame, side, displacement)
+                    if zone is not None:
+                        is_proactive_continuation = True
+
                 if zone is not None:
                     stop = float(zone.bottom) - buffer if side == "long" else float(zone.top) + buffer
                     zone_source = str(getattr(zone, "source", "swing"))
@@ -1224,27 +1377,60 @@ class TriCoreSetupEngine:
 
                     zone_edge = float(zone.top if side == "long" else zone.bottom)
                     dist_from_edge = (entry - zone_edge) if side == "long" else (zone_edge - entry)
-                    eff_market_extension = policy.market_entry_max_extension_atr
-                    if is_unicorn or (side == "long" and pressure >= 0.15) or (side == "short" and pressure <= -0.15):
-                        eff_market_extension = max(eff_market_extension, 0.85)
-                    if atr > 0 and dist_from_edge > eff_market_extension * atr:
+                    break_id_str = str(displacement.get("structure_break_id") or displacement.get("event_id") or "")
+                    is_internal_structure = (
+                        zone_source == "internal"
+                        or break_id_str.startswith("internal:")
+                    )
+                    threshold_extension = 0.05 * (atr if atr > 0 else entry * 0.005)
+
+                    if is_proactive_continuation:
+                        disp_idx = _index(displacement.get("index", displacement.get("candle_index", -1)))
+                        last_row = frame.iloc[-1]
+                        bar_range = abs(float(last_row["high"]) - float(last_row["low"]))
+                        strong_institutional_flow = (
+                            (pressure >= 0.22 if side == "long" else pressure <= -0.22)
+                            and not opposing_divergence
+                        )
+                        market_sl_dist_pct = abs(entry - stop) / max(entry, 1e-6)
+                        not_climax_bar = (
+                            (atr <= 0 or bar_range <= 1.25 * atr)
+                            and (0.0055 <= market_sl_dist_pct <= 0.0105)
+                        )
+                        if (len(frame) - 1) == disp_idx and strong_institutional_flow and not_climax_bar:
+                            disp_entry = entry
+                            disp_entry_policy: Literal["market_eligible", "limit_retest_only"] = "market_eligible"
+                            evidence_items.append(
+                                f"Momentum BOS Continuation (Market): trending + 1H aligned with strong institutional delta ({pressure:+.1%}) and compact stop ({market_sl_dist_pct*100:.2f}%)"
+                            )
+                        else:
+                            disp_entry = zone_edge
+                            disp_entry_policy = "limit_retest_only"
+                            evidence_items.append(
+                                f"Proactive Trend Limit Armed at {zone_label} edge ({zone_edge:.4f}) after Swing BOS"
+                            )
+                    elif dist_from_edge > threshold_extension:
                         disp_entry = zone_edge
-                        disp_entry_policy: Literal["market_eligible", "limit_retest_only"] = "limit_retest_only"
+                        disp_entry_policy = "limit_retest_only"
+                    elif is_internal_structure or is_ranging:
+                        disp_entry = min(entry, zone_edge) if side == "long" else max(entry, zone_edge)
+                        disp_entry_policy = "limit_retest_only"
                     else:
                         disp_entry = entry
                         disp_entry_policy = "market_eligible"
 
-                    loc_ok, loc_reason = _range_location_ok(
-                        signal, side, disp_entry, allow_equilibrium_sweep=False
-                    )
-                    if not loc_ok:
-                        loc_code = (
-                            "LOCATION_LONG_IN_PREMIUM" if (side == "long" and "equilibrium 50%" in loc_reason.lower())
-                            else "LOCATION_SHORT_IN_DISCOUNT" if (side == "short" and "equilibrium 50%" in loc_reason.lower())
-                            else "LOCATION_MID_RANGE_EQUILIBRIUM"
+                    if not is_trend_continuation:
+                        loc_ok, loc_reason = _range_location_ok(
+                            signal, side, disp_entry, allow_equilibrium_sweep=False
                         )
-                        _add_rejection(loc_reason, loc_code)
-                        continue
+                        if not loc_ok:
+                            loc_code = (
+                                "LOCATION_LONG_IN_PREMIUM" if (side == "long" and "equilibrium 50%" in loc_reason.lower())
+                                else "LOCATION_SHORT_IN_DISCOUNT" if (side == "short" and "equilibrium 50%" in loc_reason.lower())
+                                else "LOCATION_MID_RANGE_EQUILIBRIUM"
+                            )
+                            _add_rejection(loc_reason, loc_code)
+                            continue
 
                     disp_target = (
                         _range_opposing_target(signal, side, disp_entry)
@@ -1257,7 +1443,7 @@ class TriCoreSetupEngine:
                         invalidation_source=f"first_retest:{zone.zone_id}",
                         flow_confirmation_type="single_bar_aggressor_delta",
                         event_id=(
-                            f"displacement:{side}:{displacement.get('structure_break_id')}:"
+                            f"displacement:{side}:{break_id_str}:"
                             f"{getattr(zone, 'zone_id', '')}"
                         ),
                         entry_policy=disp_entry_policy,
@@ -1427,9 +1613,7 @@ class TriCoreSetupEngine:
             reasons = list(dict.fromkeys(rejected)) or [
                 "No causal sweep+CVD reversal or first displacement-retest+CVD continuation"
             ]
-            codes = list(dict.fromkeys(rejected_codes)) or [
-                "NO_SETUP_FOUND"
-            ]
+            codes = list(dict.fromkeys(rejected_codes)) or map_rejection_codes(reasons)
             if candidates:
                 candidates.sort(key=lambda candidate: candidate.risk_reward, reverse=True)
                 armed = candidates[0]

@@ -733,7 +733,8 @@ async def list_trades(
         except PaperOMSError as exc:
             _raise_paper_oms_http(exc)
 
-    trades = [dict(trade) for trade in get_all_trades().values()]
+    trades_dict = await get_all_trades_async()
+    trades = [dict(trade) for trade in trades_dict.values()]
 
     # Normalize legacy trade records
     for t in trades:
@@ -812,7 +813,8 @@ async def close_trade(
     _key: str = Depends(verify_api_key),
 ):
     """Close an open position or cancel a pending order."""
-    legacy_trade = get_all_trades().get(trade_id)
+    all_current = await get_all_trades_async()
+    legacy_trade = all_current.get(trade_id)
     if legacy_trade and legacy_trade.get("mode") == "live":
         raise HTTPException(status_code=409, detail="Live positions must be closed or cancelled at the broker")
     if _paper_oms_available():
@@ -882,7 +884,7 @@ async def close_trade(
             raise HTTPException(status_code=503, detail="Current market price is unavailable; supply close_price") from exc
     closed = auto_close_trade_sync(trade_id, req.reason or "manual", float(close_p))
     if not closed:
-        latest = get_all_trades().get(trade_id)
+        latest = (await get_all_trades_async()).get(trade_id)
         latest_status = latest.get("status") if latest else "missing"
         raise HTTPException(status_code=409, detail=f"Trade state changed to '{latest_status}' before close")
     return closed
@@ -912,7 +914,7 @@ async def get_account_portfolio(
         if broker and broker not in {session.broker}:
             raise HTTPException(status_code=403, detail="Live Session is not authorized for the requested broker")
         broker = session.broker
-    trades_snapshot = get_all_trades()
+    trades_snapshot = await get_all_trades_async()
 
     alpaca_key = (cfg.alpaca_api_key or "").strip()
     alpaca_sec = (cfg.alpaca_api_secret or "").strip()
@@ -1276,7 +1278,8 @@ async def get_trade(
     _key: str = Depends(verify_api_key),
     live_session_token: str | None = Header(default=None, alias="X-Live-Session-Token"),
 ):
-    legacy_trade = get_all_trades().get(trade_id)
+    all_current = await get_all_trades_async()
+    legacy_trade = all_current.get(trade_id)
     if legacy_trade and legacy_trade.get("mode", "paper") == "live":
         live_session_manager.require(
             live_session_token,

@@ -420,19 +420,13 @@ class RiskEngine:
             if not math.isfinite(float(max_stop_distance_pct)) or not 0 < float(max_stop_distance_pct) <= 20:
                 assessment.rejection_reason = "Maximum stop distance must be between 0 and 20 percent"
                 return assessment
-            effective_max_stop_pct = min(
-                effective_max_stop_pct,
-                float(max_stop_distance_pct) / 100.0,
-            )
+            effective_max_stop_pct = float(max_stop_distance_pct) / 100.0
         if atr_pct is not None:
             if not math.isfinite(float(atr_pct)) or not 0 < float(atr_pct) <= 20:
                 assessment.rejection_reason = "ATR percent must be between 0 and 20 percent"
                 return assessment
             atr_stop_pct = (float(atr_pct) / 100.0) * self.ATR_STOP_MULTIPLIER
-            effective_max_stop_pct = min(
-                self.SL_MAX_PCT,
-                max(effective_max_stop_pct, atr_stop_pct),
-            )
+            effective_max_stop_pct = max(effective_max_stop_pct, atr_stop_pct)
             assessment.atr_pct = float(atr_pct)
             assessment.stop_distance_atr = sl_pct / (float(atr_pct) / 100.0)
             assessment.stop_policy = "atr_aware_candidate_seed"
@@ -450,7 +444,7 @@ class RiskEngine:
             if not math.isfinite(float(min_stop_distance_pct)) or float(min_stop_distance_pct) <= 0:
                 assessment.rejection_reason = "Minimum stop distance must be positive"
                 return assessment
-            effective_min_stop_pct = max(effective_min_stop_pct, float(min_stop_distance_pct) / 100.0)
+            effective_min_stop_pct = float(min_stop_distance_pct) / 100.0
 
         if sl_pct < effective_min_stop_pct:
             assessment.sl_valid = False
@@ -498,14 +492,14 @@ class RiskEngine:
             assessment.rejection_reason = "Minimum executable R:R must be a finite number"
             return assessment
         assessment.minimum_executable_rr = round(effective_min_rr, 4)
+        net_floor = max(0.95, effective_min_rr * 0.63)
         if calculated_rr < effective_min_rr:
             assessment.rr_ok = False
-            # Only hard-reject when called standalone (no minimum_rr passed in).
-            # In the auto-pilot pipeline, ExecutionRevalidator is the R:R gate owner.
-            if minimum_rr is None:
+            # If minimum_rr was explicitly passed, reject if below net_floor
+            if minimum_rr is None or calculated_rr < net_floor:
                 assessment.approved = False
                 assessment.rejection_reason = (
-                    f"R:R too low ({calculated_rr:.2f} < {effective_min_rr})"
+                    f"R:R too low ({calculated_rr:.2f} < {effective_min_rr if minimum_rr is None else net_floor:.2f})"
                 )
                 return assessment
             assessment.warnings.append(

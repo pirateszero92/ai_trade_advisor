@@ -602,6 +602,19 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final settings = ref.watch(settingsProvider);
+    if (settings.isPaperMode && _activeProfileMode == 'live') {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _activeProfileMode != 'live') return;
+        setState(() {
+          _activeProfileMode = 'paper';
+          _isLoading = true;
+        });
+        _fetchTrades(mode: 'paper');
+        _fetchAccountInfo(mode: 'paper');
+      });
+    }
+
     final closed = _trades.where((t) => t['status'] == 'closed').toList();
     final openList = _trades.where((t) => t['status'] == 'open').toList();
     final pendingList = _trades.where((t) => t['status'] == 'pending').toList();

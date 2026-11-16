@@ -1085,6 +1085,7 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
 
     try {
       final dio = AppApi.dio;
+      final isAiRecommended = _bpEntryMode == 'ai';
       final resp = await dio.post(
         AppApi.url('/api/v1/paper/orders'),
         cancelToken: _requestCancelToken,
@@ -1100,10 +1101,11 @@ class _ChartScreenState extends ConsumerState<ChartScreen> {
           'risk_pct': _selectedRiskPct,
           'auto_be': _autoBeEnabled,
           'trailing_stop': _trailingStopEnabled,
-          'setup_grade': gate.coreSetupGrade,
-          'setup_type': setupType,
-          'decision_snapshot_id': snapshotId,
-          'setup_timeframe': setupTimeframe,
+          'source': isAiRecommended ? 'operator_confirmed_candidate' : 'manual_independent',
+          'setup_grade': isAiRecommended ? gate.coreSetupGrade : null,
+          'setup_type': isAiRecommended ? setupType : null,
+          'decision_snapshot_id': isAiRecommended ? snapshotId : null,
+          'setup_timeframe': isAiRecommended ? setupTimeframe : null,
           'exchange': targetExchange,
           'mode': targetMode,
           'tag': tag,

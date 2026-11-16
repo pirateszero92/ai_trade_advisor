@@ -346,3 +346,313 @@ async def test_auto_pilot_loss_streak_halt_blocks_portfolio():
         assert not mock_oms.place_order.called
         streak_traces = [call for call in mock_trace.call_args_list if call.kwargs.get("facts", {}).get("reason_code") == "LOSS_STREAK_HALT"]
         assert len(streak_traces) > 0, "LOSS_STREAK_HALT reason must be recorded in decision trace"
+
+
+@pytest.mark.anyio
+async def test_auto_pilot_enforces_user_min_stop_loss_default_sl_pct():
+    """
+    Verifies that default_sl_pct (Min Stop Loss in Settings) widens a tight 0.38% SL
+    to the configured floor (e.g. 1.0%) and reaches paper_oms.place_order.
+    """
+    monitor = MarketMonitor(poll_interval_seconds=60)
+    df = _create_sample_df()
+    sig = _create_sample_signal("XRP/USDT", "short")
+    # Tight 0.38% stop loss on entry=100.0 -> raw_sl=100.38
+    sig.entry = 100.0
+    sig.stop_loss = 100.38
+    sig.take_profit = 99.40
+    sig.tri_core_setup["entry"] = 100.0
+    sig.tri_core_setup["stop_loss"] = 100.38
+    sig.tri_core_setup["take_profit"] = 99.40
+
+    strat = MagicMock()
+    strat.approved = True
+    strat.direction = "short"
+
+    mock_oms = MagicMock()
+    mock_oms.ready = True
+    mock_oms.list_positions = AsyncMock(return_value=[])
+    mock_oms.account_snapshot = AsyncMock(return_value={
+        "total_equity": 1000.0,
+        "initial_capital": 1000.0,
+        "daily_pnl_pct": 0.0,
+    })
+    mock_oms.place_order = AsyncMock(return_value={"status": "filled", "order_id": "order-xrp"})
+
+    rule_mock = MagicMock()
+    rule_mock.price = lambda p, upward=True: round(p, 4)
+    rule_mock.min_quantity = 0.01
+    rule_mock.min_notional = 5.0
+    rule_mock.quantity_step = 0.01
+
+    with patch("app.services.paper_oms.paper_oms", mock_oms), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+             "auto_trade_enabled": True,
+             "risk_per_trade": 2.0,
+             "default_sl_pct": 1.0,
+             "target_rr": 1.5,
+         }), \
+         patch("app.services.event_trigger.instrument_rules.get", AsyncMock(return_value=rule_mock)), \
+         patch("app.services.event_trigger.decision_trace.record", AsyncMock()), \
+         patch("app.services.event_trigger.broadcast", AsyncMock()), \
+         patch("app.services.event_trigger.candidate_lifecycle") as mock_lifecycle:
+
+        rec_mock = MagicMock()
+        rec_mock.state.value = "ARMED"
+        mock_lifecycle.register = AsyncMock(return_value=rec_mock)
+        mock_lifecycle.transition = AsyncMock(return_value=True)
+
+        await monitor._evaluate_and_execute_auto_pilot(
+            symbol="XRP/USDT",
+            direction="short",
+            m_type="crypto",
+            ex="binance",
+            ltf_sig=sig,
+            live_price=100.0,
+            strat_res=strat,
+            confluence=85,
+            entry_mode="market",
+            decision_snapshot_id="test-snap-min-sl",
+            setup_timeframe="15m",
+            ltf_df=df,
+        )
+
+        assert mock_oms.place_order.called
+        payload = mock_oms.place_order.call_args[0][0]
+        # Stop loss must be widened from 100.38 (0.38%) to 101.0 (1.0%)
+        assert payload["stop_loss"] == pytest.approx(101.0, abs=0.05)
+        assert payload["take_profit"] == pytest.approx(98.5, abs=0.05)
+
+
+@pytest.mark.anyio
+async def test_auto_pilot_preserves_structural_sl_tp_on_btc_limit_order():
+    """
+    #62 BTC regression: A BTC/USDT limit order with valid 0.40% structural SL (73365) and
+    structural TP (74151) must NOT be inflated to 1.50% SL (72555) and 2.25% TP (75317).
+    """
+    monitor = MarketMonitor(poll_interval_seconds=60)
+    df = _create_sample_df()
+    sig = _create_sample_signal("BTC/USDT", "long")
+    sig.entry = 73660.0
+    sig.stop_loss = 73365.0
+    sig.take_profit = 74151.0
+    sig.tri_core_setup["entry"] = 73660.0
+    sig.tri_core_setup["stop_loss"] = 73365.0
+    sig.tri_core_setup["take_profit"] = 74151.0
+    sig.tri_core_setup["order_type"] = "limit"
+    sig.tri_core_setup["entry_policy"] = "limit_retest_only"
+
+    strat = MagicMock()
+    strat.approved = True
+    strat.direction = "long"
+
+    mock_oms = MagicMock()
+    mock_oms.ready = True
+    mock_oms.list_positions = AsyncMock(return_value=[])
+    mock_oms.account_snapshot = AsyncMock(return_value={
+        "total_equity": 1000.0,
+        "initial_capital": 1000.0,
+        "daily_pnl_pct": 0.0,
+    })
+    mock_oms.place_order = AsyncMock(return_value={"status": "open", "order_id": "order-btc-62"})
+
+    rule_mock = MagicMock()
+    rule_mock.price = lambda p, upward=True: round(p, 2)
+    rule_mock.min_quantity = 0.001
+    rule_mock.min_notional = 5.0
+    rule_mock.quantity_step = 0.001
+
+    with patch("app.services.paper_oms.paper_oms", mock_oms), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+             "auto_trade_enabled": True,
+             "risk_per_trade": 2.0,
+             "default_sl_pct": 1.5,
+             "target_rr": 1.5,
+         }), \
+         patch("app.services.event_trigger.instrument_rules.get", AsyncMock(return_value=rule_mock)), \
+         patch("app.services.event_trigger.decision_trace.record", AsyncMock()), \
+         patch("app.services.event_trigger.broadcast", AsyncMock()), \
+         patch("app.services.event_trigger.candidate_lifecycle") as mock_lifecycle:
+
+        rec_mock = MagicMock()
+        rec_mock.state.value = "ARMED"
+        mock_lifecycle.register = AsyncMock(return_value=rec_mock)
+        mock_lifecycle.transition = AsyncMock(return_value=True)
+
+        await monitor._evaluate_and_execute_auto_pilot(
+            symbol="BTC/USDT",
+            direction="long",
+            m_type="crypto",
+            ex="binance",
+            ltf_sig=sig,
+            live_price=73800.0,
+            strat_res=strat,
+            confluence=85,
+            entry_mode="limit",
+            decision_snapshot_id="test-snap-btc-limit",
+            setup_timeframe="15m",
+            ltf_df=df,
+        )
+
+        assert mock_oms.place_order.called
+        payload = mock_oms.place_order.call_args[0][0]
+        assert payload["order_type"] == "limit"
+        assert payload["stop_loss"] == pytest.approx(73365.0, abs=1.0)
+        assert payload["take_profit"] == pytest.approx(74151.0, abs=1.0)
+
+
+@pytest.mark.anyio
+async def test_auto_pilot_blocks_market_entry_when_live_price_compresses_sl_below_default_sl_pct():
+    """
+    #84 SUI regression: When orig_entry=0.7068 has a valid SL=0.7125 (0.81%), but live_price
+    drifted adversely to 0.7094 (compressing SL to 0.44% < 0.80% default_sl_pct) while TP=0.6776
+    is far enough that live_rr > 1.5, Auto-Pilot must NOT fire a Market order with a 0.44% SL;
+    it must demote to a Limit order at orig_entry (0.7068).
+    """
+    monitor = MarketMonitor(poll_interval_seconds=60)
+    df = _create_sample_df()
+    sig = _create_sample_signal("SUI/USDT", "short")
+    sig.entry = 0.7068
+    sig.stop_loss = 0.7125
+    sig.take_profit = 0.6776
+    sig.tri_core_setup["entry"] = 0.7068
+    sig.tri_core_setup["stop_loss"] = 0.7125
+    sig.tri_core_setup["take_profit"] = 0.6776
+    sig.tri_core_setup["order_type"] = "market"
+    sig.tri_core_setup["entry_policy"] = "market_eligible"
+
+    strat = MagicMock()
+    strat.approved = True
+    strat.direction = "short"
+
+    mock_oms = MagicMock()
+    mock_oms.ready = True
+    mock_oms.list_positions = AsyncMock(return_value=[])
+    mock_oms.account_snapshot = AsyncMock(return_value={
+        "total_equity": 1000.0,
+        "initial_capital": 1000.0,
+        "daily_pnl_pct": 0.0,
+    })
+    mock_oms.place_order = AsyncMock(return_value={"status": "open", "order_id": "order-sui-84"})
+
+    rule_mock = MagicMock()
+    rule_mock.price = lambda p, upward=True: round(p, 4)
+    rule_mock.min_quantity = 0.1
+    rule_mock.min_notional = 5.0
+    rule_mock.quantity_step = 0.1
+
+    with patch("app.services.paper_oms.paper_oms", mock_oms), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+             "auto_trade_enabled": True,
+             "risk_per_trade": 2.0,
+             "default_sl_pct": 0.8,
+             "target_rr": 1.5,
+         }), \
+         patch("app.services.event_trigger.instrument_rules.get", AsyncMock(return_value=rule_mock)), \
+         patch("app.services.event_trigger.decision_trace.record", AsyncMock()), \
+         patch("app.services.event_trigger.broadcast", AsyncMock()), \
+         patch("app.services.event_trigger.candidate_lifecycle") as mock_lifecycle:
+
+        rec_mock = MagicMock()
+        rec_mock.state.value = "ARMED"
+        mock_lifecycle.register = AsyncMock(return_value=rec_mock)
+        mock_lifecycle.transition = AsyncMock(return_value=True)
+
+        await monitor._evaluate_and_execute_auto_pilot(
+            symbol="SUI/USDT",
+            direction="short",
+            m_type="crypto",
+            ex="binance",
+            ltf_sig=sig,
+            live_price=0.7094,
+            strat_res=strat,
+            confluence=85,
+            entry_mode="market",
+            decision_snapshot_id="test-snap-sui-84",
+            setup_timeframe="15m",
+            ltf_df=df,
+        )
+
+        assert mock_oms.place_order.called
+        payload = mock_oms.place_order.call_args[0][0]
+        assert payload["order_type"] == "limit"
+        assert payload["entry"] == pytest.approx(0.7068, abs=1e-4)
+
+
+@pytest.mark.anyio
+async def test_auto_pilot_widens_0_71_pct_sl_to_user_default_sl_pct_0_80():
+    """
+    #88 ADA regression: A market order with 0.714% SL (between 0.65% and 0.80%) must still be
+    widened to default_sl_pct=0.80% when default_sl_pct is set to 0.8 in Settings.
+    """
+    monitor = MarketMonitor(poll_interval_seconds=60)
+    df = _create_sample_df()
+    sig = _create_sample_signal("ADA/USDT", "long")
+    sig.entry = 0.1540
+    sig.stop_loss = 0.1529  # 0.714% SL
+    sig.take_profit = 0.1560
+    sig.tri_core_setup["entry"] = 0.1540
+    sig.tri_core_setup["stop_loss"] = 0.1529
+    sig.tri_core_setup["take_profit"] = 0.1560
+    sig.tri_core_setup["order_type"] = "market"
+    sig.tri_core_setup["entry_policy"] = "market_eligible"
+
+    strat = MagicMock()
+    strat.approved = True
+    strat.direction = "long"
+
+    mock_oms = MagicMock()
+    mock_oms.ready = True
+    mock_oms.list_positions = AsyncMock(return_value=[])
+    mock_oms.account_snapshot = AsyncMock(return_value={
+        "total_equity": 1000.0,
+        "initial_capital": 1000.0,
+        "daily_pnl_pct": 0.0,
+    })
+    mock_oms.place_order = AsyncMock(return_value={"status": "filled", "order_id": "order-ada-88"})
+
+    rule_mock = MagicMock()
+    rule_mock.price = lambda p, upward=True: round(p, 5)
+    rule_mock.min_quantity = 1.0
+    rule_mock.min_notional = 5.0
+    rule_mock.quantity_step = 1.0
+
+    with patch("app.services.paper_oms.paper_oms", mock_oms), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+             "auto_trade_enabled": True,
+             "risk_per_trade": 2.0,
+             "default_sl_pct": 0.8,
+             "target_rr": 1.5,
+         }), \
+         patch("app.services.event_trigger.instrument_rules.get", AsyncMock(return_value=rule_mock)), \
+         patch("app.services.event_trigger.decision_trace.record", AsyncMock()), \
+         patch("app.services.event_trigger.broadcast", AsyncMock()), \
+         patch("app.services.event_trigger.candidate_lifecycle") as mock_lifecycle:
+
+        rec_mock = MagicMock()
+        rec_mock.state.value = "ARMED"
+        mock_lifecycle.register = AsyncMock(return_value=rec_mock)
+        mock_lifecycle.transition = AsyncMock(return_value=True)
+
+        await monitor._evaluate_and_execute_auto_pilot(
+            symbol="ADA/USDT",
+            direction="long",
+            m_type="crypto",
+            ex="binance",
+            ltf_sig=sig,
+            live_price=0.1540,
+            strat_res=strat,
+            confluence=85,
+            entry_mode="market",
+            decision_snapshot_id="test-snap-ada-88",
+            setup_timeframe="15m",
+            ltf_df=df,
+        )
+
+        assert mock_oms.place_order.called
+        payload = mock_oms.place_order.call_args[0][0]
+        # 0.1540 * (1 - 0.008) = 0.15277
+        assert payload["stop_loss"] == pytest.approx(0.15277, abs=2e-5)
+
+
+

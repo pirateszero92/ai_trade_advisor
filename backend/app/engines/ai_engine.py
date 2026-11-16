@@ -740,9 +740,9 @@ class AIEngine:
         configured_host = urlparse(self.cfg.local_llm_endpoint).hostname
         if configured_host:
             allowed_hosts.add(configured_host.lower())
-        ep_host = urlparse(endpoint).hostname
-        if ep_host and ("ollama.com" in ep_host.lower() or "openai.com" in ep_host.lower()):
-            allowed_hosts.add(ep_host.lower())
+        ep_host = (urlparse(endpoint).hostname or "").lower()
+        if ep_host and any(ep_host == d or ep_host.endswith(f".{d}") for d in ("ollama.com", "openai.com")):
+            allowed_hosts.add(ep_host)
         host_url = validate_service_url(
             endpoint,
             allowed_hosts=allowed_hosts,

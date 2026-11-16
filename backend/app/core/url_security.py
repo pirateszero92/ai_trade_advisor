@@ -30,17 +30,30 @@ def validate_service_url(
         raise ValueError(f"Host '{host}' is not in the configured allowlist")
 
     try:
-        address = ipaddress.ip_address(host)
+        resolved_ips = [ipaddress.ip_address(host)]
     except ValueError:
-        address = None
-    if address and not allow_private_ip and (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_unspecified
-    ):
-        raise ValueError("Private, loopback, link-local, and reserved IP targets are not allowed")
+        resolved_ips = []
+        if not allow_private_ip:
+            if host in {"localhost", "localhost.localdomain"}:
+                raise ValueError("Private, loopback, link-local, and reserved IP targets are not allowed")
+            import socket
+            try:
+                addr_info = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+                resolved_ips = [ipaddress.ip_address(item[4][0]) for item in addr_info]
+            except OSError as exc:
+                raise ValueError(f"Host '{host}' could not be resolved") from exc
+
+    if not allow_private_ip:
+        for address in resolved_ips:
+            if (
+                address.is_private
+                or address.is_loopback
+                or address.is_link_local
+                or address.is_reserved
+                or address.is_unspecified
+                or address.is_multicast
+            ):
+                raise ValueError("Private, loopback, link-local, and reserved IP targets are not allowed")
     return raw
 
 

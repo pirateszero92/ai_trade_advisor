@@ -436,6 +436,7 @@ def extract_counterfactual_filtered_candidates(records: list[dict[str, Any]]) ->
 
         if filter_events:
             facts = filter_events[-1].get("facts") or {}
+            snap_facts = snapshot_events[-1].get("facts") or {} if snapshot_events else {}
             filtered_list.append({
                 "candidate_id": record.get("candidate_id"),
                 "snapshot_id": record.get("snapshot_id"),
@@ -446,6 +447,9 @@ def extract_counterfactual_filtered_candidates(records: list[dict[str, Any]]) ->
                 "stop_loss": facts.get("stop_loss"),
                 "take_profit": facts.get("take_profit"),
                 "timeframe": facts.get("timeframe"),
+                "market_regime": facts.get("market_regime") or snap_facts.get("market_regime") or "unknown",
+                "market_type": facts.get("market_type") or snap_facts.get("market_type") or "crypto",
+                "exchange": facts.get("exchange") or snap_facts.get("input_exchange") or "binance",
                 "verdict": facts.get("verdict"),
                 "action": facts.get("action"),
                 "filter_reason": facts.get("reason"),
@@ -467,6 +471,9 @@ def extract_counterfactual_filtered_candidates(records: list[dict[str, Any]]) ->
                     "stop_loss": snap_facts.get("stop_loss"),
                     "take_profit": snap_facts.get("take_profit"),
                     "timeframe": snap_facts.get("timeframe"),
+                    "market_regime": snap_facts.get("market_regime") or "unknown",
+                    "market_type": snap_facts.get("market_type") or "crypto",
+                    "exchange": snap_facts.get("input_exchange") or "binance",
                     "verdict": verdict,
                     "action": "BLOCKED",
                     "filter_reason": facts.get("reason") or f"AI verdict {verdict}",

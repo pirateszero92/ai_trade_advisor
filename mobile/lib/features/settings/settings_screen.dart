@@ -1508,6 +1508,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
         await prefs.setBool(
 
+            'loss_streak_halt_enabled', newLossStreakHaltEnabled);
+
+        await prefs.setInt(
+
+            'loss_streak_halt_hours', newLossStreakHaltHours);
+
+        await prefs.setBool(
+
             'counter_trend_filter_enabled', newCounterTrendFilterEnabled);
 
         await prefs.setBool(
@@ -2412,6 +2420,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
     bool isLoadingCatalog = true;
 
+    bool hasInitiatedFetch = false;
+
     Map<String, List<Map<String, dynamic>>> catalog = {};
 
 
@@ -2434,7 +2444,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
         builder: (context, setModalState) {
 
-          if (isLoadingCatalog) {
+          if (isLoadingCatalog && !hasInitiatedFetch) {
+
+            hasInitiatedFetch = true;
 
             AppApi.dio
 
@@ -3478,7 +3490,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
       ),
 
-    );
+    ).whenComplete(() {
+
+      customSymCtrl.dispose();
+
+      searchCtrl.dispose();
+
+    });
 
   }
 
@@ -3780,7 +3798,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
           'binance_trading_mode': current.binanceTradingMode,
 
-          'entry_mode': 'market',
+          'entry_mode': current.entryMode,
 
           'auto_sl_tp': current.autoSlTp,
 
@@ -3802,11 +3820,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
           'auto_trade_min_grade': current.autoTradeMinGrade,
 
-          'auto_trade_entry_type': 'momentum_market',
+          'auto_trade_entry_type': current.autoTradeEntryType,
 
-          'auto_trade_cooldown_seconds': 30,
+          'auto_trade_cooldown_seconds': current.autoTradeCooldownSeconds,
 
-          'btc_anchor_filter_enabled': false,
+          'btc_anchor_filter_enabled': current.btcAnchorFilterEnabled,
 
           'btc_anchor_dump_threshold_pct': current.btcAnchorDumpThresholdPct,
 
@@ -5656,7 +5674,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                       settings.copyWith(targetRr: val),
                     );
                 AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'),
-                    data: {'target_rr': val}).catchError((_) {});
+                    data: {'target_rr': val}).ignore();
               },
               suffix: 'R',
             ),
@@ -5694,7 +5712,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                                 );
                             AppApi.dio.post(
                                 AppApi.url('/api/v1/settings/runtime'),
-                                data: {'auto_trade_min_grade': 'S'}).catchError((_) {});
+                                data: {'auto_trade_min_grade': 'S'}).ignore();
                           }
                         },
                       ),
@@ -5718,7 +5736,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                                 );
                             AppApi.dio.post(
                                 AppApi.url('/api/v1/settings/runtime'),
-                                data: {'auto_trade_min_grade': 'A'}).catchError((_) {});
+                                data: {'auto_trade_min_grade': 'A'}).ignore();
                           }
                         },
                       ),
@@ -5741,7 +5759,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                                 );
                             AppApi.dio.post(
                                 AppApi.url('/api/v1/settings/runtime'),
-                                data: {'auto_trade_min_grade': 'B'}).catchError((_) {});
+                                data: {'auto_trade_min_grade': 'B'}).ignore();
                           }
                         },
                       ),
@@ -5951,7 +5969,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                           settings.copyWith(clusterLossCooldownMinutes: val),
                         );
                     AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'),
-                        data: {'cluster_loss_cooldown_minutes': val}).catchError((_) {});
+                        data: {'cluster_loss_cooldown_minutes': val}).ignore();
                   },
                   suffix: ' min',
                   isInt: true,
@@ -6001,7 +6019,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                           settings.copyWith(lossStreakHaltHours: val),
                         );
                     AppApi.dio.post(AppApi.url('/api/v1/settings/runtime'),
-                        data: {'loss_streak_halt_hours': val}).catchError((_) {});
+                        data: {'loss_streak_halt_hours': val}).ignore();
                   },
                   suffix: ' ชม.',
                   isInt: true,

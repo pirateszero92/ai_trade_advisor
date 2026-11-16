@@ -14,21 +14,26 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from app.core.json_store import _process_lock
 
 
 STRATEGY_CONFIG_LOCK = threading.RLock()
 
 
+def _read_strategy_unlocked(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8-sig") as handle:
+        loaded = yaml.safe_load(handle) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError("strategy.yaml must contain an object")
+    return loaded
+
+
 def read_strategy_config(path: Path) -> dict[str, Any]:
     """Read a strategy YAML document while holding the shared process lock."""
-    with STRATEGY_CONFIG_LOCK:
-        if not path.exists():
-            return {}
-        with path.open(encoding="utf-8-sig") as handle:
-            loaded = yaml.safe_load(handle) or {}
-        if not isinstance(loaded, dict):
-            raise ValueError("strategy.yaml must contain an object")
-        return loaded
+    with STRATEGY_CONFIG_LOCK, _process_lock(path):
+        return _read_strategy_unlocked(path)
 
 
 def update_strategy_section(
@@ -37,8 +42,8 @@ def update_strategy_section(
     value: dict[str, Any],
 ) -> None:
     """Atomically replace one top-level section without losing other fields."""
-    with STRATEGY_CONFIG_LOCK:
-        strategy = read_strategy_config(path)
+    with STRATEGY_CONFIG_LOCK, _process_lock(path):
+        strategy = _read_strategy_unlocked(path)
         strategy[section] = value
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"

@@ -106,7 +106,7 @@ class Settings(BaseSettings):
     max_leverage: float = Field(default=10.0, ge=1.0, le=50.0)
     btc_anchor_filter_enabled: bool = False
     btc_anchor_dump_threshold_pct: float = Field(default=1.0, ge=0.2, le=5.0)
-    cluster_loss_cooldown_enabled: bool = False
+    cluster_loss_cooldown_enabled: bool = True
     cluster_loss_cooldown_minutes: int = Field(default=30, ge=5, le=240)
     loss_streak_halt_enabled: bool = False
     loss_streak_halt_hours: int = Field(default=2, ge=1, le=24)

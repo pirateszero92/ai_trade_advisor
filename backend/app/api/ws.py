@@ -60,9 +60,21 @@ def _remove_client(websocket: WebSocket) -> None:
     _send_locks.pop(websocket, None)
 
 
+def _is_registered_client(websocket: WebSocket) -> bool:
+    return (
+        websocket in _connections
+        or websocket in _stream_clients
+        or websocket in _chat_clients
+    )
+
+
 async def _send_json(websocket: WebSocket, payload: dict) -> None:
+    if not _is_registered_client(websocket):
+        return
     lock = _send_locks.setdefault(websocket, asyncio.Lock())
     async with lock:
+        if not _is_registered_client(websocket):
+            return
         await asyncio.wait_for(websocket.send_text(json.dumps(payload)), timeout=3.0)
 
 

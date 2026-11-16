@@ -59,7 +59,7 @@ class ApiConfig {
 
   static const _defaultApiKey = String.fromEnvironment(
     'BACKEND_API_KEY',
-    defaultValue: 'avItXOkrTEBbEhJWY5J5VA1uscZb8ajnDHfEAgBL9E1ynCsROTzaERsWCHvTAtZL',
+    defaultValue: '',
   );
 
   static Future<String?> getApiKey() async {

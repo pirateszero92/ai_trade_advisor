@@ -45,4 +45,6 @@ def strategy_family_for_setup_type(value: object) -> str:
         "breaker_shallow_retest", "fvg_shallow_retest",
     }:
         return "swing"
+    if normalized in {"micro_sniper_3m", "micro_sniper_5m"}:
+        return "micro_sniper"
     return "none"

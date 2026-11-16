@@ -538,6 +538,7 @@ class ExecutionAnalysisService:
                 }
                 failed.valid_until = datetime.now(timezone.utc) + timedelta(seconds=15)
                 self._cache[key] = failed
+                self._by_id[failed.snapshot_id] = failed
                 try:
                     self._sync_review_to_monitor(failed, failed.signal.ai_review)
                 except Exception as exc:
@@ -664,12 +665,14 @@ class ExecutionAnalysisService:
                     macro_smc = await asyncio.to_thread(_run_macro_smc)
                     calculated_macro_bias = str(macro_smc.bias or "neutral").lower()
                     for ob in getattr(macro_smc, "order_blocks", []):
+                        if getattr(ob, "mitigated", False):
+                            continue
                         calculated_macro_obstacles.append({
                             "type": "order_block",
-                            "side": str(getattr(ob, "type", "")).lower(),
+                            "side": str(getattr(ob, "direction", "") or getattr(ob, "type", "")).lower(),
                             "mid": float(getattr(ob, "mid", 0.0) or 0.0),
-                            "high": float(getattr(ob, "high", 0.0) or 0.0),
-                            "low": float(getattr(ob, "low", 0.0) or 0.0),
+                            "high": float(getattr(ob, "top", 0.0) or getattr(ob, "high", 0.0) or 0.0),
+                            "low": float(getattr(ob, "bottom", 0.0) or getattr(ob, "low", 0.0) or 0.0),
                         })
                     if getattr(macro_smc, "strong_weak_high", None):
                         swh = macro_smc.strong_weak_high
@@ -685,6 +688,13 @@ class ExecutionAnalysisService:
                         })
                 except Exception as macro_err:
                     logger.debug(f"Macro bias computation note: {macro_err}")
+
+            # Ensure 1H/4H directional bias is never overridden by a sub-hourly setup role
+            # or left neutral when the higher timeframe has an active trend.
+            if calculated_macro_bias in {"bullish", "bearish"}:
+                if calculated_htf_bias == "neutral" or htf_tf.lower() in {"5m", "15m", "30m"}:
+                    calculated_htf_bias = calculated_macro_bias
+                    calculated_intraday_bias = calculated_macro_bias
 
             calculated_micro_momentum: dict[str, Any] = {}
             if not isinstance(m5_res, Exception) and m5_res is not None and not m5_res.empty and len(m5_res) >= 3:

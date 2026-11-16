@@ -29,8 +29,8 @@ def is_valid_api_key(provided_key: str | None) -> bool:
     if not is_securely_configured():
         # Insecure default key detected
         return False
-    given = provided_key.encode("utf-8")
-    expected = (cfg.app_secret_key or "").encode("utf-8")
+    given = provided_key.strip().encode("utf-8")
+    expected = (cfg.app_secret_key or "").strip().encode("utf-8")
     return hmac.compare_digest(given, expected)
 
 

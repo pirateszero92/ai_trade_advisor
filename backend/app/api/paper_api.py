@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.api import trades
 from app.core.security import verify_api_key
@@ -133,7 +133,7 @@ async def get_counterfactual_replay_summary(
 
 @router.post("/counterfactual/replay")
 async def run_counterfactual_replay(
-    limit: int = 100,
+    limit: int = Query(default=100, ge=1, le=500),
     force_recompute: bool = False,
     api_key: str = Depends(verify_api_key),
 ):

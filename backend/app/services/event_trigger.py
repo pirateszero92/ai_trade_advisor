@@ -606,7 +606,7 @@ class MarketMonitor:
             ltf_df = execution.frame.copy()
             strat_res = execution.strategy
             tf = execution.timeframe
-            htf_bias = "neutral"
+            htf_bias = str(getattr(ltf_sig, "htf_bias", "neutral") or "neutral")
 
             confluence = ltf_sig.confluence_score
 
@@ -657,12 +657,18 @@ class MarketMonitor:
                             return None
                     return auto_close_trade_sync(trade_id, reason, live_price)
 
-                all_t = get_all_trades()
-                for t in all_t.values():
+                if paper_oms.ready:
+                    oms_open = await paper_oms.list_positions(status="open", include_live=False)
+                    open_candidates = oms_open.get("trades", []) if isinstance(oms_open, dict) else (oms_open or [])
+                else:
+                    all_t = await asyncio.to_thread(get_all_trades)
+                    open_candidates = list(all_t.values())
+
+                for t in open_candidates:
                     if (
                         t.get("mode", "paper") == "paper"
                         and t.get("status") == "open"
-                        and t.get("symbol") == symbol
+                        and _compact_symbol(t.get("symbol", "")) == _compact_symbol(symbol)
                     ):
                         t_dir = str(t.get("direction", "")).lower()
                         t_entry = float(t.get("entry", live_price))
@@ -887,7 +893,7 @@ class MarketMonitor:
                 market_type=m_type,
                 exchange=ex,
                 market_data=ltf_df,
-                htf_bias="neutral",
+                htf_bias=htf_bias,
                 entry_mode=entry_mode,
                 signal=ltf_sig.to_dict(),
                 strategy=strat_res.to_dict(),
@@ -1067,7 +1073,12 @@ class MarketMonitor:
                                 elif pos_dir == "short" and reg_dir == "bullish":
                                     cancel_reason = "Cancelled: Market regime flipped to trending bullish"
 
-                        if not cancel_reason and exit_direction and exit_direction == pos_dir:
+                        if (
+                            not cancel_reason
+                            and exit_direction in {"long", "short"}
+                            and pos_dir in {"long", "short"}
+                            and exit_direction != pos_dir
+                        ):
                             cancel_reason = f"Cancelled: Market structure breakdown invalidated {pos_dir.upper()} setup"
 
                     # 3. Check Tri-Core state transitions
@@ -1208,63 +1219,102 @@ class MarketMonitor:
         cfg = get_settings()
 
         # =====================================================================
-        # CLUSTER LOSS COOLDOWN: Block rapid revenge re-entry on recently stopped-out symbol
+        # SAME-EVENT & COOLDOWN GUARD: Prevent duplicate re-entry on same setup
+        # or recently stopped-out symbol
         # =====================================================================
+        closed_sym_positions = [
+            p for p in all_positions
+            if _compact_symbol(p.get("symbol", "")) == _compact_symbol(symbol)
+            and str(p.get("status", "")).lower() == "closed"
+        ]
+        if auto_trade_enabled and closed_sym_positions:
+            closed_sym_positions.sort(
+                key=lambda p: _parse_iso_to_epoch(p.get("closed_at") or p.get("updated_at")),
+                reverse=True,
+            )
+            last_closed = closed_sym_positions[0]
+            last_event_id = str(last_closed.get("tri_core_event_id") or "")
+            if last_event_id and event_id and last_event_id == event_id:
+                logger.info(f"[Auto-Pilot] Duplicate event re-entry blocked for {symbol}: {event_id}")
+                await decision_trace.record(
+                    snapshot_id=decision_snapshot_id,
+                    event_id=event_id,
+                    symbol=symbol,
+                    stage="OMS_CAPACITY",
+                    facts={"passed": False, "reason_code": "DUPLICATE_EVENT_REENTRY", "symbol": symbol},
+                )
+                return None
+
+            last_closed_ts = _parse_iso_to_epoch(last_closed.get("closed_at") or last_closed.get("updated_at"))
+            if last_closed_ts > 0:
+                now_epoch = datetime.now(timezone.utc).timestamp()
+                elapsed_seconds = now_epoch - last_closed_ts
+                symbol_cooldown_sec = int(r_cfg.get("auto_trade_cooldown_seconds", 0) or 0)
+                if symbol_cooldown_sec > 0 and 0 <= elapsed_seconds < symbol_cooldown_sec:
+                    logger.info(
+                        f"[Auto-Pilot] Symbol cooldown active for {symbol}: "
+                        f"closed {elapsed_seconds:.0f}s ago (limit: {symbol_cooldown_sec}s)"
+                    )
+                    await decision_trace.record(
+                        snapshot_id=decision_snapshot_id,
+                        event_id=event_id,
+                        symbol=symbol,
+                        stage="OMS_CAPACITY",
+                        facts={
+                            "passed": False,
+                            "reason_code": "SYMBOL_COOLDOWN_ACTIVE",
+                            "symbol": symbol,
+                            "elapsed_seconds": round(elapsed_seconds, 1),
+                            "cooldown_seconds": symbol_cooldown_sec,
+                        },
+                    )
+                    return None
+
         cluster_cooldown_enabled = bool(
-            r_cfg.get("cluster_loss_cooldown_enabled", getattr(cfg, "cluster_loss_cooldown_enabled", False))
+            r_cfg.get("cluster_loss_cooldown_enabled", getattr(cfg, "cluster_loss_cooldown_enabled", True))
         )
-        if auto_trade_enabled and cluster_cooldown_enabled:
+        if auto_trade_enabled and cluster_cooldown_enabled and closed_sym_positions:
             cooldown_minutes = int(
                 r_cfg.get("cluster_loss_cooldown_minutes", getattr(cfg, "cluster_loss_cooldown_minutes", 30)) or 30
             )
-            closed_sym_positions = [
-                p for p in all_positions
-                if _compact_symbol(p.get("symbol", "")) == _compact_symbol(symbol)
-                and str(p.get("status", "")).lower() == "closed"
-            ]
-            if closed_sym_positions:
-                closed_sym_positions.sort(
-                    key=lambda p: _parse_iso_to_epoch(p.get("closed_at") or p.get("updated_at")),
-                    reverse=True,
-                )
-                last_closed = closed_sym_positions[0]
-                try:
-                    last_pnl = float(last_closed.get("realized_pnl_net") or last_closed.get("realized_pnl") or 0.0)
-                except (ValueError, TypeError):
-                    last_pnl = 0.0
-                last_reason = str(last_closed.get("close_reason") or "")
-                is_loss = (last_pnl < 0 or "Stop Loss" in last_reason or "SL Hit" in last_reason)
+            last_closed = closed_sym_positions[0]
+            try:
+                last_pnl = float(last_closed.get("realized_pnl_net") or last_closed.get("realized_pnl") or 0.0)
+            except (ValueError, TypeError):
+                last_pnl = 0.0
+            last_reason = str(last_closed.get("close_reason") or "")
+            is_loss = (last_pnl < 0 or "Stop Loss" in last_reason or "SL Hit" in last_reason)
 
-                if is_loss:
-                    last_closed_ts = _parse_iso_to_epoch(last_closed.get("closed_at") or last_closed.get("updated_at"))
-                    if last_closed_ts > 0:
-                        now_epoch = datetime.now(timezone.utc).timestamp()
-                        elapsed_minutes = (now_epoch - last_closed_ts) / 60.0
-                        if 0 <= elapsed_minutes < cooldown_minutes:
-                            remaining = cooldown_minutes - elapsed_minutes
-                            logger.info(
-                                f"[Auto-Pilot] Cluster Cooldown active for {symbol}: "
-                                f"recently closed with loss ({last_pnl:+.2f} USDT) {elapsed_minutes:.1f}m ago. "
-                                f"Remaining cooldown: {remaining:.1f}m (limit: {cooldown_minutes}m)"
-                            )
-                            await decision_trace.record(
-                                snapshot_id=decision_snapshot_id,
-                                event_id=event_id,
-                                symbol=symbol,
-                                stage="OMS_CAPACITY",
-                                facts={
-                                    "passed": False,
-                                    "reason_code": "CLUSTER_LOSS_COOLDOWN",
-                                    "symbol": symbol,
-                                    "last_loss_pnl": last_pnl,
-                                    "elapsed_minutes": round(elapsed_minutes, 1),
-                                    "cooldown_minutes": cooldown_minutes,
-                                },
-                            )
-                            return None
+            if is_loss:
+                last_closed_ts = _parse_iso_to_epoch(last_closed.get("closed_at") or last_closed.get("updated_at"))
+                if last_closed_ts > 0:
+                    now_epoch = datetime.now(timezone.utc).timestamp()
+                    elapsed_minutes = (now_epoch - last_closed_ts) / 60.0
+                    if 0 <= elapsed_minutes < cooldown_minutes:
+                        remaining = cooldown_minutes - elapsed_minutes
+                        logger.info(
+                            f"[Auto-Pilot] Cluster Cooldown active for {symbol}: "
+                            f"recently closed with loss ({last_pnl:+.2f} USDT) {elapsed_minutes:.1f}m ago. "
+                            f"Remaining cooldown: {remaining:.1f}m (limit: {cooldown_minutes}m)"
+                        )
+                        await decision_trace.record(
+                            snapshot_id=decision_snapshot_id,
+                            event_id=event_id,
+                            symbol=symbol,
+                            stage="OMS_CAPACITY",
+                            facts={
+                                "passed": False,
+                                "reason_code": "CLUSTER_LOSS_COOLDOWN",
+                                "symbol": symbol,
+                                "last_loss_pnl": last_pnl,
+                                "elapsed_minutes": round(elapsed_minutes, 1),
+                                "cooldown_minutes": cooldown_minutes,
+                            },
+                        )
+                        return None
 
         # =====================================================================
-        # LOSS STREAK CIRCUIT BREAKER: Halt portfolio if consecutive losses reach threshold
+        # LOSS STREAK CIRCUIT BREAKER: Halt portfolio if consecutive losses reach threshold (2 losses)
         # =====================================================================
         loss_streak_enabled = bool(
             r_cfg.get("loss_streak_halt_enabled", getattr(cfg, "loss_streak_halt_enabled", False))
@@ -1292,7 +1342,7 @@ class MarketMonitor:
                     streak += 1
                 else:
                     break
-            if streak >= 3 and all_closed:
+            if streak >= 2 and all_closed:
                 last_closed_ts = _parse_iso_to_epoch(all_closed[0].get("closed_at") or all_closed[0].get("updated_at"))
                 if last_closed_ts > 0:
                     now_epoch = datetime.now(timezone.utc).timestamp()
@@ -1329,6 +1379,8 @@ class MarketMonitor:
             )
             return None
 
+        from app.engines.price_hub import price_hub
+        price_hub.register_symbol(symbol)
         quote = paper_oms.quote_snapshot(symbol) if paper_oms.ready else {}
         executable_quote = quote.get("ask" if direction == "long" else "bid")
         if not executable_quote or float(executable_quote) <= 0:
@@ -1338,15 +1390,14 @@ class MarketMonitor:
                 or float(getattr(ltf_sig, "entry", 0.0) or 0.0)
             )
             if fallback_p and float(fallback_p) > 0:
-                now_epoch = datetime.now(timezone.utc).timestamp()
-                quote = {
-                    "bid": float(fallback_p),
-                    "ask": float(fallback_p),
-                    "price": float(fallback_p),
-                    "timestamp": now_epoch,
-                    "received_timestamp": now_epoch,
-                }
-                executable_quote = float(fallback_p)
+                quote = price_hub.update_price(
+                    symbol,
+                    float(fallback_p),
+                    source="scanner_execution_fallback",
+                )
+                executable_quote = float(
+                    quote.get("ask" if direction == "long" else "bid") or fallback_p
+                )
             else:
                 logger.warning(f"[Auto-Pilot] Fresh executable quote unavailable for {symbol}")
                 await decision_trace.record(
@@ -1383,42 +1434,80 @@ class MarketMonitor:
         # Target R:R from Settings (default 1.20, minimum floor 1.0)
         configured_target_rr = max(1.0, float(r_cfg.get("target_rr", 1.2) or 1.2))
 
-        # Fallback SL buffer: only applied if raw_sl is missing or mathematically microscopic (< 0.05%)
-        # Preserves tight institutional SMC stops at sweep wicks/OB edges (Principle 2: Asymmetric R:R)
-        configured_fallback_sl_ratio = float(r_cfg.get("default_sl_pct", 1.0) or 1.0) / 100.0
-        if configured_fallback_sl_ratio <= 0:
-            configured_fallback_sl_ratio = 0.010
+        # Enforce structural breathing room (0.65% for market entries, 0.40% for limit entries).
+        # Only widen to default_sl_pct (capped at 1.0% on 15m, or 0.60% on BTC/ETH) if the incoming
+        # stop loss is missing or narrower than the structural breathing-room threshold (< 0.65% market / < 0.40% limit).
+        is_major_symbol = _compact_symbol(symbol) in {"BTCUSDT", "ETHUSDT"}
+        structural_breathing_ratio = 0.0065 if setup_order_type == "market" else 0.0040
+        if is_major_symbol and setup_order_type == "market":
+            structural_breathing_ratio = 0.0050
 
-        min_hardware_risk = orig_entry * 0.0005  # 5 bps floor to prevent zero-division
-        orig_risk = abs(orig_entry - raw_sl) if raw_sl > 0 else (orig_entry * configured_fallback_sl_ratio)
-        if orig_risk < min_hardware_risk or raw_sl <= 0:
-            orig_risk = max(orig_risk, orig_entry * configured_fallback_sl_ratio)
+        user_min_sl_pct = r_cfg.get("default_sl_pct")
+        if setup_order_type == "limit":
+            configured_fallback_sl_ratio = 0.0040
+        elif user_min_sl_pct is not None and float(user_min_sl_pct or 0.0) > 0:
+            max_cap = 0.0060 if is_major_symbol else 0.0100
+            configured_fallback_sl_ratio = min(float(user_min_sl_pct) / 100.0, max_cap)
+        else:
+            configured_fallback_sl_ratio = structural_breathing_ratio
+
+        effective_min_sl_ratio = (
+            0.0040
+            if setup_order_type == "limit"
+            else max(structural_breathing_ratio, configured_fallback_sl_ratio)
+        )
+        min_structural_risk = max(orig_entry * 0.0005, orig_entry * effective_min_sl_ratio)
+        orig_risk = abs(orig_entry - raw_sl) if raw_sl > 0 else 0.0
+        sl_was_widened = False
+        if orig_risk < min_structural_risk or raw_sl <= 0:
+            orig_risk = max(orig_risk, orig_entry * effective_min_sl_ratio)
             raw_sl = (orig_entry - orig_risk) if direction == "long" else (orig_entry + orig_risk)
+            sl_was_widened = True
 
         if direction == "long":
-            if raw_tp <= orig_entry:
-                raw_tp = orig_entry + (orig_risk * configured_target_rr)
-            elif (raw_tp - orig_entry) < (orig_risk * configured_target_rr):
+            if raw_tp <= orig_entry or (sl_was_widened and (raw_tp - orig_entry) < (orig_risk * configured_target_rr)):
                 raw_tp = orig_entry + (orig_risk * configured_target_rr)
             live_valid = raw_sl < live_price < raw_tp
             live_rr = (raw_tp - live_price) / max(live_price - raw_sl, 1e-6) if live_valid else 0.0
-            already_pulled_back = live_price <= orig_entry
         else:
-            if raw_tp <= 0 or raw_tp >= orig_entry:
-                raw_tp = orig_entry - (orig_risk * configured_target_rr)
-            elif (orig_entry - raw_tp) < (orig_risk * configured_target_rr):
+            if raw_tp <= 0 or raw_tp >= orig_entry or (sl_was_widened and (orig_entry - raw_tp) < (orig_risk * configured_target_rr)):
                 raw_tp = orig_entry - (orig_risk * configured_target_rr)
             live_valid = raw_tp < live_price < raw_sl
             live_rr = (live_price - raw_tp) / max(raw_sl - live_price, 1e-6) if live_valid else 0.0
-            already_pulled_back = live_price >= orig_entry
+
+        fee_rate = float(cfg.paper_oms_fee_bps) / 10_000.0
+        spread_rate = float(cfg.paper_oms_spread_bps) / 10_000.0
+        slippage_rate = float(cfg.paper_oms_slippage_bps) / 10_000.0
+        cost_rate_total = fee_rate * 2.0 + spread_rate + slippage_rate * 2.0
+
+        live_sl_dist = abs(live_price - raw_sl) if live_valid else 0.0
+        live_sl_ratio = live_sl_dist / max(float(live_price), 1e-6) if live_valid else 0.0
+        live_cost_per_unit = float(live_price) * cost_rate_total
+        live_net_rr = (
+            max(abs(raw_tp - live_price) - live_cost_per_unit, 0.0)
+            / max(live_sl_dist + live_cost_per_unit, 1e-6)
+            if live_valid
+            else 0.0
+        )
+        live_fee_to_risk = live_cost_per_unit / max(live_sl_dist, 1e-6) if live_valid else 1.0
 
         acceptable_market_rr = max(0.95, configured_target_rr - 0.05)
-        if (setup_order_type == "market" or already_pulled_back) and live_valid and live_rr >= acceptable_market_rr:
+        min_market_net_rr = max(1.15, configured_target_rr - 0.35)
+        if (
+            setup_order_type == "market"
+            and setup_policy != "limit_retest_only"
+            and live_valid
+            and live_rr >= acceptable_market_rr
+            and live_sl_ratio >= (effective_min_sl_ratio - 1e-5)
+            and live_net_rr >= min_market_net_rr
+            and live_fee_to_risk <= 0.22
+        ):
             raw_entry = float(live_price)
             order_type = "market"
             entry_policy = "market_eligible"
         else:
-            # Anti-Chase: Do not Market-buy top of spike where live_rr < acceptable_market_rr;
+            # Anti-Chase / SL-Compression Guard: Do not Market-enter when live price
+            # compressed SL below effective_min_sl_ratio or net executable R:R is degraded;
             # place 2-bar Limit order at the FVG/OB edge (orig_entry) instead.
             raw_entry = float(orig_entry)
             order_type = "limit"
@@ -1429,10 +1518,24 @@ class MarketMonitor:
         exec_sl = rules.price(raw_sl, upward=(not is_long))
         exec_tp = rules.price(raw_tp, upward=(not is_long))
         exec_rr = round(abs(exec_tp - exec_entry) / max(abs(exec_entry - exec_sl), 1e-6), 2)
+        exec_sl_dist = abs(exec_entry - exec_sl)
+        exec_cost_per_unit = exec_entry * cost_rate_total
+        exec_net_rr = round(
+            max(abs(exec_tp - exec_entry) - exec_cost_per_unit, 0.0)
+            / max(exec_sl_dist + exec_cost_per_unit, 1e-6),
+            4,
+        )
         min_allowed_rr = max(0.95, configured_target_rr - 0.05)
-        if exec_rr < min_allowed_rr:
+        min_allowed_net_rr = (
+            0.95
+            if (is_major_symbol and order_type == "limit")
+            else max(1.12, configured_target_rr - 0.38)
+        )
+        if exec_rr < min_allowed_rr or exec_net_rr < min_allowed_net_rr:
             logger.info(
-                f"[Auto-Pilot] Anti-Chase blocked {symbol} {direction}: executable R:R {exec_rr:.2f} < {min_allowed_rr:.2f}"
+                f"[Auto-Pilot] Anti-Chase blocked {symbol} {direction}: "
+                f"gross R:R {exec_rr:.2f} (min {min_allowed_rr:.2f}) / "
+                f"net R:R {exec_net_rr:.2f} (min {min_allowed_net_rr:.2f})"
             )
             await candidate_lifecycle.transition(
                 symbol=symbol,
@@ -1440,7 +1543,7 @@ class MarketMonitor:
                 event_id=event_id,
                 new_state=CandidateState.EXECUTION_REJECTED,
                 reason_code="ANTI_CHASE_LOW_RR",
-                reason=f"Executable R:R {exec_rr:.2f} < {min_allowed_rr:.2f}",
+                reason=f"Executable R:R {exec_rr:.2f} (net {exec_net_rr:.2f}) below minimum floor",
             )
             return None
 
@@ -1468,7 +1571,7 @@ class MarketMonitor:
                 "take_profit": exec_tp,
                 "structural_rr": setup.get("risk_reward", exec_rr),
                 "executable_rr": exec_rr,
-                "minimum_executable_rr": 1.2,
+                "minimum_executable_rr": configured_target_rr,
                 "order_type": order_type,
                 "entry_policy": entry_policy,
                 "auto_armed_limit": order_type == "limit",
@@ -1541,6 +1644,13 @@ class MarketMonitor:
         configured_leverage = float(
             r_cfg.get("max_leverage", getattr(cfg, "max_leverage", 10.0)) or 10.0
         )
+        effective_risk_min_sl_pct = max(
+            0.35,
+            round(
+                ((0.0040 if order_type == "limit" else effective_min_sl_ratio) * 100.0) - 0.05,
+                4,
+            ),
+        )
         risk_assessment = self.risk.evaluate(
             execution_signal,
             account_balance=equity,
@@ -1555,7 +1665,7 @@ class MarketMonitor:
             risk_per_trade_pct=calculated_risk_pct,
             minimum_rr=configured_target_rr,
             max_stop_distance_pct=20.0,
-            min_stop_distance_pct=0.05,
+            min_stop_distance_pct=effective_risk_min_sl_pct,
             atr_pct=None,
         )
         observability.inc(
@@ -1634,7 +1744,14 @@ class MarketMonitor:
         management_policy = "tp1_1r_50pct_be_then_trail"
         multi_stage_tp_enabled = bool(r_cfg.get("multi_stage_tp_enabled", True))
         exec_risk = abs(exec_entry - exec_sl)
-        one_r_target = (exec_entry + exec_risk) if direction == "long" else (exec_entry - exec_risk)
+        cost_buffer = execution_cost_per_unit if order_type == "market" else 0.0
+        one_r_target = (
+            (exec_entry + exec_risk + cost_buffer)
+            if direction == "long"
+            else (exec_entry - exec_risk - cost_buffer)
+        )
+        if (direction == "long" and one_r_target >= exec_tp) or (direction == "short" and one_r_target <= exec_tp):
+            one_r_target = (exec_entry + exec_risk) if direction == "long" else (exec_entry - exec_risk)
         take_profit_1: float | None = rules.price(one_r_target, upward=(direction != "long")) if multi_stage_tp_enabled else None
 
         if setup_type == "range_boundary_ping_pong" and canonical_analysis is not None:
@@ -1689,7 +1806,7 @@ class MarketMonitor:
             "risk_pct": risk_assessment.risk_pct,
             "structural_rr": risk_assessment.structural_rr,
             "executable_rr": risk_assessment.executable_rr,
-            "minimum_executable_rr": 1.2,
+            "minimum_executable_rr": configured_target_rr,
             "execution_revalidation": {
                 "passed": True,
                 "reason_code": reval_reason,
@@ -1722,7 +1839,7 @@ class MarketMonitor:
                 "risk_reward": risk_assessment.risk_reward,
                 "structural_rr": risk_assessment.structural_rr,
                 "executable_rr": risk_assessment.executable_rr,
-                "minimum_executable_rr": 1.2,
+                "minimum_executable_rr": configured_target_rr,
                 "asset_cluster": risk_assessment.asset_cluster,
                 "cluster_risk_multiplier": risk_assessment.cluster_risk_multiplier,
                 "regime_risk_multiplier": risk_assessment.regime_risk_multiplier,

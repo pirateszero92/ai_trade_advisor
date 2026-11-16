@@ -292,7 +292,7 @@ class SentimentDerivativesEngine:
 
     @classmethod
     def _enrich_bias(cls, result: DerivativesSentimentResult, price_change_pct_1h: float) -> None:
-        if result.status != "ok":
+        if result.status not in {"ok", "partial"}:
             result.sentiment_bias = "NEUTRAL"
             return
 

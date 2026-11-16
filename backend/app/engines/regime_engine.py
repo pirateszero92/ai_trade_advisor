@@ -271,6 +271,7 @@ class MarketRegimeEngine:
         signal: Any,
         config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        use_runtime_override = config is None
         active = validate_regime_policy_config(config or load_regime_policy_config())
         params = active["classification"]
         minimum_bars = int(params["minimum_bars"])
@@ -361,9 +362,10 @@ class MarketRegimeEngine:
             atr_ratio >= float(params["volatile_atr_ratio"])
             or (smoothed_percentile >= float(params["volatile_percentile"]) and atr_ratio >= 1.25)
         )
+        eff_min = float(params["trend_efficiency_min"])
         is_trending = (
-            efficiency >= float(params["trend_efficiency_min"])
-            and persistence >= 0.60
+            (efficiency >= eff_min and persistence >= 0.52)
+            or (efficiency >= max(0.28, eff_min * 0.75) and persistence >= 0.55)
         )
 
         if is_compression and not is_volatile:
@@ -411,7 +413,7 @@ class MarketRegimeEngine:
             metrics["hmm_dominant_state"] = "unknown"
             metrics["hmm_probabilities"] = {}
 
-        return self._result(active, regime, direction, confidence, True, metrics, evidence)
+        return self._result(active, regime, direction, confidence, True, metrics, evidence, apply_runtime_override=use_runtime_override)
 
     @staticmethod
     def _result(
@@ -422,19 +424,21 @@ class MarketRegimeEngine:
         ready: bool,
         metrics: dict[str, Any],
         evidence: list[str],
+        apply_runtime_override: bool = True,
     ) -> dict[str, Any]:
         policy = deepcopy(config["policies"][regime])
-        try:
-            from app.core.runtime_config import load_runtime_config
-            rc = load_runtime_config()
-            cfg_min_conf = rc.get("min_confluence")
-            if cfg_min_conf is not None and float(cfg_min_conf) > 0:
-                if regime == "volatile":
-                    policy["min_confluence"] = max(82.0, float(cfg_min_conf))
-                else:
-                    policy["min_confluence"] = float(cfg_min_conf)
-        except Exception:
-            pass
+        if apply_runtime_override:
+            try:
+                from app.core.runtime_config import load_runtime_config
+                rc = load_runtime_config()
+                cfg_min_conf = rc.get("min_confluence")
+                if cfg_min_conf is not None and float(cfg_min_conf) > 0:
+                    if regime == "volatile":
+                        policy["min_confluence"] = max(82.0, float(cfg_min_conf))
+                    else:
+                        policy["min_confluence"] = float(cfg_min_conf)
+            except Exception:
+                pass
         return {
             "version": int(config["version"]),
             "regime": regime,

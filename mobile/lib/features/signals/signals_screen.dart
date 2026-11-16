@@ -632,6 +632,14 @@ class _SignalsScreenState extends ConsumerState<SignalsScreen> {
   Widget _buildModeSelector() {
     final settings = ref.watch(settingsProvider);
     final isLiveAllowed = !settings.isPaperMode;
+    if (!isLiveAllowed && _activeMode == 'live') {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _activeMode != 'live') return;
+        setState(() {
+          _activeMode = 'paper';
+        });
+      });
+    }
 
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 6, 12, 4),

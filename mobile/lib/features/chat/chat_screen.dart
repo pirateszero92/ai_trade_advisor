@@ -216,7 +216,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       ),
     );
     if (confirmed == true) {
-      await _dio.delete(AppApi.url('/api/v1/chat/sessions/$_sessionId'));
+      try {
+        await _dio.delete(AppApi.url('/api/v1/chat/sessions/$_sessionId'));
+      } catch (err) {
+        debugPrint('[Chat] Session deletion error: $err');
+      }
       await _createNewSession();
     }
   }
@@ -240,7 +244,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       createdAt: DateTime.now().toUtc(),
     );
     final thinkingMsg = ChatMessage(
-      id: 'thinking',
+      id: '${DateTime.now().millisecondsSinceEpoch}_thinking',
       role: 'assistant',
       content: '',
       createdAt: DateTime.now().toUtc(),
@@ -255,11 +259,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     try {
       // Build context window from history (last 15 messages)
-      final history = _messages
+      final allHistory = _messages
           .where(
-              (m) => !m.isLoading && m.id != 'welcome' && m.id != 'welcome-new')
+              (m) => !m.isLoading && !m.id.endsWith('_thinking') && m.id != 'welcome' && m.id != 'welcome-new')
           .map((m) => {'role': m.role, 'content': m.content})
           .toList();
+      final history = allHistory.length > 15
+          ? allHistory.sublist(allHistory.length - 15)
+          : allHistory;
 
       final resp = await _dio.post(
         AppApi.url('/api/v1/settings/llm/chat'),
