@@ -1218,6 +1218,8 @@ class TriCoreSetupEngine:
 
                         # If candle spiked > eff_market_extension from reclaim, do not buy top;
                         # place 2-bar Limit at the front edge of the causal FVG/OB instead.
+                        sweep_sl_dist_pct = abs(entry - stop) / max(entry, 1e-6)
+                        sweep_level = float(sweep.get("level") or sweep.get("level_price") or 0.0)
                         if extension_atr > eff_market_extension:
                             if causal_zone is None:
                                 _add_rejection(
@@ -1229,10 +1231,13 @@ class TriCoreSetupEngine:
                             candidate_entry = float(
                                 causal_zone.top if side == "long" else causal_zone.bottom
                             )
-                        elif regime_label == "volatile" or sweep.get("event_type") == "multi_bar_reclaim":
-                            # In volatile regime or multi-bar reclaim sweeps (where close may be far from extreme
-                            # and prone to a retest wick), require a Limit retest at the causal zone edge or
-                            # 50% sweep wick mitigation instead of a blind Market order.
+                        elif regime_label == "volatile" or (
+                            sweep.get("event_type") == "multi_bar_reclaim"
+                            and sweep_sl_dist_pct > 0.0115
+                        ):
+                            # In volatile regime or over-wide (>1.15% SL) multi-bar reclaim sweeps,
+                            # require a Limit retest at the causal zone edge or reclaimed level
+                            # rather than chasing a wide stop by market.
                             entry_policy = "limit_retest_only"
                             if causal_zone is not None:
                                 candidate_entry = float(
@@ -1243,6 +1248,15 @@ class TriCoreSetupEngine:
                                 candidate_entry = float(
                                     min(entry, wick_mid) if side == "long" else max(entry, wick_mid)
                                 )
+
+                        if entry_policy == "limit_retest_only" and sweep_level > 0:
+                            # Never place a sweep retest limit inside the broken zone beyond the swept level:
+                            # Long limit must sit at/above reclaimed support (sweep_level);
+                            # Short limit must sit at/below reclaimed resistance (sweep_level).
+                            if side == "long" and sweep_level <= entry:
+                                candidate_entry = max(candidate_entry, sweep_level)
+                            elif side == "short" and sweep_level >= entry:
+                                candidate_entry = min(candidate_entry, sweep_level)
 
                         loc_ok, loc_reason = _range_location_ok(
                             signal, side, candidate_entry, allow_equilibrium_sweep=True
@@ -1382,6 +1396,16 @@ class TriCoreSetupEngine:
                         zone_source == "internal"
                         or break_id_str.startswith("internal:")
                     )
+                    if (
+                        regime_label in {"ranging", "volatile"}
+                        and (zone.kind == "ob" or is_internal_structure)
+                        and not is_unicorn
+                    ):
+                        _add_rejection(
+                            f"Setup B ({setup_type}) suppressed in {regime_label} regime: Order Block / internal structure before sweep is an inducement trap (wait for Setup A liquidity sweep)",
+                            "RANGING_INDUCEMENT_OB_SUPPRESSED",
+                        )
+                        continue
                     threshold_extension = 0.05 * (atr if atr > 0 else entry * 0.005)
 
                     if is_proactive_continuation:

@@ -1302,6 +1302,67 @@ def test_trending_bos_allows_momentum_market_when_flow_strong_and_bar_compact():
     assert any("Momentum BOS Continuation (Market)" in e for e in setup.evidence)
 
 
+def test_ranging_regime_suppresses_inducement_order_block_displacement_retest():
+    """#93 BTC / #95 LINK / #111 ADA regression: Order Block displacement_retest in ranging is suppressed as inducement."""
+    frame = _frame()
+    frame.loc[frame.index[16:19], ["open", "high", "low", "close"]] = [
+        101.5, 102.0, 101.0, 101.5
+    ]
+    signal = _signal()
+    signal.liquidity_swept = False
+    signal.market_regime = {"regime": "ranging", "direction": "bullish"}
+    signal.htf_bias = "bullish"
+    signal.intraday_bias = "bullish"
+    signal.cvd_divergence = "none"
+    signal.delta_ratio = 0.25
+    signal.displacement = {
+        "index": 15,
+        "direction": "long",
+        "structure_break_id": "swing:BOS:bullish:15:100",
+        "structure_break_index": 15,
+    }
+    signal.order_blocks = [
+        Zone("ob", "bullish", top=100.6, bottom=99.7, index=8, confirmed_index=15, source="swing")
+    ]
+    signal.equal_highs = [110.0]
+    setup = TriCoreSetupEngine.evaluate(signal, frame)
+    assert not setup.actionable
+    assert "RANGING_INDUCEMENT_OB_SUPPRESSED" in setup.rejection_codes
+
+
+def test_compact_multi_bar_reclaim_sweep_preserves_market_execution():
+    """#94 BTC / #100 NEAR regression: A compact multi_bar_reclaim (<= 1.15% SL) must execute as market_eligible."""
+    frame = _frame()
+    frame["high"] = 100.4
+    frame["low"] = 99.6
+    frame["close"] = 100.0
+    frame.loc[frame.index[19], ["open", "high", "low", "close"]] = [99.8, 100.2, 99.3, 100.0]
+    sig = _signal()
+    sig.liquidity_sweep["event_type"] = "multi_bar_reclaim"
+    sig.liquidity_sweep["extreme"] = 99.3
+    sig.liquidity_sweep["level"] = 99.7
+    sig.liquidity_sweep["reclaim_close"] = 100.0
+    sig.cvd_divergence_evidence["reclaim_close_price"] = 100.0
+    setup = TriCoreSetupEngine.evaluate(sig, frame)
+    assert setup.actionable is True
+    assert setup.entry_policy == "market_eligible"
+    assert setup.order_type == "market"
+
+
+def test_sweep_limit_entry_clamped_to_reclaimed_level():
+    """#110 LINK regression: When a sweep uses limit_retest_only, short limit must never exceed the swept resistance level."""
+    sig = _short_signal()
+    sig.liquidity_sweep["event_type"] = "multi_bar_reclaim"
+    sig.liquidity_sweep["extreme"] = 103.0
+    sig.liquidity_sweep["level"] = 101.2
+    sig.liquidity_sweep["reclaim_close"] = 100.5
+    setup = TriCoreSetupEngine.evaluate(sig, _frame())
+    assert setup.actionable is True
+    assert setup.entry_policy == "limit_retest_only"
+    assert setup.entry <= 101.2
+
+
+
 
 
 

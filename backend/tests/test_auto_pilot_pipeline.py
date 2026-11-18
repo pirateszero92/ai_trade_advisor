@@ -655,4 +655,90 @@ async def test_auto_pilot_widens_0_71_pct_sl_to_user_default_sl_pct_0_80():
         assert payload["stop_loss"] == pytest.approx(0.15277, abs=2e-5)
 
 
+@pytest.mark.anyio
+async def test_auto_pilot_direction_flip_after_loss_enforces_60_min_whipsaw_cooldown():
+    """
+    #98/#99 ETH regression: When a symbol closed with a SHORT loss 45 minutes ago
+    (> 30m base cooldown, < 60m flip cooldown), flipping to LONG must be blocked by
+    the 60-minute Anti-Whipsaw Direction-Flip Cooldown.
+    """
+    monitor = MarketMonitor(poll_interval_seconds=60)
+    df = _create_sample_df()
+    sig = _create_sample_signal("ETH/USDT", "long")
+
+    strat = MagicMock()
+    strat.approved = True
+    strat.direction = "long"
+
+    loss_time = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat()
+    mock_positions = [
+        {
+            "symbol": "ETH/USDT",
+            "direction": "short",
+            "status": "closed",
+            "realized_pnl_net": -14.18,
+            "close_reason": "Stop Loss (SL Hit) 🛑",
+            "closed_at": loss_time,
+        }
+    ]
+
+    mock_oms = MagicMock()
+    mock_oms.ready = True
+    mock_oms.list_positions = AsyncMock(return_value={"trades": mock_positions})
+    mock_oms.account_snapshot = AsyncMock(return_value={
+        "total_equity": 1000.0,
+        "initial_capital": 1000.0,
+        "daily_pnl_pct": 0.0,
+    })
+    mock_oms.place_order = AsyncMock()
+
+    rule_mock = MagicMock()
+    rule_mock.price = lambda p, upward=True: round(p, 2)
+    rule_mock.min_quantity = 0.001
+    rule_mock.min_notional = 5.0
+    rule_mock.quantity_step = 0.001
+
+    mock_trace = AsyncMock()
+
+    with patch("app.services.paper_oms.paper_oms", mock_oms), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+             "auto_trade_enabled": True,
+             "cluster_loss_cooldown_enabled": True,
+             "cluster_loss_cooldown_minutes": 30,
+         }), \
+         patch("app.services.event_trigger.instrument_rules.get", AsyncMock(return_value=rule_mock)), \
+         patch("app.services.event_trigger.decision_trace.record", mock_trace), \
+         patch("app.services.event_trigger.broadcast", AsyncMock()), \
+         patch("app.services.event_trigger.candidate_lifecycle") as mock_lifecycle:
+
+        rec_mock = MagicMock()
+        rec_mock.state.value = "ARMED"
+        mock_lifecycle.register = AsyncMock(return_value=rec_mock)
+
+        res = await monitor._evaluate_and_execute_auto_pilot(
+            symbol="ETH/USDT",
+            direction="long",
+            m_type="crypto",
+            ex="binance",
+            ltf_sig=sig,
+            live_price=101.0,
+            strat_res=strat,
+            confluence=85,
+            entry_mode="market",
+            decision_snapshot_id="test-snap-eth-flip",
+            setup_timeframe="15m",
+            ltf_df=df,
+        )
+
+        assert res is None
+        assert not mock_oms.place_order.called
+        flip_traces = [
+            call for call in mock_trace.call_args_list
+            if call.kwargs.get("facts", {}).get("reason_code") == "CLUSTER_LOSS_COOLDOWN"
+            and call.kwargs.get("facts", {}).get("direction_flip") is True
+        ]
+        assert len(flip_traces) > 0
+
+
+
 

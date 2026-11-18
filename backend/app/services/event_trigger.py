@@ -1286,16 +1286,19 @@ class MarketMonitor:
             is_loss = (last_pnl < 0 or "Stop Loss" in last_reason or "SL Hit" in last_reason)
 
             if is_loss:
+                last_dir = str(last_closed.get("direction", "")).lower()
+                is_direction_flip = bool(last_dir and last_dir in {"long", "short"} and last_dir != direction)
+                effective_cooldown_minutes = max(cooldown_minutes, 60) if is_direction_flip else cooldown_minutes
                 last_closed_ts = _parse_iso_to_epoch(last_closed.get("closed_at") or last_closed.get("updated_at"))
                 if last_closed_ts > 0:
                     now_epoch = datetime.now(timezone.utc).timestamp()
                     elapsed_minutes = (now_epoch - last_closed_ts) / 60.0
-                    if 0 <= elapsed_minutes < cooldown_minutes:
-                        remaining = cooldown_minutes - elapsed_minutes
+                    if 0 <= elapsed_minutes < effective_cooldown_minutes:
+                        remaining = effective_cooldown_minutes - elapsed_minutes
                         logger.info(
                             f"[Auto-Pilot] Cluster Cooldown active for {symbol}: "
-                            f"recently closed with loss ({last_pnl:+.2f} USDT) {elapsed_minutes:.1f}m ago. "
-                            f"Remaining cooldown: {remaining:.1f}m (limit: {cooldown_minutes}m)"
+                            f"recently closed with loss ({last_pnl:+.2f} USDT, dir={last_dir}) {elapsed_minutes:.1f}m ago. "
+                            f"Remaining cooldown: {remaining:.1f}m (limit: {effective_cooldown_minutes}m, flip={is_direction_flip})"
                         )
                         await decision_trace.record(
                             snapshot_id=decision_snapshot_id,
@@ -1308,7 +1311,8 @@ class MarketMonitor:
                                 "symbol": symbol,
                                 "last_loss_pnl": last_pnl,
                                 "elapsed_minutes": round(elapsed_minutes, 1),
-                                "cooldown_minutes": cooldown_minutes,
+                                "cooldown_minutes": effective_cooldown_minutes,
+                                "direction_flip": is_direction_flip,
                             },
                         )
                         return None
@@ -1492,7 +1496,7 @@ class MarketMonitor:
         live_fee_to_risk = live_cost_per_unit / max(live_sl_dist, 1e-6) if live_valid else 1.0
 
         acceptable_market_rr = max(0.95, configured_target_rr - 0.05)
-        min_market_net_rr = max(1.15, configured_target_rr - 0.35)
+        min_market_net_rr = max(1.05, configured_target_rr - 0.45)
         if (
             setup_order_type == "market"
             and setup_policy != "limit_retest_only"
@@ -1500,7 +1504,7 @@ class MarketMonitor:
             and live_rr >= acceptable_market_rr
             and live_sl_ratio >= (effective_min_sl_ratio - 1e-5)
             and live_net_rr >= min_market_net_rr
-            and live_fee_to_risk <= 0.22
+            and live_fee_to_risk <= 0.26
         ):
             raw_entry = float(live_price)
             order_type = "market"
@@ -1529,7 +1533,7 @@ class MarketMonitor:
         min_allowed_net_rr = (
             0.95
             if (is_major_symbol and order_type == "limit")
-            else max(1.12, configured_target_rr - 0.38)
+            else max(1.05, configured_target_rr - 0.45)
         )
         if exec_rr < min_allowed_rr or exec_net_rr < min_allowed_net_rr:
             logger.info(
