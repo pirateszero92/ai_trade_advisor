@@ -363,9 +363,38 @@ class MarketRegimeEngine:
             or (smoothed_percentile >= float(params["volatile_percentile"]) and atr_ratio >= 1.25)
         )
         eff_min = float(params["trend_efficiency_min"])
+
+        # EMA20/EMA50 separation + slope on the execution frame so genuine
+        # multi-leg trends with normal pullbacks are not perpetually mislabeled
+        # as ranging when path efficiency dips into the 0.18-0.35 band.
+        ema_spread_atr = 0.0
+        ema_trend_aligned = False
+        current_atr_abs = float(atr.dropna().iloc[-1]) if not atr.dropna().empty else 0.0
+        if len(close) >= 50 and current_atr_abs > 0:
+            ema20_series = close.ewm(span=20, adjust=False).mean()
+            ema50_series = close.ewm(span=50, adjust=False).mean()
+            last_close = float(close.iloc[-1])
+            last_ema20 = float(ema20_series.iloc[-1])
+            last_ema50 = float(ema50_series.iloc[-1])
+            prev_ema20 = float(ema20_series.iloc[-6])
+            ema_spread_atr = abs(last_ema20 - last_ema50) / current_atr_abs
+            ema_bull = last_close > last_ema20 > last_ema50 and last_ema20 > prev_ema20
+            ema_bear = last_close < last_ema20 < last_ema50 and last_ema20 < prev_ema20
+            ema_trend_aligned = (
+                (ema_bull and path_direction == "bullish")
+                or (ema_bear and path_direction == "bearish")
+            )
+
+        is_ema_aligned_trend = (
+            ema_trend_aligned
+            and ema_spread_atr >= 0.75
+            and efficiency >= max(0.18, eff_min * 0.50)
+            and persistence >= 0.50
+        )
         is_trending = (
             (efficiency >= eff_min and persistence >= 0.52)
             or (efficiency >= max(0.28, eff_min * 0.75) and persistence >= 0.55)
+            or is_ema_aligned_trend
         )
 
         if is_compression and not is_volatile:
@@ -380,8 +409,16 @@ class MarketRegimeEngine:
             evidence.append("Current volatility exceeds the configured expansion boundary")
         elif is_trending:
             regime = "trending"
-            confidence = min(99.0, (efficiency * 0.65 + persistence * 0.35) * 100.0)
-            evidence.append("Price-path efficiency and directional persistence are aligned")
+            base_conf = (efficiency * 0.65 + persistence * 0.35) * 100.0
+            if is_ema_aligned_trend:
+                ema_conf = min(85.0, 55.0 + min(ema_spread_atr, 2.0) * 15.0)
+                confidence = min(99.0, max(base_conf, ema_conf))
+                evidence.append(
+                    f"EMA20/50 trend stack aligned ({ema_spread_atr:.2f} ATR separation) with directional persistence"
+                )
+            else:
+                confidence = min(99.0, base_conf)
+                evidence.append("Price-path efficiency and directional persistence are aligned")
         else:
             regime = "ranging"
             confidence = min(95.0, max(50.0, (1.0 - efficiency) * 80.0 + (1.0 - persistence) * 20.0))
@@ -393,6 +430,8 @@ class MarketRegimeEngine:
             "volatility_percentile": round(volatility_percentile, 1),
             "path_efficiency": round(efficiency, 4),
             "directional_persistence": round(persistence, 4),
+            "ema_spread_atr": round(ema_spread_atr, 4),
+            "ema_trend_aligned": bool(ema_trend_aligned),
         }
 
         # Gaussian HMM dynamic regime estimation

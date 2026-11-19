@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 import pandas as pd
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -897,6 +898,97 @@ async def test_auto_pilot_caps_15m_ranging_tp_at_2_20r_and_sets_0_90r_35pct_tp1(
         assert payload["take_profit_1"] == pytest.approx(100.9, abs=0.05)
         # 35% partial scale-out leaving 65% runner
         assert payload["tp1_ratio"] == pytest.approx(0.35, abs=0.01)
+
+
+@pytest.mark.anyio
+async def test_e2e_trend_consensus_blocks_dead_cat_and_executes_aligned_through_oms():
+    """End-to-End verification: 1H EMA consensus + 4H strict trend guard flow cleanly to paper_oms.place_order."""
+    from app.engines.tri_core_engine import TriCoreSetupEngine
+    from app.services.execution_analysis import (
+        compute_ema_trend_snapshot,
+        resolve_intraday_trend_bias,
+    )
+
+    # 1) Dead-cat bounce on 1H (1H EMA20 < EMA50, noisy 1H SMC bullish) -> resolves bearish -> blocks LONG
+    htf_down_df = pd.DataFrame({"close": list(np.linspace(120.0, 96.0, 65)) + [96.5, 97.0]})
+    htf_ema = compute_ema_trend_snapshot(htf_down_df)
+    resolved_bias = resolve_intraday_trend_bias("bullish", htf_ema["ema_bias"])
+    assert resolved_bias == "bearish"
+
+    # 2) Aligned Grade-S SHORT with 4H mixed/bearish flows all the way through _evaluate_and_execute_auto_pilot -> place_order
+    monitor = MarketMonitor(poll_interval_seconds=60)
+    df = _create_sample_df()
+    sig = _create_sample_signal("SOL/USDT", "short")
+    sig.intraday_bias = resolved_bias
+    sig.macro_bias = "bearish"
+    sig.macro_strict_trend = "bearish"
+    sig.entry = 100.0
+    sig.stop_loss = 101.0
+    sig.take_profit = 97.5
+    sig.tri_core_setup["grade"] = "S"
+    sig.tri_core_setup["direction"] = "short"
+    sig.tri_core_setup["entry"] = 100.0
+    sig.tri_core_setup["stop_loss"] = 101.0
+    sig.tri_core_setup["take_profit"] = 97.5
+
+    strat = MagicMock()
+    strat.approved = True
+    strat.direction = "short"
+
+    mock_oms = MagicMock()
+    mock_oms.ready = True
+    mock_oms.list_positions = AsyncMock(return_value=[])
+    mock_oms.account_snapshot = AsyncMock(return_value={
+        "total_equity": 1000.0,
+        "initial_capital": 1000.0,
+        "daily_pnl_pct": 0.0,
+    })
+    mock_oms.place_order = AsyncMock(return_value={"status": "filled", "order_id": "order-sol-short"})
+
+    rule_mock = MagicMock()
+    rule_mock.price = lambda p, upward=True: round(p, 4)
+    rule_mock.min_quantity = 0.01
+    rule_mock.min_notional = 5.0
+    rule_mock.quantity_step = 0.01
+
+    with patch("app.services.paper_oms.paper_oms", mock_oms), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+             "auto_trade_enabled": True,
+             "risk_per_trade": 2.0,
+             "default_sl_pct": 0.8,
+             "target_rr": 1.5,
+         }), \
+         patch("app.services.event_trigger.instrument_rules.get", AsyncMock(return_value=rule_mock)), \
+         patch("app.services.event_trigger.decision_trace.record", AsyncMock()), \
+         patch("app.services.event_trigger.broadcast", AsyncMock()), \
+         patch("app.services.event_trigger.candidate_lifecycle") as mock_lifecycle:
+
+        rec_mock = MagicMock()
+        rec_mock.state.value = "ARMED"
+        mock_lifecycle.register = AsyncMock(return_value=rec_mock)
+        mock_lifecycle.transition = AsyncMock(return_value=True)
+
+        res = await monitor._evaluate_and_execute_auto_pilot(
+            symbol="SOL/USDT",
+            direction="short",
+            m_type="crypto",
+            ex="binance",
+            ltf_sig=sig,
+            live_price=100.0,
+            strat_res=strat,
+            confluence=88,
+            entry_mode="market",
+            decision_snapshot_id="test-snap-trend-e2e",
+            setup_timeframe="15m",
+            ltf_df=df,
+        )
+
+        assert res is not None
+        assert mock_oms.place_order.called
+        payload = mock_oms.place_order.call_args[0][0]
+        assert payload["symbol"] == "SOL/USDT"
+        assert payload["direction"] == "short"
+
 
 
 

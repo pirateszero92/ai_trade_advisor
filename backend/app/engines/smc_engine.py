@@ -161,6 +161,7 @@ class SMCSignal:
     htf_bias: Literal["bullish", "bearish", "neutral"] = "neutral"
     intraday_bias: Literal["bullish", "bearish", "neutral"] = "neutral"
     macro_bias: Literal["bullish", "bearish", "neutral"] = "neutral"
+    macro_strict_trend: Literal["bullish", "bearish", "mixed"] = "mixed"
     macro_obstacles: list[dict[str, Any]] = field(default_factory=list)
     bos: bool = False
     choch: bool = False
@@ -284,6 +285,9 @@ class SMCSignal:
             "internal_bias": self.internal_bias,
             "structure_bias_source": self.structure_bias_source,
             "htf_bias": self.htf_bias,
+            "intraday_bias": self.intraday_bias,
+            "macro_bias": self.macro_bias,
+            "macro_strict_trend": self.macro_strict_trend,
             "bos": self.bos,
             "choch": self.choch,
             "structure_event_age": self.structure_event_age,
@@ -412,6 +416,7 @@ class SMCEngine:
         tri_core_policy: dict[str, Any] | None = None,
         intraday_bias: Literal["bullish", "bearish", "neutral"] = "neutral",
         macro_bias: Literal["bullish", "bearish", "neutral"] = "neutral",
+        macro_strict_trend: Literal["bullish", "bearish", "mixed"] = "mixed",
         macro_obstacles: list[dict[str, Any]] | None = None,
         derivatives_sentiment: dict[str, Any] | None = None,
     ) -> SMCSignal:
@@ -441,7 +446,15 @@ class SMCEngine:
             logger.error(f"[SMC] Non-finite OHLC data for {symbol}")
             return SMCSignal(symbol=symbol, timeframe=timeframe, htf_bias=htf_bias)
 
-        signal = SMCSignal(symbol=symbol, timeframe=timeframe, htf_bias=htf_bias, intraday_bias=intraday_bias, macro_bias=macro_bias, macro_obstacles=macro_obstacles or [])
+        signal = SMCSignal(
+            symbol=symbol,
+            timeframe=timeframe,
+            htf_bias=htf_bias,
+            intraday_bias=intraday_bias,
+            macro_bias=macro_bias,
+            macro_strict_trend=macro_strict_trend,
+            macro_obstacles=macro_obstacles or [],
+        )
         policy_ttl = TriCorePolicy.from_mapping(tri_core_policy).ttl_bars
         signal.execution_ttl_bars = min(
             max(0, policy_ttl), max(0, self.structure_event_ttl_bars)

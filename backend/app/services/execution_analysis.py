@@ -107,6 +107,67 @@ class ExecutionAnalysis:
         )
 
 
+def compute_ema_trend_snapshot(df: pd.DataFrame | None) -> dict[str, Any]:
+    """Compute EMA20/EMA50 directional bias and strict 3-layer stack on closed candles."""
+    if df is None or df.empty:
+        return {
+            "ema_bias": "neutral",
+            "strict_trend": "mixed",
+            "ema20": None,
+            "ema50": None,
+            "close": None,
+        }
+    close_col = next((c for c in df.columns if str(c).lower() == "close"), None)
+    if close_col is None:
+        return {
+            "ema_bias": "neutral",
+            "strict_trend": "mixed",
+            "ema20": None,
+            "ema50": None,
+            "close": None,
+        }
+    closes = pd.to_numeric(df[close_col], errors="coerce").dropna()
+    if len(closes) < 50:
+        return {
+            "ema_bias": "neutral",
+            "strict_trend": "mixed",
+            "ema20": None,
+            "ema50": None,
+            "close": float(closes.iloc[-1]) if not closes.empty else None,
+        }
+    ema20 = float(closes.ewm(span=20, adjust=False).mean().iloc[-1])
+    ema50 = float(closes.ewm(span=50, adjust=False).mean().iloc[-1])
+    last_close = float(closes.iloc[-1])
+    ema_bias = "bullish" if ema20 > ema50 else "bearish" if ema20 < ema50 else "neutral"
+    if last_close > ema20 > ema50:
+        strict_trend = "bullish"
+    elif last_close < ema20 < ema50:
+        strict_trend = "bearish"
+    else:
+        strict_trend = "mixed"
+    return {
+        "ema_bias": ema_bias,
+        "strict_trend": strict_trend,
+        "ema20": round(ema20, 6),
+        "ema50": round(ema50, 6),
+        "close": round(last_close, 6),
+    }
+
+
+def resolve_intraday_trend_bias(smc_bias: str, ema_bias: str) -> str:
+    """Resolve 1H intraday trend using SMC + EMA20/50 consensus.
+
+    Empirical 81-trade study showed counter-1H-EMA20/50 trades lost -$68.43
+    (50.0% WR) vs +$78.86 (58.2% WR) when aligned. A noisy 5-bar 1H SMC break
+    must not flip intraday_bias against the 1H EMA20/50 trend anchor.
+    """
+    smc = str(smc_bias or "neutral").lower()
+    ema = str(ema_bias or "neutral").lower()
+    if ema in {"bullish", "bearish"}:
+        return ema
+    return smc if smc in {"bullish", "bearish"} else "neutral"
+
+
 def analyze_execution_frame(
     *,
     frame: pd.DataFrame,
@@ -117,6 +178,7 @@ def analyze_execution_frame(
     htf_bias: str = "neutral",
     intraday_bias: str = "neutral",
     macro_bias: str = "neutral",
+    macro_strict_trend: str = "mixed",
     macro_obstacles: list[dict[str, Any]] | None = None,
     micro_momentum: dict[str, Any] | None = None,
     derivatives_sentiment: dict[str, Any] | None = None,
@@ -140,6 +202,7 @@ def analyze_execution_frame(
         tri_core_policy=config_snapshot.get("tri_core_policy"),
         intraday_bias=intraday_bias,
         macro_bias=macro_bias,
+        macro_strict_trend=macro_strict_trend,
         macro_obstacles=macro_obstacles,
         derivatives_sentiment=derivatives_sentiment,
     )
@@ -649,15 +712,25 @@ class ExecutionAnalysisService:
                             htf_res.copy(), symbol, htf_tf
                         )
                     htf_smc = await asyncio.to_thread(_run_htf_smc)
-                    calculated_htf_bias = str(htf_smc.bias or "neutral").lower()
-                    calculated_intraday_bias = calculated_htf_bias
+                    htf_smc_bias = str(htf_smc.bias or "neutral").lower()
+                    htf_ema_snapshot = compute_ema_trend_snapshot(htf_res)
+                    calculated_intraday_bias = resolve_intraday_trend_bias(
+                        htf_smc_bias,
+                        str(htf_ema_snapshot.get("ema_bias", "neutral")),
+                    )
+                    calculated_htf_bias = calculated_intraday_bias
                 except Exception as htf_err:
                     logger.debug(f"HTF bias computation note: {htf_err}")
 
             calculated_macro_bias = "neutral"
+            calculated_macro_strict_trend = "mixed"
             calculated_macro_obstacles: list[dict[str, Any]] = []
             if not isinstance(macro_res, Exception) and macro_res is not None and not macro_res.empty:
                 try:
+                    macro_ema_snapshot = compute_ema_trend_snapshot(macro_res)
+                    calculated_macro_strict_trend = str(
+                        macro_ema_snapshot.get("strict_trend", "mixed") or "mixed"
+                    ).lower()
                     def _run_macro_smc():
                         return SMCEngine(**bias_role.get("smc", profile["smc"])).analyze(
                             macro_res.copy(), symbol, macro_tf
@@ -743,6 +816,7 @@ class ExecutionAnalysisService:
                 htf_bias=calculated_htf_bias,
                 intraday_bias=calculated_intraday_bias,
                 macro_bias=calculated_macro_bias,
+                macro_strict_trend=calculated_macro_strict_trend,
                 macro_obstacles=calculated_macro_obstacles,
                 micro_momentum=calculated_micro_momentum,
                 derivatives_sentiment=calculated_deriv_dict,

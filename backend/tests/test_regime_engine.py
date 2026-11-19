@@ -271,3 +271,23 @@ def test_regime_engine_handles_case_insensitivity_and_missing_volume_for_hmm():
     }
     assert len(result["metrics"]["hmm_probabilities"]) == 3
 
+
+def test_classifier_detects_pullback_trend_via_ema20_ema50_stack():
+    """Genuine multi-leg trends with pullbacks (efficiency 0.20-0.34) must classify as trending via EMA20/50 stack."""
+    # Upward staircase trend with realistic zig-zag pullbacks:
+    # linear drift + sawtooth oscillation keeps 30-bar path efficiency around ~0.24
+    # while EMA20 > EMA50 by > 1 ATR and EMA20 slopes clearly upward.
+    idx = np.arange(140, dtype=float)
+    zig = np.where(idx % 2 == 0, 0.45, -0.45)
+    close = 100.0 + idx * 0.25 + zig
+    result = MarketRegimeEngine().classify(
+        _frame(close, spread=0.3), _signal(), _nonvolatile_config()
+    )
+
+    assert 0.18 <= result["metrics"]["path_efficiency"] < 0.38
+    assert result["metrics"]["ema_trend_aligned"] is True
+    assert result["metrics"]["ema_spread_atr"] >= 0.75
+    assert result["regime"] == "trending"
+    assert result["direction"] == "bullish"
+
+

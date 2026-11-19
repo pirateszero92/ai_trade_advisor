@@ -1078,6 +1078,7 @@ class TriCoreSetupEngine:
         else:
             intraday_bias = htf_bias
         macro_bias = str(getattr(signal, "macro_bias", "neutral") or "neutral").lower()
+        macro_strict_trend = str(getattr(signal, "macro_strict_trend", "mixed") or "mixed").lower()
         macro_obstacles = getattr(signal, "macro_obstacles", []) or []
         is_ranging = (regime_label == "ranging")
         micro = getattr(signal, "micro_momentum", {}) or {}
@@ -1110,6 +1111,22 @@ class TriCoreSetupEngine:
                         continue
                     if intraday_bias == "bearish" and side == "long":
                         rejected.append(f"Counter-trend LONG rejected: {('1H intraday trend' if raw_intraday and str(raw_intraday).lower() != 'neutral' else 'HTF bias')} is bearish")
+                        continue
+
+                    # Strict 4H Freight-Train Guard: block entries directly fighting
+                    # a full 3-layer 4H momentum stack (close < EMA20 < EMA50 or
+                    # close > EMA20 > EMA50), while still allowing 4H mixed rebounds.
+                    if macro_strict_trend == "bearish" and side == "long":
+                        _add_rejection(
+                            "Counter-trend LONG rejected: 4H strict freight-train downtrend (price < EMA20 < EMA50)",
+                            "COUNTER_4H_FREIGHT_TRAIN",
+                        )
+                        continue
+                    if macro_strict_trend == "bullish" and side == "short":
+                        _add_rejection(
+                            "Counter-trend SHORT rejected: 4H strict freight-train uptrend (price > EMA20 > EMA50)",
+                            "COUNTER_4H_FREIGHT_TRAIN",
+                        )
                         continue
 
                     # Scenario B & C: 1H aligns, but 4H Macro opposes (Intraday Counter-4H Swing)

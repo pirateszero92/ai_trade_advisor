@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 from app.engines.risk_engine import squeeze_adjusted_risk_pct
@@ -1360,6 +1361,72 @@ def test_sweep_limit_entry_clamped_to_reclaimed_level():
     assert setup.actionable is True
     assert setup.entry_policy == "limit_retest_only"
     assert setup.entry <= 101.2
+
+
+def test_strict_4h_freight_train_blocks_counter_trend_entries():
+    """Strict 4H freight-train stack blocks counter-trend entries while preserving 4H mixed rebounds."""
+    # Case 1: Strict 4H downtrend (close < EMA20 < EMA50) blocks LONG even if 1H flipped bullish
+    long_sig = _signal()
+    long_sig.market_regime = {"regime": "ranging", "direction": "neutral"}
+    long_sig.intraday_bias = "bullish"
+    long_sig.macro_bias = "bearish"
+    long_sig.macro_strict_trend = "bearish"
+    setup_blocked_long = TriCoreSetupEngine.evaluate(long_sig, _frame())
+    assert not setup_blocked_long.actionable
+    assert "COUNTER_4H_FREIGHT_TRAIN" in setup_blocked_long.rejection_codes
+
+    # Case 2: Strict 4H uptrend (close > EMA20 > EMA50) blocks SHORT even if 1H flipped bearish
+    short_sig = _short_signal()
+    short_sig.market_regime = {"regime": "ranging", "direction": "neutral"}
+    short_sig.intraday_bias = "bearish"
+    short_sig.macro_bias = "bullish"
+    short_sig.macro_strict_trend = "bullish"
+    setup_blocked_short = TriCoreSetupEngine.evaluate(short_sig, _frame())
+    assert not setup_blocked_short.actionable
+    assert "COUNTER_4H_FREIGHT_TRAIN" in setup_blocked_short.rejection_codes
+
+    # Case 3: 4H mixed (price crossed above 4H EMA20 rebound) ALLOWS aligned 1H LONG
+    long_sig_mixed = _signal()
+    long_sig_mixed.market_regime = {"regime": "ranging", "direction": "neutral"}
+    long_sig_mixed.intraday_bias = "bullish"
+    long_sig_mixed.macro_bias = "bearish"
+    long_sig_mixed.macro_strict_trend = "mixed"
+    setup_allowed = TriCoreSetupEngine.evaluate(long_sig_mixed, _frame())
+    assert setup_allowed.actionable is True
+    assert setup_allowed.direction == "long"
+
+
+def test_1h_ema_consensus_overrides_noisy_smc_flip():
+    """1H EMA20/50 anchor prevents noisy 5-bar 1H SMC swing breaks from flipping bias into dead-cat bounces."""
+    from app.services.execution_analysis import (
+        compute_ema_trend_snapshot,
+        resolve_intraday_trend_bias,
+    )
+
+    # Sustained 1H downtrend followed by a tiny 3-bar dead-cat bounce
+    down_closes = list(np.linspace(120.0, 95.0, 70)) + [95.4, 95.8, 96.1]
+    down_df = pd.DataFrame({"close": down_closes})
+    snap_down = compute_ema_trend_snapshot(down_df)
+    assert snap_down["ema_bias"] == "bearish"
+    # Even if 1H SMC flipped bullish on the 3-bar bounce, consensus holds bearish
+    assert resolve_intraday_trend_bias("bullish", snap_down["ema_bias"]) == "bearish"
+
+    # Strict 4H bear stack vs 4H mixed rebound
+    strict_bear_df = pd.DataFrame({"close": list(np.linspace(140.0, 90.0, 70))})
+    assert compute_ema_trend_snapshot(strict_bear_df)["strict_trend"] == "bearish"
+
+    # Rebound where price reclaims above EMA20 while EMA20 < EMA50 -> mixed (not freight-train)
+    rebound_df = pd.DataFrame({"close": list(np.linspace(140.0, 90.0, 68)) + [97.0, 102.0]})
+    snap_rebound = compute_ema_trend_snapshot(rebound_df)
+    assert snap_rebound["ema_bias"] == "bearish"
+    assert snap_rebound["strict_trend"] == "mixed"
+
+    # Short dataframe (<50 bars) gracefully falls back to SMC bias
+    short_df = pd.DataFrame({"close": [100.0, 101.0, 102.0]})
+    snap_short = compute_ema_trend_snapshot(short_df)
+    assert snap_short["ema_bias"] == "neutral"
+    assert resolve_intraday_trend_bias("bullish", snap_short["ema_bias"]) == "bullish"
+
 
 
 
