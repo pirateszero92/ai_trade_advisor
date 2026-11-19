@@ -740,5 +740,165 @@ async def test_auto_pilot_direction_flip_after_loss_enforces_60_min_whipsaw_cool
         assert len(flip_traces) > 0
 
 
+@pytest.mark.anyio
+async def test_auto_pilot_applies_grade_a_half_risk_and_symbol_auto_throttle():
+    """
+    81-trade empirical fix: Grade A gets 0.5x risk budget (vs Grade S 1.0x), and a symbol
+    with < 2 wins and net negative PnL across its last 5 closed trades gets another 0.5x throttle.
+    """
+    monitor = MarketMonitor(poll_interval_seconds=60)
+    df = _create_sample_df()
+    sig = _create_sample_signal("ADA/USDT", "long")
+    sig.tri_core_setup["grade"] = "A"
+    sig.market_regime = {"regime": "trending", "direction": "bullish"}
+
+    strat = MagicMock()
+    strat.approved = True
+    strat.direction = "long"
+
+    old_time = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+    mock_positions = [
+        {"symbol": "ADA/USDT", "direction": "long", "status": "closed", "realized_pnl_net": -16.0, "closed_at": old_time},
+        {"symbol": "ADA/USDT", "direction": "short", "status": "closed", "realized_pnl_net": -15.0, "closed_at": old_time},
+        {"symbol": "ADA/USDT", "direction": "long", "status": "closed", "realized_pnl_net": -14.0, "closed_at": old_time},
+        {"symbol": "ADA/USDT", "direction": "short", "status": "closed", "realized_pnl_net": +6.0, "closed_at": old_time},
+        {"symbol": "ADA/USDT", "direction": "long", "status": "closed", "realized_pnl_net": -16.0, "closed_at": old_time},
+    ]
+
+    mock_oms = MagicMock()
+    mock_oms.ready = True
+    mock_oms.list_positions = AsyncMock(return_value={"trades": mock_positions})
+    mock_oms.account_snapshot = AsyncMock(return_value={
+        "total_equity": 1000.0,
+        "initial_capital": 1000.0,
+        "daily_pnl_pct": 0.0,
+    })
+    mock_oms.place_order = AsyncMock(return_value={"status": "filled", "order_id": "order-ada-throttle"})
+
+    rule_mock = MagicMock()
+    rule_mock.price = lambda p, upward=True: round(p, 4)
+    rule_mock.min_quantity = 0.01
+    rule_mock.min_notional = 5.0
+    rule_mock.quantity_step = 0.01
+
+    with patch("app.services.paper_oms.paper_oms", mock_oms), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+             "auto_trade_enabled": True,
+             "risk_per_trade": 2.0,
+             "cluster_loss_cooldown_enabled": True,
+             "cluster_loss_cooldown_minutes": 30,
+             "loss_streak_halt_enabled": False,
+         }), \
+         patch("app.services.event_trigger.instrument_rules.get", AsyncMock(return_value=rule_mock)), \
+         patch("app.services.event_trigger.decision_trace.record", AsyncMock()), \
+         patch("app.services.event_trigger.broadcast", AsyncMock()), \
+         patch("app.services.event_trigger.candidate_lifecycle") as mock_lifecycle:
+
+        rec_mock = MagicMock()
+        rec_mock.state.value = "ARMED"
+        mock_lifecycle.register = AsyncMock(return_value=rec_mock)
+        mock_lifecycle.transition = AsyncMock(return_value=True)
+
+        await monitor._evaluate_and_execute_auto_pilot(
+            symbol="ADA/USDT",
+            direction="long",
+            m_type="crypto",
+            ex="binance",
+            ltf_sig=sig,
+            live_price=101.0,
+            strat_res=strat,
+            confluence=85,
+            entry_mode="market",
+            decision_snapshot_id="test-snap-grade-throttle",
+            setup_timeframe="15m",
+            ltf_df=df,
+        )
+
+        assert mock_oms.place_order.called
+        payload = mock_oms.place_order.call_args[0][0]
+        # 2.0% base * 0.5 (Grade A) * 0.5 (Symbol Auto-Throttle) = 0.50% risk
+        assert payload["risk_pct"] == pytest.approx(0.50, abs=0.05)
+
+
+@pytest.mark.anyio
+async def test_auto_pilot_caps_15m_ranging_tp_at_2_20r_and_sets_0_90r_35pct_tp1():
+    """
+    Payoff optimization regression: On 15m ranging setups, cap distant TP > 2.20R to 2.20R,
+    place TP1 cleanly at +0.90R (no cost_buffer inflation), and scale out 35% (leaving 65% runner).
+    """
+    monitor = MarketMonitor(poll_interval_seconds=60)
+    df = _create_sample_df()
+    sig = _create_sample_signal("NEAR/USDT", "long")
+    sig.entry = 100.0
+    sig.stop_loss = 99.0   # 1.0% risk
+    sig.take_profit = 104.0  # 4.0R distant target
+    sig.market_regime = {"regime": "ranging"}
+    sig.tri_core_setup["entry"] = 100.0
+    sig.tri_core_setup["stop_loss"] = 99.0
+    sig.tri_core_setup["take_profit"] = 104.0
+
+    strat = MagicMock()
+    strat.approved = True
+    strat.direction = "long"
+
+    mock_oms = MagicMock()
+    mock_oms.ready = True
+    mock_oms.list_positions = AsyncMock(return_value=[])
+    mock_oms.account_snapshot = AsyncMock(return_value={
+        "total_equity": 1000.0,
+        "initial_capital": 1000.0,
+        "daily_pnl_pct": 0.0,
+    })
+    mock_oms.place_order = AsyncMock(return_value={"status": "filled", "order_id": "order-near-payoff"})
+
+    rule_mock = MagicMock()
+    rule_mock.price = lambda p, upward=True: round(p, 4)
+    rule_mock.min_quantity = 0.01
+    rule_mock.min_notional = 5.0
+    rule_mock.quantity_step = 0.01
+
+    with patch("app.services.paper_oms.paper_oms", mock_oms), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+             "auto_trade_enabled": True,
+             "risk_per_trade": 2.0,
+             "default_sl_pct": 0.8,
+             "target_rr": 1.5,
+         }), \
+         patch("app.services.event_trigger.instrument_rules.get", AsyncMock(return_value=rule_mock)), \
+         patch("app.services.event_trigger.decision_trace.record", AsyncMock()), \
+         patch("app.services.event_trigger.broadcast", AsyncMock()), \
+         patch("app.services.event_trigger.candidate_lifecycle") as mock_lifecycle:
+
+        rec_mock = MagicMock()
+        rec_mock.state.value = "ARMED"
+        mock_lifecycle.register = AsyncMock(return_value=rec_mock)
+        mock_lifecycle.transition = AsyncMock(return_value=True)
+
+        await monitor._evaluate_and_execute_auto_pilot(
+            symbol="NEAR/USDT",
+            direction="long",
+            m_type="crypto",
+            ex="binance",
+            ltf_sig=sig,
+            live_price=100.0,
+            strat_res=strat,
+            confluence=85,
+            entry_mode="market",
+            decision_snapshot_id="test-snap-near-payoff",
+            setup_timeframe="15m",
+            ltf_df=df,
+        )
+
+        assert mock_oms.place_order.called
+        payload = mock_oms.place_order.call_args[0][0]
+        # TP capped at 100 + 1.0 * 2.20 = 102.20
+        assert payload["take_profit"] == pytest.approx(102.2, abs=0.05)
+        # TP1 cleanly at +0.90R = 100.90 (not inflated by cost_buffer)
+        assert payload["take_profit_1"] == pytest.approx(100.9, abs=0.05)
+        # 35% partial scale-out leaving 65% runner
+        assert payload["tp1_ratio"] == pytest.approx(0.35, abs=0.01)
+
+
+
 
 

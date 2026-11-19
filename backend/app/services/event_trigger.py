@@ -1468,14 +1468,27 @@ class MarketMonitor:
             raw_sl = (orig_entry - orig_risk) if direction == "long" else (orig_entry + orig_risk)
             sl_was_widened = True
 
+        setup_regime = str(
+            (getattr(ltf_sig, "market_regime", {}) or {}).get("regime", "") or ""
+        ).lower()
+        max_non_trending_15m_rr = 2.20
+        cap_15m_tp = (
+            str(setup_timeframe).lower() == "15m"
+            and setup_regime != "trending"
+            and orig_risk > 0
+        )
         if direction == "long":
             if raw_tp <= orig_entry or (sl_was_widened and (raw_tp - orig_entry) < (orig_risk * configured_target_rr)):
                 raw_tp = orig_entry + (orig_risk * configured_target_rr)
+            if cap_15m_tp and (raw_tp - orig_entry) > (orig_risk * max_non_trending_15m_rr):
+                raw_tp = orig_entry + (orig_risk * max_non_trending_15m_rr)
             live_valid = raw_sl < live_price < raw_tp
             live_rr = (raw_tp - live_price) / max(live_price - raw_sl, 1e-6) if live_valid else 0.0
         else:
             if raw_tp <= 0 or raw_tp >= orig_entry or (sl_was_widened and (orig_entry - raw_tp) < (orig_risk * configured_target_rr)):
                 raw_tp = orig_entry - (orig_risk * configured_target_rr)
+            if cap_15m_tp and (orig_entry - raw_tp) > (orig_risk * max_non_trending_15m_rr):
+                raw_tp = orig_entry - (orig_risk * max_non_trending_15m_rr)
             live_valid = raw_tp < live_price < raw_sl
             live_rr = (live_price - raw_tp) / max(raw_sl - live_price, 1e-6) if live_valid else 0.0
 
@@ -1645,6 +1658,37 @@ class MarketMonitor:
         if calculated_risk_pct <= 0:
             calculated_risk_pct = 1.0
 
+        # Grade-Based Risk Sizing: Grade S gets full 1.0x budget; Grade A gets 0.5x budget
+        # (Empirical 81-trade data: Grade S = +$82.20 / 63.3% WR vs Grade A = -$71.78 / 51.0% WR).
+        grade_risk_multiplier = 1.0 if setup_grade == "S" else 0.50
+
+        # Dynamic Symbol Auto-Throttle: Halve risk on symbols with < 40% WR and net negative PnL
+        # over their last 5 closed trades (e.g. ADA/USDT bleeding -$98.02 at 27.3% WR).
+        symbol_perf_multiplier = 1.0
+        if len(closed_sym_positions) >= 5:
+            recent_sym = closed_sym_positions[:5]
+            recent_wins = 0
+            recent_net = 0.0
+            for _p in recent_sym:
+                try:
+                    _pnl = float(_p.get("realized_pnl_net") or _p.get("realized_pnl") or 0.0)
+                except (TypeError, ValueError):
+                    _pnl = 0.0
+                recent_net += _pnl
+                if _pnl > 0:
+                    recent_wins += 1
+            if recent_wins < 2 and recent_net < 0:
+                symbol_perf_multiplier = 0.50
+                logger.info(
+                    f"[Auto-Pilot] Symbol Auto-Throttle active for {symbol}: "
+                    f"last 5 closed trades {recent_wins}W/{5 - recent_wins}L (net {recent_net:+.2f} USDT) -> 0.5x risk"
+                )
+
+        effective_risk_pct = max(
+            0.25,
+            round(calculated_risk_pct * grade_risk_multiplier * symbol_perf_multiplier, 4),
+        )
+
         configured_leverage = float(
             r_cfg.get("max_leverage", getattr(cfg, "max_leverage", 10.0)) or 10.0
         )
@@ -1666,7 +1710,7 @@ class MarketMonitor:
             current_gross_notional=current_gross_notional,
             active_positions=active_positions,
             execution_cost_per_unit=execution_cost_per_unit,
-            risk_per_trade_pct=calculated_risk_pct,
+            risk_per_trade_pct=effective_risk_pct,
             minimum_rr=configured_target_rr,
             max_stop_distance_pct=20.0,
             min_stop_distance_pct=effective_risk_min_sl_pct,
@@ -1739,24 +1783,24 @@ class MarketMonitor:
             return None
 
         # =====================================================================
-        # STEP 3: ยิงเข้า OMS ทันที! (TP1 50% @ 1.0R + Auto-BE + Trailing Stop)
+        # STEP 3: ยิงเข้า OMS ทันที! (TP1 35% @ 0.90R + Auto-BE + 65% Runner Trail)
         # =====================================================================
         now_ts = asyncio.get_event_loop().time()
         history_key = _compact_symbol(symbol)
         tag = f"#AUTO-{history_key}-{direction.upper()}-{int(now_ts) % 10000}"
         setup_type = str(setup.get("setup_type", ""))
-        management_policy = "tp1_1r_50pct_be_then_trail"
+        management_policy = "tp1_0_9r_35pct_be_then_trail"
         multi_stage_tp_enabled = bool(r_cfg.get("multi_stage_tp_enabled", True))
         exec_risk = abs(exec_entry - exec_sl)
-        cost_buffer = execution_cost_per_unit if order_type == "market" else 0.0
-        one_r_target = (
-            (exec_entry + exec_risk + cost_buffer)
+        tp1_ratio = 0.35
+        tp1_trigger_target = (
+            (exec_entry + exec_risk * 0.90)
             if direction == "long"
-            else (exec_entry - exec_risk - cost_buffer)
+            else (exec_entry - exec_risk * 0.90)
         )
-        if (direction == "long" and one_r_target >= exec_tp) or (direction == "short" and one_r_target <= exec_tp):
-            one_r_target = (exec_entry + exec_risk) if direction == "long" else (exec_entry - exec_risk)
-        take_profit_1: float | None = rules.price(one_r_target, upward=(direction != "long")) if multi_stage_tp_enabled else None
+        if (direction == "long" and tp1_trigger_target >= exec_tp) or (direction == "short" and tp1_trigger_target <= exec_tp):
+            tp1_trigger_target = (exec_entry + exec_risk * 0.75) if direction == "long" else (exec_entry - exec_risk * 0.75)
+        take_profit_1: float | None = rules.price(tp1_trigger_target, upward=(direction != "long")) if multi_stage_tp_enabled else None
 
         if setup_type == "range_boundary_ping_pong" and canonical_analysis is not None:
             equilibrium = float(getattr(canonical_analysis.signal, "equilibrium", 0.0) or 0.0)
@@ -1800,6 +1844,7 @@ class MarketMonitor:
             "stop_loss": exec_sl,
             "take_profit": exec_tp,
             "take_profit_1": take_profit_1,
+            "tp1_ratio": tp1_ratio if multi_stage_tp_enabled else None,
             "order_type": order_type,
             "position_size": qty,
             "size": qty,

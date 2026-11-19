@@ -782,6 +782,11 @@ class PaperOMS:
                         "policy_version": str(payload.get("policy_version", ""))[:80],
                         "calibration_status": str(payload.get("calibration_status", ""))[:40],
                         "take_profit_1": assigned_tp1,
+                        "tp1_ratio": (
+                            min(max(float(payload["tp1_ratio"]), 0.05), 0.90)
+                            if payload.get("tp1_ratio") is not None
+                            else None
+                        ),
                         "tp1_filled": False,
                         "ai_review_required": bool(payload.get("ai_review_required", False)),
                         "ai_review_status": str(payload.get("ai_review_status", ""))[:40],
@@ -1587,7 +1592,12 @@ class PaperOMS:
                     if tp1_price > ZERO and not tp1_filled:
                         tp1_hit = (bid >= tp1_price) if position.direction == "long" else (ask <= tp1_price)
                         if tp1_hit:
-                            tp1_ratio = _decimal(cfg.paper_oms_tp1_ratio)
+                            custom_tp1_ratio = source_payload.get("tp1_ratio")
+                            tp1_ratio = (
+                                _decimal(custom_tp1_ratio)
+                                if custom_tp1_ratio is not None and float(custom_tp1_ratio) > 0
+                                else _decimal(cfg.paper_oms_tp1_ratio)
+                            )
                             tp1_qty = _decimal(position.remaining_quantity) * tp1_ratio
                             if tp1_qty > EPSILON:
                                 # Cancel any active entry remainder before TP1 partial reduce
@@ -1614,7 +1624,7 @@ class PaperOMS:
                                     requested_quantity=tp1_qty,
                                     filled_quantity=ZERO,
                                     remaining_quantity=tp1_qty,
-                                    close_reason=f"Take Profit 1 (TP1 {int(float(cfg.paper_oms_tp1_ratio)*100)}% Hit) 🎯",
+                                    close_reason=f"Take Profit 1 (TP1 {int(round(float(tp1_ratio)*100))}% Hit) 🎯",
                                     submitted_at=_utcnow(),
                                     updated_at=_utcnow(),
                                     source_payload={
@@ -1665,6 +1675,8 @@ class PaperOMS:
                             stage = str(position.protection_stage or "initial")
                             if stage == "breakeven":
                                 reason = "Breakeven Shield Exit 🛡️"
+                            elif stage == "risk_reduced":
+                                reason = "Risk-Reduced Stop Exit (Soft Shield) 🛡️"
                             elif stage.startswith("trailing"):
                                 reason = "Trailing Stop (Profit Protected) 📈"
                             else:
@@ -1937,6 +1949,16 @@ class PaperOMS:
                 )
             stage = "breakeven"
             note = f"Auto-Breakeven: fee/slippage covered + {float(buffer_r):.2f}R profit buffer"
+        elif position.auto_be and r_multiple >= Decimal("0.80"):
+            # Early Soft Shield: once trade reaches +0.80R, cut residual stop risk from -1.0R to -0.25R
+            # so near-TP1 reversals (e.g. +0.96R) cannot turn into a full -1.0R Stop Loss hit.
+            candidate = (
+                entry - risk * Decimal("0.25")
+                if position.direction == "long"
+                else entry + risk * Decimal("0.25")
+            )
+            stage = "risk_reduced"
+            note = "Soft Risk-Reduction Shield at +0.80R: Stop tightened to -0.25R"
         else:
             return False
 
