@@ -1379,11 +1379,12 @@ async def test_setup_grade_b_from_ping_pong_is_accepted_by_oms(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_paper_oms_soft_risk_reduction_shield_at_0_80r_and_custom_35pct_tp1(tmp_path):
+async def test_paper_oms_be_only_1r_without_soft_shield_and_25pct_cost_cap(tmp_path):
     """
-    ADA Nov 19 (+0.96R -> Full SL) regression:
-    1. When price reaches +0.85R, Soft Shield advances SL from -1.0R to -0.25R (stage='risk_reduced').
-    2. When price hits custom TP1 with tp1_ratio=0.35, only 35% closes (65% runner remains) and SL moves to breakeven.
+    Track 1 Fix #2 & #4:
+    1. No premature Soft Shield at +0.84R (position stays at initial SL until +1.0R BE).
+    2. At +1.0R without custom TP1, SL moves cleanly to breakeven with 100% position intact.
+    3. Limit touch rejects when cost/SL exceeds 25%.
     """
     oms, _factory, engine, _projection, _config = await _make_oms(tmp_path)
     symbol = f"ADA{uuid.uuid4().hex[:6]}/USDT"
@@ -1392,8 +1393,8 @@ async def test_paper_oms_soft_risk_reduction_shield_at_0_80r_and_custom_35pct_tp
         "entry": 100.0,
         "stop_loss": 95.0,       # 1R = 5.0
         "take_profit": 111.0,    # 2.2R
-        "take_profit_1": 104.5,  # 0.90R
-        "tp1_ratio": 0.35,
+        "multi_stage_tp_enabled": False,
+        "tp1_enabled": False,
         "position_size": 10.0,
         "auto_be": True,
     })
@@ -1401,8 +1402,8 @@ async def test_paper_oms_soft_risk_reduction_shield_at_0_80r_and_custom_35pct_tp
     opened = await oms.place_order(payload)
     assert opened["status"] == "open"
 
-    # 1. Price hits +0.84R (104.2) -> Soft Shield tightens SL to ~ -0.25R (98.75)
-    tick_soft = (await oms.process_market_tick({
+    # 1. Price hits +0.84R (104.2) -> NO Soft Shield tightening; stays in 'initial'
+    res_pre = (await oms.process_market_tick({
         "symbol": symbol,
         "price": 104.2,
         "bid": 104.2,
@@ -1411,22 +1412,22 @@ async def test_paper_oms_soft_risk_reduction_shield_at_0_80r_and_custom_35pct_tp
         "source": "test_ws",
         "received_timestamp": 1_787_776_901.0,
     }))[0]
-    assert tick_soft["protection_stage"] == "risk_reduced"
-    assert tick_soft["stop_loss"] > 98.5
+    assert res_pre["protection_stage"] == "initial"
+    assert res_pre["stop_loss"] == pytest.approx(95.0)
 
-    # 2. Price hits TP1 (104.5) -> 35% closes (6.5 remaining) and SL advances to breakeven
-    tick_tp1 = (await oms.process_market_tick({
+    # 2. Price hits +1.05R (105.25) -> Auto-BE activates on full 100% position
+    tick_be = (await oms.process_market_tick({
         "symbol": symbol,
-        "price": 104.6,
-        "bid": 104.6,
-        "ask": 104.61,
+        "price": 105.25,
+        "bid": 105.25,
+        "ask": 105.26,
         "sequence": 902,
         "source": "test_ws",
         "received_timestamp": 1_787_776_902.0,
     }))[0]
-    assert tick_tp1["tp1_filled"] is True
-    assert tick_tp1["remaining_quantity"] == pytest.approx(6.5, abs=0.05)
-    assert tick_tp1["protection_stage"] == "breakeven"
+    assert tick_be["remaining_quantity"] == pytest.approx(10.0, abs=0.01)
+    assert tick_be["protection_stage"] == "breakeven"
+    assert tick_be["stop_loss"] > 100.0
 
     await oms.stop()
     await engine.dispose()

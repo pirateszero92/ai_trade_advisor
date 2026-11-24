@@ -894,10 +894,142 @@ async def test_auto_pilot_caps_15m_ranging_tp_at_2_20r_and_sets_0_90r_35pct_tp1(
         payload = mock_oms.place_order.call_args[0][0]
         # TP capped at 100 + 1.0 * 2.20 = 102.20
         assert payload["take_profit"] == pytest.approx(102.2, abs=0.05)
-        # TP1 cleanly at +0.90R = 100.90 (not inflated by cost_buffer)
-        assert payload["take_profit_1"] == pytest.approx(100.9, abs=0.05)
-        # 35% partial scale-out leaving 65% runner
-        assert payload["tp1_ratio"] == pytest.approx(0.35, abs=0.01)
+        # Track 1 Fix #4: BE @ +1.0R without partial TP1 scale-out
+        assert payload["take_profit_1"] is None
+        assert payload["tp1_ratio"] is None
+        assert payload["multi_stage_tp_enabled"] is False
+        assert payload["tp1_enabled"] is False
+
+
+@pytest.mark.anyio
+async def test_track1_sweep_reversal_forced_limit_and_cost_to_risk_25pct_gate():
+    """
+    Track 1 E2E verification:
+    1. sweep_reversal never executes as market even if upstream flags market_eligible.
+    2. Setups with Cost / 1R > 25% are rejected at execution revalidation.
+    """
+    monitor = MarketMonitor(poll_interval_seconds=60)
+    df = _create_sample_df()
+    sig = _create_sample_signal("LINK/USDT", "short")
+    sig.entry = 100.0
+    sig.stop_loss = 100.80
+    sig.take_profit = 98.40
+    sig.tri_core_setup["setup_type"] = "sweep_reversal"
+    sig.tri_core_setup["order_type"] = "market"
+    sig.tri_core_setup["entry_policy"] = "market_eligible"
+    sig.tri_core_setup["entry"] = 100.0
+    sig.tri_core_setup["stop_loss"] = 100.80
+    sig.tri_core_setup["take_profit"] = 98.40
+
+    strat = MagicMock()
+    strat.approved = True
+    strat.direction = "short"
+
+    mock_oms = MagicMock()
+    mock_oms.ready = True
+    mock_oms.list_positions = AsyncMock(return_value=[])
+    mock_oms.account_snapshot = AsyncMock(return_value={
+        "total_equity": 1000.0,
+        "initial_capital": 1000.0,
+        "daily_pnl_pct": 0.0,
+    })
+    mock_oms.place_order = AsyncMock(return_value={"status": "submitted", "order_id": "order-link-limit"})
+
+    rule_mock = MagicMock()
+    rule_mock.price = lambda p, upward=True: round(p, 4)
+    rule_mock.min_quantity = 0.01
+    rule_mock.min_notional = 5.0
+    rule_mock.quantity_step = 0.01
+
+    with patch("app.services.paper_oms.paper_oms", mock_oms), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+             "auto_trade_enabled": True,
+             "risk_per_trade": 2.0,
+             "default_sl_pct": 0.8,
+             "target_rr": 1.5,
+         }), \
+         patch("app.services.event_trigger.instrument_rules.get", AsyncMock(return_value=rule_mock)), \
+         patch("app.services.event_trigger.decision_trace.record", AsyncMock()), \
+         patch("app.services.event_trigger.broadcast", AsyncMock()), \
+         patch("app.services.event_trigger.candidate_lifecycle") as mock_lifecycle:
+
+        rec_mock = MagicMock()
+        rec_mock.state.value = "ARMED"
+        mock_lifecycle.register = AsyncMock(return_value=rec_mock)
+        mock_lifecycle.transition = AsyncMock(return_value=True)
+
+        await monitor._evaluate_and_execute_auto_pilot(
+            symbol="LINK/USDT",
+            direction="short",
+            m_type="crypto",
+            ex="binance",
+            ltf_sig=sig,
+            live_price=100.0,
+            strat_res=strat,
+            confluence=88,
+            entry_mode="market",
+            decision_snapshot_id="test-snap-sweep-limit",
+            setup_timeframe="15m",
+            ltf_df=df,
+        )
+
+        assert mock_oms.place_order.called
+        payload = mock_oms.place_order.call_args[0][0]
+        assert payload["order_type"] == "limit"
+        assert payload["take_profit_1"] is None
+        assert payload["tp1_ratio"] is None
+
+    # Now test Cost/1R > 25% rejection with very high fee/slippage bps
+    mock_oms.place_order.reset_mock()
+    with patch("app.services.paper_oms.paper_oms", mock_oms), \
+         patch("app.services.event_trigger._get_cached_runtime_settings", return_value={
+             "auto_trade_enabled": True,
+             "risk_per_trade": 2.0,
+             "default_sl_pct": 0.4,
+             "target_rr": 1.5,
+         }), \
+         patch("app.services.event_trigger.get_settings", return_value=MagicMock(
+             paper_oms_fee_bps=10.0,
+             paper_oms_spread_bps=5.0,
+             paper_oms_slippage_bps=5.0,
+             max_risk_per_trade_pct=2.0,
+             max_leverage=10.0,
+         )), \
+         patch("app.services.event_trigger.instrument_rules.get", AsyncMock(return_value=rule_mock)), \
+         patch("app.services.event_trigger.decision_trace.record", AsyncMock()), \
+         patch("app.services.event_trigger.broadcast", AsyncMock()), \
+         patch("app.services.event_trigger.candidate_lifecycle") as mock_lifecycle:
+
+        rec_mock = MagicMock()
+        rec_mock.state.value = "ARMED"
+        mock_lifecycle.register = AsyncMock(return_value=rec_mock)
+        mock_lifecycle.transition = AsyncMock(return_value=True)
+
+        sig_tight = _create_sample_signal("LINK/USDT", "short")
+        sig_tight.entry = 100.0
+        sig_tight.stop_loss = 100.40  # 0.40% SL -> 25bps cost / 40bps SL = 62.5% > 25%
+        sig_tight.take_profit = 99.00
+        sig_tight.tri_core_setup["setup_type"] = "sweep_reversal"
+        sig_tight.tri_core_setup["entry"] = 100.0
+        sig_tight.tri_core_setup["stop_loss"] = 100.40
+        sig_tight.tri_core_setup["take_profit"] = 99.00
+
+        res_rejected = await monitor._evaluate_and_execute_auto_pilot(
+            symbol="LINK/USDT",
+            direction="short",
+            m_type="crypto",
+            ex="binance",
+            ltf_sig=sig_tight,
+            live_price=100.0,
+            strat_res=strat,
+            confluence=88,
+            entry_mode="limit",
+            decision_snapshot_id="test-snap-cost-cap",
+            setup_timeframe="15m",
+            ltf_df=df,
+        )
+        assert res_rejected is None
+        assert not mock_oms.place_order.called
 
 
 @pytest.mark.anyio

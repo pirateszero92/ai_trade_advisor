@@ -1828,8 +1828,8 @@ class PaperOMS:
                 reason = f"Limit touch chart R:R {float(chart_rr):.2f} is below {float(min_rr):.2f}"
             elif net_rr < net_floor:
                 reason = f"Limit touch net R:R {float(net_rr):.2f} is below net floor {float(net_floor):.2f}"
-            elif cost_to_stop > Decimal("0.50"):
-                reason = f"Limit touch cost/SL {float(cost_to_stop):.1%} exceeds 50%"
+            elif cost_to_stop > Decimal("0.25"):
+                reason = f"Limit touch cost/SL {float(cost_to_stop):.1%} exceeds 25%"
 
         if not reason:
             return True
@@ -1949,16 +1949,6 @@ class PaperOMS:
                 )
             stage = "breakeven"
             note = f"Auto-Breakeven: fee/slippage covered + {float(buffer_r):.2f}R profit buffer"
-        elif position.auto_be and r_multiple >= Decimal("0.80"):
-            # Early Soft Shield: once trade reaches +0.80R, cut residual stop risk from -1.0R to -0.25R
-            # so near-TP1 reversals (e.g. +0.96R) cannot turn into a full -1.0R Stop Loss hit.
-            candidate = (
-                entry - risk * Decimal("0.25")
-                if position.direction == "long"
-                else entry + risk * Decimal("0.25")
-            )
-            stage = "risk_reduced"
-            note = "Soft Risk-Reduction Shield at +0.80R: Stop tightened to -0.25R"
         else:
             return False
 

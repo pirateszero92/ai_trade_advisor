@@ -1223,50 +1223,35 @@ class TriCoreSetupEngine:
                             f"sweep:{side}:{sweep.get('level_id', '')}:"
                             f"{sweep.get('candle_time', sweep.get('candle_index', ''))}"
                         ))
-                        entry_policy: Literal["market_eligible", "limit_retest_only"] = "market_eligible"
+                        # Track 1 Fix #1: sweep_reversal must execute as limit_retest_only
+                        # (empirical Nov 3-23 data: market sweep -138.57 / 43% WR vs limit +54.45 / 67% WR).
+                        entry_policy: Literal["market_eligible", "limit_retest_only"] = "limit_retest_only"
                         causal_zone = _causal_limit_zone(signal, side, sweep)
                         limit_zone_id = str(causal_zone.zone_id) if causal_zone is not None else ""
-                        candidate_entry = entry
+                        if causal_zone is not None:
+                            candidate_entry = float(
+                                causal_zone.top if side == "long" else causal_zone.bottom
+                            )
+                        else:
+                            wick_mid = (extreme + entry) / 2.0
+                            candidate_entry = float(
+                                min(entry, wick_mid) if side == "long" else max(entry, wick_mid)
+                            )
 
-                        # Anti-Chase / Adaptive Momentum Entry:
+                        # Anti-Chase / Adaptive Momentum Guard:
                         eff_market_extension = policy.market_entry_max_extension_atr
                         if strong or (side == "long" and pressure >= 0.15) or (side == "short" and pressure <= -0.15):
                             eff_market_extension = max(eff_market_extension, 0.85)
 
-                        # If candle spiked > eff_market_extension from reclaim, do not buy top;
-                        # place 2-bar Limit at the front edge of the causal FVG/OB instead.
-                        sweep_sl_dist_pct = abs(entry - stop) / max(entry, 1e-6)
                         sweep_level = float(sweep.get("level") or sweep.get("level_price") or 0.0)
-                        if extension_atr > eff_market_extension:
-                            if causal_zone is None:
-                                _add_rejection(
-                                    f"Price extended {extension_atr:.2f} ATR (> {eff_market_extension:.2f} ATR) without FVG/OB retest zone — do not chase",
-                                    "NO_CHASE_OVEREXTENDED",
-                                )
-                                continue
-                            entry_policy = "limit_retest_only"
-                            candidate_entry = float(
-                                causal_zone.top if side == "long" else causal_zone.bottom
+                        if extension_atr > eff_market_extension and causal_zone is None:
+                            _add_rejection(
+                                f"Price extended {extension_atr:.2f} ATR (> {eff_market_extension:.2f} ATR) without FVG/OB retest zone — do not chase",
+                                "NO_CHASE_OVEREXTENDED",
                             )
-                        elif regime_label == "volatile" or (
-                            sweep.get("event_type") == "multi_bar_reclaim"
-                            and sweep_sl_dist_pct > 0.0115
-                        ):
-                            # In volatile regime or over-wide (>1.15% SL) multi-bar reclaim sweeps,
-                            # require a Limit retest at the causal zone edge or reclaimed level
-                            # rather than chasing a wide stop by market.
-                            entry_policy = "limit_retest_only"
-                            if causal_zone is not None:
-                                candidate_entry = float(
-                                    causal_zone.top if side == "long" else causal_zone.bottom
-                                )
-                            else:
-                                wick_mid = (extreme + entry) / 2.0
-                                candidate_entry = float(
-                                    min(entry, wick_mid) if side == "long" else max(entry, wick_mid)
-                                )
+                            continue
 
-                        if entry_policy == "limit_retest_only" and sweep_level > 0:
+                        if sweep_level > 0:
                             # Never place a sweep retest limit inside the broken zone beyond the swept level:
                             # Long limit must sit at/above reclaimed support (sweep_level);
                             # Short limit must sit at/below reclaimed resistance (sweep_level).

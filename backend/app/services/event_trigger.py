@@ -1508,24 +1508,25 @@ class MarketMonitor:
         )
         live_fee_to_risk = live_cost_per_unit / max(live_sl_dist, 1e-6) if live_valid else 1.0
 
+        setup_type_lower = str(setup.get("setup_type", "") or "").lower()
         acceptable_market_rr = max(0.95, configured_target_rr - 0.05)
         min_market_net_rr = max(1.05, configured_target_rr - 0.45)
         if (
             setup_order_type == "market"
             and setup_policy != "limit_retest_only"
+            and setup_type_lower != "sweep_reversal"
             and live_valid
             and live_rr >= acceptable_market_rr
             and live_sl_ratio >= (effective_min_sl_ratio - 1e-5)
             and live_net_rr >= min_market_net_rr
-            and live_fee_to_risk <= 0.26
+            and live_fee_to_risk <= 0.25
         ):
             raw_entry = float(live_price)
             order_type = "market"
             entry_policy = "market_eligible"
         else:
-            # Anti-Chase / SL-Compression Guard: Do not Market-enter when live price
-            # compressed SL below effective_min_sl_ratio or net executable R:R is degraded;
-            # place 2-bar Limit order at the FVG/OB edge (orig_entry) instead.
+            # Anti-Chase / SL-Compression / Sweep-Limit Guard: Do not Market-enter
+            # sweep_reversal setups or when live price compressed SL or cost/1R > 25%.
             raw_entry = float(orig_entry)
             order_type = "limit"
             entry_policy = "limit_retest_only"
@@ -1536,7 +1537,27 @@ class MarketMonitor:
         exec_tp = rules.price(raw_tp, upward=(not is_long))
         exec_rr = round(abs(exec_tp - exec_entry) / max(abs(exec_entry - exec_sl), 1e-6), 2)
         exec_sl_dist = abs(exec_entry - exec_sl)
-        exec_cost_per_unit = exec_entry * cost_rate_total
+        exec_cost_rate = (
+            (fee_rate * 2.0 + slippage_rate)
+            if order_type == "limit"
+            else cost_rate_total
+        )
+        exec_cost_per_unit = exec_entry * exec_cost_rate
+        exec_cost_to_risk = exec_cost_per_unit / max(exec_sl_dist, 1e-6)
+        if exec_cost_to_risk > 0.25:
+            logger.info(
+                f"[Auto-Pilot] Cost/1R Gate blocked {symbol} {direction} ({order_type}): "
+                f"cost/1R={exec_cost_to_risk:.1%} > 25.0%"
+            )
+            await candidate_lifecycle.transition(
+                symbol=symbol,
+                snapshot_id=decision_snapshot_id,
+                event_id=event_id,
+                new_state=CandidateState.EXECUTION_REJECTED,
+                reason_code="COST_TO_RISK_EXCEEDED",
+                reason=f"Execution cost {exec_cost_to_risk:.1%} of 1R exceeds 25% cap",
+            )
+            return None
         exec_net_rr = round(
             max(abs(exec_tp - exec_entry) - exec_cost_per_unit, 0.0)
             / max(exec_sl_dist + exec_cost_per_unit, 1e-6),
@@ -1783,24 +1804,16 @@ class MarketMonitor:
             return None
 
         # =====================================================================
-        # STEP 3: ยิงเข้า OMS ทันที! (TP1 35% @ 0.90R + Auto-BE + 65% Runner Trail)
+        # STEP 3: ยิงเข้า OMS ทันที! (BE @ +1.0R, ไม่ตัดแบ่งขาย TP1 @ 0.90R)
         # =====================================================================
         now_ts = asyncio.get_event_loop().time()
         history_key = _compact_symbol(symbol)
         tag = f"#AUTO-{history_key}-{direction.upper()}-{int(now_ts) % 10000}"
         setup_type = str(setup.get("setup_type", ""))
-        management_policy = "tp1_0_9r_35pct_be_then_trail"
-        multi_stage_tp_enabled = bool(r_cfg.get("multi_stage_tp_enabled", True))
+        management_policy = "be_only_1r_then_trail"
         exec_risk = abs(exec_entry - exec_sl)
-        tp1_ratio = 0.35
-        tp1_trigger_target = (
-            (exec_entry + exec_risk * 0.90)
-            if direction == "long"
-            else (exec_entry - exec_risk * 0.90)
-        )
-        if (direction == "long" and tp1_trigger_target >= exec_tp) or (direction == "short" and tp1_trigger_target <= exec_tp):
-            tp1_trigger_target = (exec_entry + exec_risk * 0.75) if direction == "long" else (exec_entry - exec_risk * 0.75)
-        take_profit_1: float | None = rules.price(tp1_trigger_target, upward=(direction != "long")) if multi_stage_tp_enabled else None
+        tp1_ratio: float | None = None
+        take_profit_1: float | None = None
 
         if setup_type == "range_boundary_ping_pong" and canonical_analysis is not None:
             equilibrium = float(getattr(canonical_analysis.signal, "equilibrium", 0.0) or 0.0)
@@ -1824,6 +1837,7 @@ class MarketMonitor:
             )
             if cand_tp1 is not None and math.isfinite(cand_tp1):
                 take_profit_1 = rules.price(cand_tp1, upward=(direction != "long"))
+                tp1_ratio = 0.50
                 management_policy = "local_obstacle_tp1_50_be_macro_tp2"
 
         limit_valid_until = ""
@@ -1844,7 +1858,9 @@ class MarketMonitor:
             "stop_loss": exec_sl,
             "take_profit": exec_tp,
             "take_profit_1": take_profit_1,
-            "tp1_ratio": tp1_ratio if multi_stage_tp_enabled else None,
+            "tp1_ratio": tp1_ratio,
+            "multi_stage_tp_enabled": take_profit_1 is not None,
+            "tp1_enabled": take_profit_1 is not None,
             "order_type": order_type,
             "position_size": qty,
             "size": qty,

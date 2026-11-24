@@ -74,7 +74,7 @@ def test_previous_candle_sweep_remains_entry_ready_for_one_bar():
     signal.cvd_divergence_evidence["reclaim_close_price"] = 100.0
     setup = TriCoreSetupEngine.evaluate(signal, _frame())
     assert setup.actionable
-    assert setup.trigger_state == "entry_ready"
+    assert setup.trigger_state == "limit_retest_only"
     assert setup.trigger_age_bars == 1
     assert setup.extension_atr is not None
     assert setup.extension_atr <= 0.60
@@ -247,7 +247,7 @@ def test_divergence_from_a_different_swing_cannot_confirm_sweep():
 
 def test_nearest_obstacle_is_not_skipped_to_manufacture_two_r():
     signal = _signal()
-    signal.equal_highs = [102.0, 110.0]
+    signal.equal_highs = [100.6, 110.0]
     setup = TriCoreSetupEngine.evaluate(signal, _frame())
     assert not setup.actionable
     assert any("Nearest opposing obstacle" in reason for reason in setup.rejection_reasons)
@@ -1002,6 +1002,7 @@ def test_session_judas_sweep_upgrades_moderate_cvd_sweep_reversal_to_grade_s():
 
 
 def test_fresh_sweep_reversal_remains_market_eligible_with_causal_zone_attached():
+    """Track 1 Fix #1: sweep_reversal must always use limit_retest_only with causal zone attached."""
     signal = _signal()
     signal.liquidity_sweep["breach_start_index"] = 18
     signal.order_blocks = [
@@ -1017,8 +1018,8 @@ def test_fresh_sweep_reversal_remains_market_eligible_with_causal_zone_attached(
     ]
     setup = TriCoreSetupEngine.evaluate(signal, _frame())
     assert setup.actionable is True
-    assert setup.entry_policy == "market_eligible"
-    assert setup.order_type == "market"
+    assert setup.entry_policy == "limit_retest_only"
+    assert setup.order_type == "limit"
     assert setup.limit_zone_id != ""
 
 
@@ -1031,6 +1032,7 @@ def test_counter_trend_long_rejected_in_volatile_bearish_regime():
     assert any("Counter-trend LONG rejected: Market regime is volatile bearish" in r for r in setup.rejection_reasons)
 
 def test_adaptive_momentum_entry_expands_market_ceiling_for_strong_flow():
+    """Track 1 Fix #1: sweep_reversal uses limit_retest_only regardless of flow strength, rejecting overextended entries without causal zone."""
     signal = _signal()
     signal.liquidity_sweep["candle_index"] = 18
     signal.liquidity_sweep["reclaim_close"] = 99.0
@@ -1038,7 +1040,7 @@ def test_adaptive_momentum_entry_expands_market_ceiling_for_strong_flow():
     signal.delta_ratio = 0.20
     setup_strong = TriCoreSetupEngine.evaluate(signal, _frame())
     assert setup_strong.actionable is True
-    assert setup_strong.entry_policy == "market_eligible"
+    assert setup_strong.entry_policy == "limit_retest_only"
 
     signal.delta_ratio = 0.05
     signal.cvd_divergence_evidence["price_excursion_atr"] = 0.10
@@ -1332,7 +1334,7 @@ def test_ranging_regime_suppresses_inducement_order_block_displacement_retest():
 
 
 def test_compact_multi_bar_reclaim_sweep_preserves_market_execution():
-    """#94 BTC / #100 NEAR regression: A compact multi_bar_reclaim (<= 1.15% SL) must execute as market_eligible."""
+    """Track 1 Fix #1: Even compact multi_bar_reclaim sweeps now enforce limit_retest_only."""
     frame = _frame()
     frame["high"] = 100.4
     frame["low"] = 99.6
@@ -1346,8 +1348,8 @@ def test_compact_multi_bar_reclaim_sweep_preserves_market_execution():
     sig.cvd_divergence_evidence["reclaim_close_price"] = 100.0
     setup = TriCoreSetupEngine.evaluate(sig, frame)
     assert setup.actionable is True
-    assert setup.entry_policy == "market_eligible"
-    assert setup.order_type == "market"
+    assert setup.entry_policy == "limit_retest_only"
+    assert setup.order_type == "limit"
 
 
 def test_sweep_limit_entry_clamped_to_reclaimed_level():
