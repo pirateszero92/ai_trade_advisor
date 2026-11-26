@@ -1474,6 +1474,10 @@ def test_remediation_v2_counter_sweep_pause_ob_extension_skip_and_min_sl_atr():
     assert "SL_BELOW_MIN_ATR_NOISE" in res_noise.rejection_codes
 
     # 3) OB displacement_retest is paused under policy_v2
+    retest_frame = tight_frame.copy()
+    retest_frame.loc[retest_frame.index[16:19], ["open", "high", "low", "close"]] = [
+        101.0, 101.5, 100.5, 101.0
+    ]
     ob_sig = _signal()
     ob_sig.liquidity_swept = False
     ob_sig.liquidity_sweep = {}
@@ -1489,7 +1493,7 @@ def test_remediation_v2_counter_sweep_pause_ob_extension_skip_and_min_sl_atr():
     ob_sig.order_blocks = [
         Zone("ob", "bullish", top=99.9, bottom=98.2, index=14, confirmed_index=15, source="swing")
     ]
-    res_ob = TriCoreSetupEngine.evaluate(ob_sig, tight_frame, policy_v2)
+    res_ob = TriCoreSetupEngine.evaluate(ob_sig, retest_frame, policy_v2)
     assert not res_ob.actionable
     assert "DISPLACEMENT_RETEST_PAUSED" in res_ob.rejection_codes
 
@@ -1510,18 +1514,18 @@ def test_remediation_v2_counter_sweep_pause_ob_extension_skip_and_min_sl_atr():
     brk_sig.breaker_blocks = [
         Zone("breaker", "bullish", top=99.7, bottom=98.3, index=12, confirmed_index=15, source="swing")
     ]
-    res_brk_ok = TriCoreSetupEngine.evaluate(brk_sig, tight_frame, policy_v2)
+    res_brk_ok = TriCoreSetupEngine.evaluate(brk_sig, retest_frame, policy_v2)
     assert res_brk_ok.actionable is True
     assert res_brk_ok.setup_type in {"breaker_retest", "breaker_shallow_retest"}
     assert res_brk_ok.entry_policy == "market_eligible"
 
-    # Price ran > 0.50 ATR above breaker top (close=100.0, top=99.2 -> dist=0.8 ATR > 0.5 ATR)
+    # Price touched breaker on bar 19 (low=99.15) and bounced to close=100.0 (> 0.50 ATR above top=99.2 -> skip)
     brk_sig.breaker_blocks = [
         Zone("breaker", "bullish", top=99.2, bottom=97.8, index=12, confirmed_index=15, source="swing")
     ]
-    tight_frame_ext = tight_frame.copy()
-    tight_frame_ext.loc[tight_frame_ext.index[17], "low"] = 99.1  # lineage touch happened earlier, now extended
-    res_brk_skip = TriCoreSetupEngine.evaluate(brk_sig, tight_frame_ext, policy_v2)
+    retest_frame_ext = retest_frame.copy()
+    retest_frame_ext.loc[retest_frame_ext.index[19], "low"] = 99.15
+    res_brk_skip = TriCoreSetupEngine.evaluate(brk_sig, retest_frame_ext, policy_v2)
     assert not res_brk_skip.actionable
     assert "EXTENSION_EXCEEDS_MAX_ATR" in res_brk_skip.rejection_codes
 
