@@ -978,6 +978,7 @@ async def test_track1_sweep_reversal_forced_limit_and_cost_to_risk_25pct_gate():
         assert payload["order_type"] == "limit"
         assert payload["take_profit_1"] is None
         assert payload["tp1_ratio"] is None
+        assert payload["signal_bar_time"] != ""
 
     # Now test Cost/1R > 25% rejection with very high fee/slippage bps
     mock_oms.place_order.reset_mock()

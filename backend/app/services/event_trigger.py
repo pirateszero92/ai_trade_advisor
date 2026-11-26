@@ -1851,6 +1851,11 @@ class MarketMonitor:
                 + timedelta(minutes=timeframe_minutes * 2)
             ).isoformat()
 
+        config_hash = ""
+        if canonical_analysis is not None and getattr(canonical_analysis, "config_snapshot", None):
+            from app.services.evidence import fingerprint
+            config_hash = str(fingerprint(canonical_analysis.config_snapshot))
+
         order_payload = {
             "symbol": symbol,
             "direction": direction,
@@ -1861,6 +1866,7 @@ class MarketMonitor:
             "tp1_ratio": tp1_ratio,
             "multi_stage_tp_enabled": take_profit_1 is not None,
             "tp1_enabled": take_profit_1 is not None,
+            "config_hash": config_hash,
             "order_type": order_type,
             "position_size": qty,
             "size": qty,

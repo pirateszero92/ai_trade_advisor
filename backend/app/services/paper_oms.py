@@ -780,6 +780,8 @@ class PaperOMS:
                         "valid_until": str(payload.get("valid_until", ""))[:80],
                         "limit_zone_id": str(payload.get("limit_zone_id", ""))[:300],
                         "policy_version": str(payload.get("policy_version", ""))[:80],
+                        "config_hash": str(payload.get("config_hash", ""))[:64],
+                        "signal_bar_time": str(payload.get("signal_bar_time", ""))[:64],
                         "calibration_status": str(payload.get("calibration_status", ""))[:40],
                         "take_profit_1": assigned_tp1,
                         "tp1_ratio": (

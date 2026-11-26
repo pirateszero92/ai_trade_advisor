@@ -24,9 +24,8 @@ flowchart TD
     end
 
     subgraph ProtectionAndExit["3. OMS Trade Lifecycle & Protection"]
-        T3 --> TP1["TP1 Hit (50% Partial Close)"]
-        TP1 --> BE["Breakeven Shield (+1.0R Protected)"]
-        BE --> TS["Dynamic Trailing Stop (Trailing Runner)"]
+        T3 --> BE["Breakeven Shield (+1.0R Protected, 100% Position)"]
+        BE --> TS["Dynamic Trailing Stop (+1.5R+ Runner)"]
         TS --> CL["Closed Trade (Audited Net PnL)"]
     end
 
@@ -95,11 +94,12 @@ sequenceDiagram
 * **Cluster & Regime Risk Multipliers**: Automatically reduces risk allocation during ranging chop or high-correlation asset cluster exposure.
 
 ### 4. 📈 Transactional OMS & Smart Exits (Tier 3)
-* **PostgreSQL Durable Execution Ledger**: Fully auditable record of fills, fees, slippage, and gross/net PnL.
-* **Two-Stage Institutional Exit**:
-  1. **Take Profit 1 (TP1)**: Hits first structural target (e.g., prior swing or 50% FVG), automatically closing **50%** of the position to secure initial profits.
-  2. **Breakeven Shield Exit 🛡️**: As soon as TP1 fills, Stop Loss is instantaneously trailed to entry price plus transaction costs, guaranteeing a risk-free trade.
-  3. **Dynamic Trailing Stop 📈**: The remaining 50% runner dynamically trails favorable price extremes (`protection_stage: trailing_dynamic`) to capture extended trends.
+* **PostgreSQL Durable Execution Ledger**: Fully auditable record of fills, fees, slippage, `signal_bar_time`, `config_hash`, and gross/net PnL.
+* **Cost-to-Risk Gate (`<= 25%` of 1R)**: Rejects both pre-trade and limit-touch fills when round-trip fees + spread + slippage exceed 25% of 1R stop distance.
+* **Sweep Limit-Only & Trend Guards**: `sweep_reversal` executes strictly via causal `limit_retest_only` orders; `1H EMA20/50` consensus + `4H` freight-train guard prevent counter-trend whipsaws.
+* **Single-Runner Institutional Exit (`BE @ +1.0R` + Trailing)**:
+  1. **Breakeven Shield Exit 🛡️**: Once price reaches **+1.0R**, Stop Loss moves to entry plus fee/slippage/spread buffer with **100% of position intact** (no early partial TP1 scale-out or 0.80R soft-shield tightening, except `range_boundary_ping_pong` when enabled).
+  2. **Dynamic Trailing Stop 📈**: Above **+1.5R**, Stop Loss dynamically trails favorable price extremes (`protection_stage: trailing_1_5r` / `trailing_dynamic`) to capture extended moves.
 
 ### 5. 🎯 Open Interest (OI) & Liquidation Cascade Tracker (v1.0.32+)
 * **Dual-Timeframe OI Intelligence (15M / 1H)**: Continuously monitors Open Interest and OI Delta % from crypto derivatives exchanges (Binance Futures & Bybit) alongside Funding Rates and Long/Short ratios.
@@ -223,18 +223,26 @@ adb install -r ../web_dist/app-release.apk
 | **Cluster Cooldown** | Prevents rapid consecutive losses by cooling down correlated pairs (e.g., L1 Crypto). |
 | **Location Gate** | Unconditionally blocks buying at Premium ($\ge 50\%$ swing) or shorting at Discount ($\le 50\%$). |
 | **Min Confluence Gate** | Enforces mathematical consensus threshold (default: 55–65) across SMC, CVD, and Squeeze. Grade S/A causal setups receive Fast-Pass bypass. |
-| **Adaptive Momentum Entry** | Expands market execution tolerance up to $0.85\text{ ATR}$ on strong CVD delta ($\ge \pm 15\%$) to eliminate missed zero-pullback breakouts. |
-| **Counter-Trend Filter** | Blocks trades counter to macro H1/4H structural bias unless explicitly toggled off. |
+| **Adaptive Momentum Entry** | Allows `market_eligible` continuation on strong `BOS` (`|delta| >= 22%`, `trending` + `1H` aligned); `sweep_reversal` is strictly `limit_retest_only`. |
+| **Cost-to-Risk Gate** | Enforces round-trip execution cost $\le 25\%$ of 1R stop distance both pre-trade and at limit-touch. |
+| **Counter-Trend Filter** | Enforces `1H EMA20/50` consensus (`intraday_bias`) and blocks entries fighting strict 3-layer `4H` freight-train stacks (`Price/EMA20/EMA50`). |
 | **Ranging Ping-Pong Mode** | Allows entering Grade B swing trades at Sideway boundaries (Demand/Supply Zone) targeting opposing range boundaries. Controlled via on/off toggle in Settings. |
 | **OI Liquidation Cascade Guard** | Tracks rapid derivatives flushes to prevent buying falling knives and identify true seller/buyer exhaustion bottoms. |
-| **Auto-Breakeven Shield** | Locks initial profit at $+1.0\text{R}$ / TP1 to guarantee zero downside on runners. |
-| **Dynamic Trailing Stop** | Automatically secures trailing profits when prices extend into extreme favorable targets. |
+| **Auto-Breakeven Shield** | Locks initial profit at $+1.0\text{R}$ with 100% position intact (no early TP1 scale-out or 0.80R soft shield). |
+| **Dynamic Trailing Stop** | Automatically secures trailing profits above $+1.5\text{R}$ when prices extend into extreme favorable targets. |
 
 ---
 
 ---
 
 ## 🚀 Release History & Changelog
+
+### v1.0.35 - Track 1 Cost, Sweep Limit-Only & Single-Runner Exit (Nov 24, 2026)
+- **Sweep Reversal Limit-Only (`tri_core_engine.py`, `event_trigger.py`)**: Disabled `sweep_reversal` market orders; all sweep setups now rest at causal FVG/OB or reclaimed-level limits (`limit_retest_only`).
+- **Cost-to-1R Gate `<= 25%` (`event_trigger.py`, `paper_oms.py`)**: Added pre-trade `COST_TO_RISK_EXCEEDED` rejection and lowered limit-touch `cost_to_stop` cap from `50%` to `25%` based on split-sample sensitivity across Nov 3–24 trades.
+- **Single-Runner Exit (`BE @ +1.0R`)**: Removed `0.80R` Soft Shield (`risk_reduced`) and `0.90R / 35%` partial TP1 scale-out after 1m counterfactual replay; positions run 100% to `BE @ +1.0R` and `+1.5R+` trailing stop.
+- **Trend & Regime Calibration (`execution_analysis.py`, `regime_engine.py`)**: Added `1H EMA20/50` consensus (`resolve_intraday_trend_bias`), strict `4H` freight-train guard (`COUNTER_4H_FREIGHT_TRAIN`), and EMA20/50-aware `MarketRegimeEngine` classification.
+- **Auditability (`event_trigger.py`, `paper_oms.py`)**: Persisted `signal_bar_time` and `config_hash` into `PaperOMSPosition.source_payload`.
 
 ### v1.0.34 (Build 53) - Institutional Payoff & Risk Guardrail Optimization (Nov 2026)
 - **Empirical Post-Mortem Remediation**:
