@@ -34,6 +34,10 @@ class TriCorePolicy:
     ping_pong_enabled: bool = False
     target_anchor_mode: str = "opposing_boundary"
     counter_trend_filter_enabled: bool = True
+    allow_counter_trend_sweep: bool = False
+    pause_displacement_retest: bool = False
+    momentum_skip_extension_atr: float = 0.0
+    min_sl_atr_multiple: float = 0.0
     candidate_selection_mode: Literal["rr_then_grade", "grade_then_rr"] = "rr_then_grade"
     binance_trading_mode: Literal["futures", "spot"] = "futures"
 
@@ -60,6 +64,18 @@ class TriCorePolicy:
             target_anchor_mode=str(values.get("target_anchor_mode", cls.target_anchor_mode)),
             counter_trend_filter_enabled=bool(values.get(
                 "counter_trend_filter_enabled", cls.counter_trend_filter_enabled
+            )),
+            allow_counter_trend_sweep=bool(values.get(
+                "allow_counter_trend_sweep", cls.allow_counter_trend_sweep
+            )),
+            pause_displacement_retest=bool(values.get(
+                "pause_displacement_retest", cls.pause_displacement_retest
+            )),
+            momentum_skip_extension_atr=float(values.get(
+                "momentum_skip_extension_atr", cls.momentum_skip_extension_atr
+            )),
+            min_sl_atr_multiple=float(values.get(
+                "min_sl_atr_multiple", cls.min_sl_atr_multiple
             )),
             candidate_selection_mode=str(values.get(
                 "candidate_selection_mode", cls.candidate_selection_mode
@@ -836,9 +852,17 @@ def _candidate(*, side: str, setup_type: str, entry: float, stop: float,
                event_id: str = "", entry_policy: Literal[
                    "market_eligible", "limit_retest_only"
                ] = "market_eligible", limit_zone_id: str = "",
-               policy: TriCorePolicy | None = None) -> TriCoreSetup:
+               policy: TriCorePolicy | None = None,
+               atr: float = 0.0) -> TriCoreSetup:
     policy = policy or TriCorePolicy()
     risk = abs(entry - stop)
+    if policy.min_sl_atr_multiple > 0 and atr > 0 and risk < (policy.min_sl_atr_multiple * atr):
+        return TriCoreSetup(
+            rejection_reasons=[
+                f"Stop distance {risk / atr:.2f}x ATR < minimum {policy.min_sl_atr_multiple:.2f}x ATR noise floor"
+            ],
+            rejection_codes=["SL_BELOW_MIN_ATR_NOISE"],
+        )
     # Ensure sufficient breathing room to avoid premature noise/spread stop-outs on 15M bars.
     # Market entries and sweep reversals require >= 0.65% breathing room, while limit retests require >= 0.40%.
     min_breathing_ratio = 0.0065 if (setup_type == "sweep_reversal" or entry_policy == "market_eligible") else 0.0040
@@ -1087,49 +1111,49 @@ class TriCoreSetupEngine:
         for side in ("long", "short"):
             expected_bias = "bullish" if side == "long" else "bearish"
             htf_aligned = (intraday_bias == expected_bias)
+            counter_trend_rejection: tuple[str, str] | None = None
             if policy.counter_trend_filter_enabled:
                 # When 1H/HTF trend is explicitly aligned with `side`, a 15m bounce/dip in the
                 # opposite `trend_direction` is a pullback into the HTF trend, not a counter-trend trade.
                 if regime_label == "trending" and not htf_aligned:
                     if trend_direction == "bullish" and side == "short":
-                        rejected.append("Counter-trend SHORT rejected: Market regime is trending bullish")
-                        continue
-                    if trend_direction == "bearish" and side == "long":
-                        rejected.append("Counter-trend LONG rejected: Market regime is trending bearish")
-                        continue
-                if regime_label == "volatile" and not htf_aligned:
+                        counter_trend_rejection = ("Counter-trend SHORT rejected: Market regime is trending bullish", "COUNTER_TREND_REGIME")
+                    elif trend_direction == "bearish" and side == "long":
+                        counter_trend_rejection = ("Counter-trend LONG rejected: Market regime is trending bearish", "COUNTER_TREND_REGIME")
+                if counter_trend_rejection is None and regime_label == "volatile" and not htf_aligned:
                     if trend_direction == "bullish" and side == "short":
-                        rejected.append("Counter-trend SHORT rejected: Market regime is volatile bullish")
-                        continue
-                    if trend_direction == "bearish" and side == "long":
-                        rejected.append("Counter-trend LONG rejected: Market regime is volatile bearish")
-                        continue
-                # Unless ping-pong is explicitly enabled in a ranging market, NEVER trade against the 1H intraday/HTF trend
-                if not (is_ranging and policy.ping_pong_enabled):
+                        counter_trend_rejection = ("Counter-trend SHORT rejected: Market regime is volatile bullish", "COUNTER_TREND_REGIME")
+                    elif trend_direction == "bearish" and side == "long":
+                        counter_trend_rejection = ("Counter-trend LONG rejected: Market regime is volatile bearish", "COUNTER_TREND_REGIME")
+                # Unless ping-pong is explicitly enabled in a ranging market, check 1H/4H trend alignment
+                if counter_trend_rejection is None and not (is_ranging and policy.ping_pong_enabled):
                     if intraday_bias == "bullish" and side == "short":
-                        rejected.append(f"Counter-trend SHORT rejected: {('1H intraday trend' if raw_intraday and str(raw_intraday).lower() != 'neutral' else 'HTF bias')} is bullish")
-                        continue
-                    if intraday_bias == "bearish" and side == "long":
-                        rejected.append(f"Counter-trend LONG rejected: {('1H intraday trend' if raw_intraday and str(raw_intraday).lower() != 'neutral' else 'HTF bias')} is bearish")
-                        continue
-
-                    # Strict 4H Freight-Train Guard: block entries directly fighting
-                    # a full 3-layer 4H momentum stack (close < EMA20 < EMA50 or
-                    # close > EMA20 > EMA50), while still allowing 4H mixed rebounds.
-                    if macro_strict_trend == "bearish" and side == "long":
-                        _add_rejection(
+                        counter_trend_rejection = (
+                            f"Counter-trend SHORT rejected: {('1H intraday trend' if raw_intraday and str(raw_intraday).lower() != 'neutral' else 'HTF bias')} is bullish",
+                            "COUNTER_TREND_HTF",
+                        )
+                    elif intraday_bias == "bearish" and side == "long":
+                        counter_trend_rejection = (
+                            f"Counter-trend LONG rejected: {('1H intraday trend' if raw_intraday and str(raw_intraday).lower() != 'neutral' else 'HTF bias')} is bearish",
+                            "COUNTER_TREND_HTF",
+                        )
+                    elif macro_strict_trend == "bearish" and side == "long":
+                        counter_trend_rejection = (
                             "Counter-trend LONG rejected: 4H strict freight-train downtrend (price < EMA20 < EMA50)",
                             "COUNTER_4H_FREIGHT_TRAIN",
                         )
-                        continue
-                    if macro_strict_trend == "bullish" and side == "short":
-                        _add_rejection(
+                    elif macro_strict_trend == "bullish" and side == "short":
+                        counter_trend_rejection = (
                             "Counter-trend SHORT rejected: 4H strict freight-train uptrend (price > EMA20 > EMA50)",
                             "COUNTER_4H_FREIGHT_TRAIN",
                         )
-                        continue
 
-                    # Scenario B & C: 1H aligns, but 4H Macro opposes (Intraday Counter-4H Swing)
+                if counter_trend_rejection is not None and not policy.allow_counter_trend_sweep:
+                    _add_rejection(counter_trend_rejection[0], counter_trend_rejection[1])
+                    continue
+
+                # Scenario B & C: Check 4H Macro Obstacles so neither counter-4H swings nor sweeps trade into a brick wall
+                if not (is_ranging and policy.ping_pong_enabled):
                     is_counter_4h = (macro_bias == "bullish" and side == "short") or (macro_bias == "bearish" and side == "long")
                     if is_counter_4h and macro_obstacles:
                         nearest_obstacle = None
@@ -1302,6 +1326,7 @@ class TriCoreSetupEngine:
                             entry_policy=entry_policy,
                             limit_zone_id=limit_zone_id,
                             policy=policy,
+                            atr=atr,
                             evidence=sweep_evidence,
                         )
                         candidates.append(result)
@@ -1310,6 +1335,10 @@ class TriCoreSetupEngine:
                             rejected_codes.extend(result.rejection_codes)
                     else:
                         _add_rejection("CVD evidence is not bound to the same swept swing/reclaim", "CVD_NOT_BOUND_TO_SWEEP")
+
+            if counter_trend_rejection is not None:
+                _add_rejection(counter_trend_rejection[0], counter_trend_rejection[1])
+                continue
 
             # -----------------------------------------------------------------
             # SETUP B: BOS/CHoCH + Order Block / FVG / Breaker Retest
@@ -1399,6 +1428,16 @@ class TriCoreSetupEngine:
                         or break_id_str.startswith("internal:")
                     )
                     if (
+                        policy.pause_displacement_retest
+                        and setup_type == "displacement_retest"
+                        and not is_unicorn
+                    ):
+                        _add_rejection(
+                            "Setup B (displacement_retest) paused: negative 193-signal expectancy (-0.39R net); only Breaker/FVG/Unicorn retests active",
+                            "DISPLACEMENT_RETEST_PAUSED",
+                        )
+                        continue
+                    if (
                         regime_label in {"ranging", "volatile"}
                         and (zone.kind == "ob" or is_internal_structure)
                         and not is_unicorn
@@ -1406,6 +1445,16 @@ class TriCoreSetupEngine:
                         _add_rejection(
                             f"Setup B ({setup_type}) suppressed in {regime_label} regime: Order Block / internal structure before sweep is an inducement trap (wait for Setup A liquidity sweep)",
                             "RANGING_INDUCEMENT_OB_SUPPRESSED",
+                        )
+                        continue
+                    if (
+                        policy.momentum_skip_extension_atr > 0
+                        and atr > 0
+                        and dist_from_edge > (policy.momentum_skip_extension_atr * atr)
+                    ):
+                        _add_rejection(
+                            f"Setup B ({setup_type}) skipped: price ran {dist_from_edge / atr:.2f} ATR > {policy.momentum_skip_extension_atr:.2f} ATR away from {zone.kind.upper()} (avoid stale limit / late chase)",
+                            "EXTENSION_EXCEEDS_MAX_ATR",
                         )
                         continue
                     threshold_extension = 0.05 * (atr if atr > 0 else entry * 0.005)
@@ -1435,6 +1484,13 @@ class TriCoreSetupEngine:
                             evidence_items.append(
                                 f"Proactive Trend Limit Armed at {zone_label} edge ({zone_edge:.4f}) after Swing BOS"
                             )
+                    elif (
+                        policy.momentum_skip_extension_atr > 0
+                        and not is_internal_structure
+                        and dist_from_edge <= (policy.momentum_skip_extension_atr * atr)
+                    ):
+                        disp_entry = entry
+                        disp_entry_policy = "market_eligible"
                     elif dist_from_edge > threshold_extension:
                         disp_entry = zone_edge
                         disp_entry_policy = "limit_retest_only"
@@ -1475,6 +1531,7 @@ class TriCoreSetupEngine:
                         entry_policy=disp_entry_policy,
                         limit_zone_id=str(getattr(zone, "zone_id", "")),
                         policy=policy,
+                        atr=atr,
                         evidence=evidence_items,
                     )
                     candidates.append(result)

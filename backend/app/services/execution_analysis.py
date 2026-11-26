@@ -305,6 +305,10 @@ class ExecutionAnalysisService:
             config["regime_policy"] = rp
         if "btc_anchor_filter_enabled" in runtime:
             tcp["btc_anchor_gate_enabled"] = bool(runtime.get("btc_anchor_filter_enabled", False))
+        tcp.setdefault("allow_counter_trend_sweep", True)
+        tcp.setdefault("pause_displacement_retest", True)
+        tcp.setdefault("momentum_skip_extension_atr", 0.50)
+        tcp.setdefault("min_sl_atr_multiple", 1.20)
         tcp["binance_trading_mode"] = str(runtime.get("binance_trading_mode", getattr(cfg, "binance_trading_mode", "futures"))).lower()
         config["tri_core_policy"] = tcp
         if "oi_tracker_enabled" in runtime:
@@ -713,12 +717,8 @@ class ExecutionAnalysisService:
                         )
                     htf_smc = await asyncio.to_thread(_run_htf_smc)
                     htf_smc_bias = str(htf_smc.bias or "neutral").lower()
-                    htf_ema_snapshot = compute_ema_trend_snapshot(htf_res)
-                    calculated_intraday_bias = resolve_intraday_trend_bias(
-                        htf_smc_bias,
-                        str(htf_ema_snapshot.get("ema_bias", "neutral")),
-                    )
-                    calculated_htf_bias = calculated_intraday_bias
+                    calculated_intraday_bias = htf_smc_bias
+                    calculated_htf_bias = htf_smc_bias
                 except Exception as htf_err:
                     logger.debug(f"HTF bias computation note: {htf_err}")
 

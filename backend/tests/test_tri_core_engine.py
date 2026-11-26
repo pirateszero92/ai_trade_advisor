@@ -1430,6 +1430,103 @@ def test_1h_ema_consensus_overrides_noisy_smc_flip():
     assert resolve_intraday_trend_bias("bullish", snap_short["ema_bias"]) == "bullish"
 
 
+def test_remediation_v2_counter_sweep_pause_ob_extension_skip_and_min_sl_atr():
+    """Verify 15m-remediation-v2 rules:
+    1) allow_counter_trend_sweep=True allows sweep_reversal against intraday_bias while blocking Setup B.
+    2) pause_displacement_retest=True pauses OB displacement_retest (-0.39R net) while keeping Breaker/FVG active.
+    3) momentum_skip_extension_atr=0.50 executes <=0.5 ATR as market_eligible and skips >0.5 ATR.
+    4) min_sl_atr_multiple=1.20 rejects SL < 1.2x ATR15 noise setups.
+    """
+    policy_v2 = {
+        "version": "15m-remediation-v2",
+        "allow_counter_trend_sweep": True,
+        "pause_displacement_retest": True,
+        "momentum_skip_extension_atr": 0.50,
+        "min_sl_atr_multiple": 1.20,
+    }
+
+    # 1) Counter-momentum sweep_reversal allowed when SL >= 1.2x ATR (frame ATR = 2.0 -> need SL >= 2.4)
+    sweep_sig = _signal()
+    sweep_sig.intraday_bias = "bearish"
+    sweep_sig.liquidity_sweep["extreme"] = 96.5  # entry ~98.5 -> SL ~96.3 -> risk ~2.2+ (> 1.2x ATR on tighter frame)
+    tight_frame = _frame().copy()
+    tight_frame["high"] = 100.5
+    tight_frame["low"] = 99.5
+    tight_frame["close"] = 100.0  # ATR = 1.0
+    sweep_sig.liquidity_sweep["extreme"] = 98.0
+    sweep_sig.liquidity_sweep["level"] = 99.6
+    sweep_sig.liquidity_sweep["reclaim_close"] = 100.0
+    sweep_sig.cvd_divergence_evidence["reclaim_close_price"] = 100.0
+    res_sweep = TriCoreSetupEngine.evaluate(sweep_sig, tight_frame, policy_v2)
+    assert res_sweep.actionable is True
+    assert res_sweep.setup_type == "sweep_reversal"
+    assert res_sweep.order_type == "limit"
+
+    # 2) Same sweep with tiny SL (< 1.2x ATR15) rejected by SL_BELOW_MIN_ATR_NOISE
+    noise_sig = _signal()
+    noise_sig.intraday_bias = "bearish"
+    noise_sig.liquidity_sweep["extreme"] = 99.2  # risk ~0.7 < 1.2 * 1.0
+    noise_sig.liquidity_sweep["level"] = 99.8
+    noise_sig.liquidity_sweep["reclaim_close"] = 100.0
+    noise_sig.cvd_divergence_evidence["reclaim_close_price"] = 100.0
+    res_noise = TriCoreSetupEngine.evaluate(noise_sig, tight_frame, policy_v2)
+    assert not res_noise.actionable
+    assert "SL_BELOW_MIN_ATR_NOISE" in res_noise.rejection_codes
+
+    # 3) OB displacement_retest is paused under policy_v2
+    ob_sig = _signal()
+    ob_sig.liquidity_swept = False
+    ob_sig.liquidity_sweep = {}
+    ob_sig.intraday_bias = "bullish"
+    ob_sig.market_regime = {"regime": "trending", "direction": "bullish"}
+    ob_sig.delta_ratio = 0.25
+    ob_sig.displacement = {
+        "direction": "long",
+        "index": 15,
+        "structure_break_index": 15,
+        "structure_break_id": "swing:BOS:bullish:15:100.0",
+    }
+    ob_sig.order_blocks = [
+        Zone("ob", "bullish", top=99.9, bottom=98.2, index=14, confirmed_index=15, source="swing")
+    ]
+    res_ob = TriCoreSetupEngine.evaluate(ob_sig, tight_frame, policy_v2)
+    assert not res_ob.actionable
+    assert "DISPLACEMENT_RETEST_PAUSED" in res_ob.rejection_codes
+
+    # 4) Breaker retest within <= 0.50 ATR enters market_eligible; > 0.50 ATR skips
+    brk_sig = _signal()
+    brk_sig.liquidity_swept = False
+    brk_sig.liquidity_sweep = {}
+    brk_sig.intraday_bias = "bullish"
+    brk_sig.market_regime = {"regime": "trending", "direction": "bullish"}
+    brk_sig.delta_ratio = 0.25
+    brk_sig.displacement = {
+        "direction": "long",
+        "index": 15,
+        "structure_break_index": 15,
+        "structure_break_id": "swing:BOS:bullish:15:100.0",
+    }
+    brk_sig.order_blocks = []
+    brk_sig.breaker_blocks = [
+        Zone("breaker", "bullish", top=99.7, bottom=98.3, index=12, confirmed_index=15, source="swing")
+    ]
+    res_brk_ok = TriCoreSetupEngine.evaluate(brk_sig, tight_frame, policy_v2)
+    assert res_brk_ok.actionable is True
+    assert res_brk_ok.setup_type in {"breaker_retest", "breaker_shallow_retest"}
+    assert res_brk_ok.entry_policy == "market_eligible"
+
+    # Price ran > 0.50 ATR above breaker top (close=100.0, top=99.2 -> dist=0.8 ATR > 0.5 ATR)
+    brk_sig.breaker_blocks = [
+        Zone("breaker", "bullish", top=99.2, bottom=97.8, index=12, confirmed_index=15, source="swing")
+    ]
+    tight_frame_ext = tight_frame.copy()
+    tight_frame_ext.loc[tight_frame_ext.index[17], "low"] = 99.1  # lineage touch happened earlier, now extended
+    res_brk_skip = TriCoreSetupEngine.evaluate(brk_sig, tight_frame_ext, policy_v2)
+    assert not res_brk_skip.actionable
+    assert "EXTENSION_EXCEEDS_MAX_ATR" in res_brk_skip.rejection_codes
+
+
+
 
 
 

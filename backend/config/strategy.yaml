@@ -13,13 +13,17 @@ description: >
 # snapshot records this version/status.  Promote changes only after anchored
 # walk-forward validation across multiple symbols and market regimes.
 tri_core_policy:
-  version: "15m-migration-v1"
+  version: "15m-remediation-v2"
   calibration_status: "draft_unvalidated"
   ttl_bars: 2
   market_entry_max_extension_atr: 0.50
   no_chase_max_extension_atr: 1.00
   zone_approach_distance_atr: 0.50
-  minimum_rr: 1.2
+  minimum_rr: 1.5
+  allow_counter_trend_sweep: true
+  pause_displacement_retest: true
+  momentum_skip_extension_atr: 0.50
+  min_sl_atr_multiple: 1.20
   # Candidate seeds: calibrate with chronological rolling walk-forward data.
   strong_divergence_min_price_excursion_atr: 0.50
   strong_divergence_min_cvd_efficiency: 0.10
